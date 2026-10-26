@@ -1,0 +1,53 @@
+// Native commands are explicit tasks; project sync never invokes CMake or downloads dependencies.
+def nativePython = providers.gradleProperty('nativePython').getOrElse('python')
+def nativeConfig = providers.gradleProperty('nativeConfig').getOrElse('Debug')
+def nativeParallel = providers.gradleProperty('nativeParallel').getOrElse('8')
+def radraySource = providers.gradleProperty('radraySourceDir').orNull
+if (!(nativeConfig in ['Debug', 'Release'])) {
+    throw new GradleException('nativeConfig must be Debug or Release')
+}
+def nativeScript = layout.projectDirectory.file('tools/native.py').asFile.absolutePath
+def registerNative = { String name, String command, String configuration ->
+    tasks.register(name, Exec) {
+        group = 'native'
+        description = "${command.capitalize()} the ${configuration} native payload"
+        workingDir layout.projectDirectory.asFile
+        commandLine nativePython, nativeScript, command, '--config', configuration, '--parallel', nativeParallel
+        if (radraySource != null) {
+            args '--radray-source', radraySource
+        }
+        // Let CMake/Ninja decide what is stale, including transitive RadRay sources.
+    }
+}
+def configureNative = registerNative('nativeConfigure', 'configure', nativeConfig)
+def buildNative = registerNative('nativeBuild', 'build', nativeConfig)
+buildNative.configure { dependsOn configureNative }
+def stageNative = registerNative('nativeStage', 'stage', nativeConfig)
+stageNative.configure { dependsOn buildNative }
+
+def configureRelease = registerNative('nativeConfigureRelease', 'configure', 'Release')
+def buildRelease = registerNative('nativeBuildRelease', 'build', 'Release')
+buildRelease.configure { dependsOn configureRelease }
+def stageRelease = registerNative('nativeStageRelease', 'stage', 'Release')
+stageRelease.configure { dependsOn buildRelease }
+// Avoid two chains writing the Release CMake tree concurrently in a combined invocation.
+configureRelease.configure { mustRunAfter stageNative }
+tasks.matching { it.name == 'runClientNative' }.configureEach { dependsOn stageNative }
+
+def javaJar = tasks.named('jar', Jar)
+def nativeJar = layout.buildDirectory.file("libs/${base.archivesName.get()}-${project.version}-windows-x86_64.jar")
+tasks.register('packageNativeMod', Exec) {
+    group = 'native'
+    description = 'Build and package a clean Release DLL with the Loom mod JAR and native licenses'
+    dependsOn javaJar, stageRelease
+    workingDir layout.projectDirectory.asFile
+    commandLine nativePython, nativeScript, 'package',
+        '--input-jar', javaJar.get().archiveFile.get().asFile.absolutePath,
+        '--output-jar', nativeJar.get().asFile.absolutePath
+}
+tasks.register('verifyNativePackage', Exec) {
+    group = 'verification'
+    description = 'Check the existing native mod JAR without configuring or compiling native code'
+    workingDir layout.projectDirectory.asFile
+    commandLine nativePython, nativeScript, 'verify', '--input-jar', nativeJar.get().asFile.absolutePath
+}
