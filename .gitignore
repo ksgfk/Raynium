@@ -1,0 +1,33 @@
+# Local Gradle state and generated artifacts
+.gradle/
+build/
+out/
+
+# Script-managed native dependency and machine-local CMake configuration
+/external/RadRay/
+/native/CMakeUserPresets.json
+/native/build/
+__pycache__/
+
+# IDE state (Loom regenerates Minecraft run configurations)
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.classpath
+.project
+.settings/
+
+# Local Minecraft installation, assets, logs and worlds
+run/
+runs/
+logs/
+crash-reports/
+
+# JVM dumps and OS files
+hs_err_pid*
+replay_pid*
+*.hprof
+.DS_Store
+Thumbs.db

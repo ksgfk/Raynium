@@ -1,0 +1,68 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+base {
+    archivesName = 'raynium'
+}
+
+loom {
+    splitEnvironmentSourceSets()
+
+    mods {
+        raynium {
+            sourceSet sourceSets.main
+            sourceSet sourceSets.client
+        }
+    }
+
+    runs {
+        client {
+            client()
+            configName = 'Minecraft Client (Raynium)'
+            ideConfigGenerated = true
+            runDir = 'run'
+            vmArg '--enable-native-access=ALL-UNNAMED'
+        }
+        clientNative {
+            inherit client
+            configName = 'Minecraft Client (Raynium Native)'
+            ideConfigGenerated = true
+            property 'raynium.native.required', 'true'
+            property 'raynium.native.dir', layout.buildDirectory.dir(
+                "native/stage/windows-x86_64/${providers.gradleProperty('nativeConfig').getOrElse('Debug')}"
+            ).get().asFile.absolutePath
+        }
+        remove server
+    }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+}
+
+processResources {
+    def properties = [
+        version: project.version,
+        minecraft_version: project.minecraft_version,
+        loader_version: project.loader_version
+    ]
+    inputs.properties properties
+    filesMatching('fabric.mod.json') {
+        expand properties
+    }
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(25)
+    withSourcesJar()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 25
+    options.encoding = 'UTF-8'
+}
+
+apply from: 'gradle/native.gradle'

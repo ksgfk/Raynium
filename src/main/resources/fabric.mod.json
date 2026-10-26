@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "raynium",
+  "version": "${version}",
+  "name": "Raynium",
+  "description": "Client rendering replacement powered by RadRay. Native bridge integration; rendering runtime is under development.",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["dev.raynium.client.RayniumClient"]
+  },
+  "mixins": [
+    {
+      "config": "raynium.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "minecraft": "${minecraft_version}",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}
