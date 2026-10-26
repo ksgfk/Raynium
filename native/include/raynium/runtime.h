@@ -5,7 +5,7 @@
 
 namespace raynium {
 
-// See doc/native-runtime-design.md for the runtime ownership contract.
+// See doc/architecture/native-runtime.md for the runtime ownership contract.
 class RayniumRuntime final {
 public:
     ~RayniumRuntime() noexcept;
