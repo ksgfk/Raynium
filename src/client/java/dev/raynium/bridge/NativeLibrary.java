@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 
 public final class NativeLibrary implements AutoCloseable {
     private final Arena arena;
+    private final NativeBindings bindings;
     private boolean closed;
 
     public NativeLibrary(NativeLibraryLocator.Payload payload, Logger logger) {
@@ -15,23 +16,28 @@ public final class NativeLibrary implements AutoCloseable {
         arena = Arena.ofShared();
         try {
             SymbolLookup lookup = SymbolLookup.libraryLookup(payload.libraryPath(), arena);
-            NativeBindings.Probe probe = new NativeBindings(lookup).inspect(payload.manifest());
+            bindings = new NativeBindings(lookup);
+            int abiVersion = bindings.inspect(payload.manifest());
             NativeManifest manifest = payload.manifest();
             logger.info("Raynium native loaded from {}: {}", payload.source(), payload.libraryPath());
             logger.info("Native ABI={} build={} RadRay={} dirty={} config={} CRT=MT toolchain={}",
-                    probe.abiVersion(), manifest.buildId(), manifest.radrayCommit(), manifest.radrayDirty(),
+                    abiVersion, manifest.buildId(), manifest.radrayCommit(), manifest.radrayDirty(),
                     manifest.configuration(), manifest.toolchain());
-            logger.info("Native probes: RadRay vertex stride={}, mimalloc allocation mask={}", probe.vertexStride(), probe.allocatorMask());
         } catch (RuntimeException | Error failure) {
             arena.close();
             throw failure;
         }
     }
 
+    NativeBindings bindings() {
+        if (closed) throw new IllegalStateException("Native library is closed");
+        return bindings;
+    }
+
     @Override
     public void close() {
         if (!closed) {
-            // Future runtime workers and callbacks must stop before the library arena is closed.
+            // The owning NativeRuntime must destroy its handle before unloading the DLL.
             arena.close();
             closed = true;
         }

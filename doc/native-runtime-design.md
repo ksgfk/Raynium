@@ -2,7 +2,30 @@
 
 native runtime 接收通用渲染资源和完整帧输入，调用 native 渲染管线，通过 RadRay RHI 执行并输出画面。它负责让数据在正确的时间可用、让 pass 在正确的状态下执行，并让资源在最后一次使用结束后释放。
 
-状态：详细实施提案，尚未实现。Windows + RadRay RHI 和 Java/native 职责边界已确认；本文的类型名、接口及默认策略仍是建议。基线为 2026-10-26 的工作区。MC 接入及跨语言封装见 [实现设计](implementation-design.md)。
+状态：`RayniumRuntime` 的设备会话已实现；资源服务、管线、完整帧与输出仍是详细实施提案。Windows + RadRay RHI 和 Java/native 职责边界已确认。基线为 2026-10-26 的工作区。MC 接入及跨语言封装见 [实现设计](implementation-design.md)。
+
+## 当前实现：设备会话
+
+`native/include/raynium/runtime.h` 与 `native/src/runtime.cpp` 定义不可复制、不可移动的 `raynium::RayniumRuntime`，编译进 `rayniumruntime.dll`，通过 RadRay RHI 创建一个设备及一条 Direct 队列。`static bool Create(backend, output, error)` 是唯一创建入口：先在局部 RAII 对象中准备 Factory/环境、Device 和 Queue，全部成功后才调用私有构造函数。没有默认构造或 Initialize；成功返回 true 并交付有效对象，失败返回 false 和诊断字符串，不产生半初始化 runtime。output 必须为空，失败不改动它。本阶段没有 swapchain、资源表、渲染管线或帧提交，MC 继续原版绘制。
+
+Java `NativeRuntime` 拥有不透明的 `rn_runtime*` 和 DLL。`RayniumClient` 在 Fabric `CLIENT_STARTED` 创建它，在 `CLIENT_STOPPING` 关闭它。两处均在 MC 渲染线程；创建不依赖世界加载，资源重载、进出世界不重建 runtime。`CLIENT_STARTED` 位于 `Minecraft.run()` 的异常捕获之前，所以 Java 初始化失败时显式构造 CrashReport 并调用 `emergencySaveAndCrash`，不依赖主循环捕获。
+
+默认 D3D12，`raynium.rhi.backend=d3d12|vulkan` 显式选择；所选后端失败时清理创建过程的局部资源并终止启动，不自动切换后端。普通 Java 开发运行未选择 native payload 时保持原有可选模式。初始化/销毁 C ABI 与参数规则以 [Native 工程操作](native-development.md#c-abi-与内存边界) 和 `bridge.h` 为准。
+
+| 后端 | 创建顺序 | 清理顺序 |
+| --- | --- | --- |
+| D3D12 | DXGI Factory → 高性能适配器 → Device → Direct Queue | 队列 Wait → Device → Factory |
+| Vulkan | InitEnv → 高性能物理设备 → Device → Direct Queue | 队列 Wait → Device → ShutdownEnv |
+
+队列是设备所有的借用对象，不单独 delete。Create 的局部 guard 只在本次取得 Vulkan 环境所有权后负责 ShutdownEnv；成功构造后将该责任交给 runtime；RadRay 目前只允许一个活跃 Vulkan 环境。宿主契约是每客户端一个活跃 runtime，释放后可以重新创建。新代码不增加全局 registry，也不支持跨线程并发访问 RHI。
+
+Debug 启用 RadRay 默认 RHI 校验，Release 关闭；驱动调试层、同步验证层和 GPU validation 均未开启。日志包含创建阶段、后端、GPU 名称和队列等待，底层具体失败原因仍由 RadRay 输出。不通过 Java upcall 收集日志，不新增 C++ try/catch；RHI 返回的可恢复失败转换为状态码，底层异常或不可恢复驱动错误不承诺生成 Java 崩溃报告。
+
+正常退出严格先销毁 runtime，再关闭 library arena。当前没有 native 工作线程或回调。强杀进程、JVM/native 崩溃及其他模组提前终止生命周期事件不保证执行关闭回调；不通过 shutdown hook 在未知线程操作 RHI。
+
+## 后续功能提案
+
+下文描述未来资源与管线能力；除上述设备会话外，不能据此认为这些功能已经实现。
 
 ## 职责与边界
 
@@ -28,7 +51,7 @@ FFM、JNI、C ABI 的字节解码属于 bridge。runtime 的主要接口是普�
 
 | 对象 | 定义和寿命 |
 | --- | --- |
-| `RenderRuntime` | 一个设备会话上的资源与执行环境；第一版独占该设备的 CPU 调用调度 |
+| `RayniumRuntime` | 现已拥有设备会话；后续扩展资源与执行环境，独占设备的 CPU 调用调度 |
 | `OutputHandle` | swapchain 输出或离屏输出；销毁不等于销毁宿主窗口 |
 | `PipelineHandle` | 一个 native 管线实例，拥有其材质 schema、布局、PSO 和历史状态 |
 | `MeshHandle` | 持久网格的公开身份，独立于绘制实例 |
@@ -40,10 +63,10 @@ FFM、JNI、C ABI 的字节解码属于 bridge。runtime 的主要接口是普�
 
 首版一个 runtime 使用一条 direct/graphics queue，允许一个主要窗口输出和管线内部离屏目标。多窗口独立 present、多个执行线程和多队列并行均后置，不在类型名中写死 MC 主窗口。
 
-设备创建策略放在 bootstrap 层。它按 RadRay 配置创建设备，并把设备会话交给 runtime；runtime 核心不重新设计后端选择系统，也不允许宿主在它工作时绕过调度器操作同一设备。
+设备创建已集中在 `RayniumRuntime::Create` 中，通过 RadRay 现有工厂选择适配器并创建设备；后续资源与管线代码面向 RHI，不散布后端分支，也不允许宿主绕过调度器操作同一设备。
 
 ```text
-RenderRuntime
+RayniumRuntime
   DeviceSession
   ResourceStore
   UploadService
@@ -228,7 +251,7 @@ v1 只复用已结束全部引用的对象，不做不同逻辑图像共享同�
 
 ### 管线生命周期
 
-`IRenderPipeline` 建议提供能力与 schema 查询、初始化、输入验证、资源准备、构造 FramePlan、输出变化通知和销毁入口。第一版使用编译进程序的 native 实现，不引入动态 DLL 管线插件 ABI。
+`IRenderPipeline` 通过工厂创建完备实例；实例提供能力与 schema 查询、输入验证、资源准备、构造 FramePlan、输出变化通知和销毁入口，不提供构造后的 Init/Initialize。第一版使用编译进程序的 native 实现，不引入动态 DLL 管线插件 ABI。
 
 runtime 向管线提供受控服务：资源解析、临时目标、上传切片、参数集、历史资源和诊断。管线保持自己的材质模型、draw 排序与 shader 选择，runtime 不为某种 forward/deferred/光追算法添加固定字段。
 

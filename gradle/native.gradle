@@ -38,7 +38,7 @@ def javaJar = tasks.named('jar', Jar)
 def nativeJar = layout.buildDirectory.file("libs/${base.archivesName.get()}-${project.version}-windows-x86_64.jar")
 tasks.register('packageNativeMod', Exec) {
     group = 'native'
-    description = 'Build and package a clean Release DLL with the Loom mod JAR and native licenses'
+    description = 'Build and package the clean Release rayniumruntime DLL with the Loom mod JAR and native licenses'
     dependsOn javaJar, stageRelease
     workingDir layout.projectDirectory.asFile
     commandLine nativePython, nativeScript, 'package',
@@ -50,4 +50,22 @@ tasks.register('verifyNativePackage', Exec) {
     description = 'Check the existing native mod JAR without configuring or compiling native code'
     workingDir layout.projectDirectory.asFile
     commandLine nativePython, nativeScript, 'verify', '--input-jar', nativeJar.get().asFile.absolutePath
+}
+
+tasks.register('nativeTest', Test) {
+    group = 'verification'
+    description = 'Run JUnit tests against the staged DLL and real D3D12/Vulkan devices (requires GPU drivers)'
+    dependsOn tasks.named('testClasses'), stageNative
+    shouldRunAfter tasks.named('test')
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform { includeTags 'native' }
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+    maxParallelForks = 1
+    systemProperty 'junit.jupiter.execution.parallel.enabled', 'false'
+    systemProperty 'raynium.native.dir', layout.buildDirectory.dir("native/stage/windows-x86_64/${nativeConfig}").get().asFile.absolutePath
+    // GPU/driver state is external to Gradle's inputs; explicit invocations always run.
+    outputs.upToDateWhen { false }
+    outputs.cacheIf { false }
 }

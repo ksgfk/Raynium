@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(RayniumNative VERSION 0.1.0 LANGUAGES C CXX)
+project(RayniumRuntime VERSION 0.1.0 LANGUAGES C CXX)
 
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "Raynium native currently requires a 64-bit Windows MSVC-compatible toolchain. Use an x64 developer terminal and the supplied presets.")
@@ -82,6 +82,8 @@ set(RADRAY_BUILD_BENCHMARKS OFF)
 set(RADRAY_BUILD_COMPILE_COMMANDS OFF)
 set(RADRAY_BUILD_WINDOW OFF)
 set(RADRAY_BUILD_RENDER ON)
+set(RADRAY_ENABLE_D3D12 ON)
+set(RADRAY_ENABLE_VULKAN ON)
 set(RADRAY_BUILD_SHADER OFF)
 set(RADRAY_BUILD_SHADER_COMPILER OFF)
 set(RADRAY_BUILD_SHADER_TOOLS OFF)
@@ -95,18 +97,20 @@ set(RADRAY_INSTALL OFF)
 
 add_subdirectory("${RADRAY_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/radray")
 
-add_library(raynium_bridge SHARED src/bridge.cpp include/raynium/bridge.h)
-target_compile_features(raynium_bridge PRIVATE cxx_std_20)
-target_include_directories(raynium_bridge PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_BINARY_DIR}/generated")
-target_compile_definitions(raynium_bridge PRIVATE RAYNIUM_BRIDGE_EXPORTS)
-target_compile_options(raynium_bridge PRIVATE /W4 /permissive- /utf-8)
-target_link_libraries(raynium_bridge PRIVATE RadRay::render)
-set_target_properties(raynium_bridge PROPERTIES
+add_library(rayniumruntime SHARED
+    src/bridge.cpp include/raynium/bridge.h
+    src/runtime.cpp include/raynium/runtime.h)
+target_compile_features(rayniumruntime PRIVATE cxx_std_20)
+target_include_directories(rayniumruntime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_BINARY_DIR}/generated")
+target_compile_definitions(rayniumruntime PRIVATE RAYNIUM_RUNTIME_EXPORTS)
+target_compile_options(rayniumruntime PRIVATE /W4 /permissive- /Zc:preprocessor /utf-8)
+target_link_libraries(rayniumruntime PRIVATE RadRay::render)
+set_target_properties(rayniumruntime PROPERTIES
     CXX_EXTENSIONS OFF
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
-install(TARGETS raynium_bridge RUNTIME DESTINATION . COMPONENT runtime)
+install(TARGETS rayniumruntime RUNTIME DESTINATION . COMPONENT runtime)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/bin/native-build.json" DESTINATION . COMPONENT runtime)

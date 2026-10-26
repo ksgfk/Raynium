@@ -120,15 +120,15 @@ def collect_licenses(radray, destination):
 
 def check_manifest(manifest):
     if (manifest.get('schemaVersion') != 1 or manifest.get('platform') != 'windows-x86_64'
-            or manifest.get('abiVersion') != 1 or manifest.get('abiInfoSize') != 240
+            or manifest.get('abiVersion') != 3 or manifest.get('abiInfoSize') != 240
             or manifest.get('crt') != 'MT' or manifest.get('configuration') not in ('Debug', 'Release')
             or not isinstance(manifest.get('radrayDirty'), bool)):
         raise RuntimeError('Unsupported native manifest.')
     for key, length in (('buildId', 64), ('radrayCommit', 40)):
         if not re.fullmatch('[0-9a-f]{' + str(length) + '}', manifest.get(key, '')):
             raise RuntimeError(f'Invalid native manifest {key}.')
-    if [entry['path'] for entry in manifest.get('files', [])] != ['raynium_bridge.dll']:
-        raise RuntimeError('The current payload must contain exactly raynium_bridge.dll.')
+    if [entry['path'] for entry in manifest.get('files', [])] != ['rayniumruntime.dll']:
+        raise RuntimeError('The current payload must contain exactly rayniumruntime.dll.')
     if not manifest.get('licenses'):
         raise RuntimeError('Native license files are missing.')
     seen = set()
@@ -167,7 +167,7 @@ def current_snapshot(stage):
 
 def stage_native(root, binary, radray, config, environment):
     metadata = read_json(binary / 'bin/native-build.json')
-    dll = binary / 'bin/raynium_bridge.dll'
+    dll = binary / 'bin/rayniumruntime.dll'
     revision = run(['git', '-C', str(radray), 'rev-parse', 'HEAD'], root, environment, True).stdout.strip()
     dirty = bool(run(['git', '-C', str(radray), 'status', '--porcelain', '--untracked-files=normal'], root, environment, True).stdout.strip())
     if metadata.get('radrayCommit') != revision or metadata.get('radrayDirty') != dirty or metadata.get('configuration') != config:
@@ -280,7 +280,7 @@ def main():
         if args.command == 'configure':
             run(['cmake', '--preset', 'win-x64-' + args.config.lower(), '-DRADRAY_SOURCE_DIR=' + str(radray)], root / 'native', environment)
         elif args.command == 'build':
-            run(['cmake', '--build', str(binary), '--target', 'raynium_bridge', '--parallel', str(args.parallel)], root, environment)
+            run(['cmake', '--build', str(binary), '--target', 'rayniumruntime', '--parallel', str(args.parallel)], root, environment)
         else:
             stage_native(root, binary, radray, args.config, environment)
 

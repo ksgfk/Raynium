@@ -23,6 +23,7 @@ loom {
             ideConfigGenerated = true
             runDir = 'run'
             vmArg '--enable-native-access=ALL-UNNAMED'
+            property 'raynium.rhi.backend', providers.gradleProperty('rhiBackend').getOrElse('d3d12')
         }
         clientNative {
             inherit client
@@ -41,6 +42,9 @@ dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
     implementation "net.fabricmc:fabric-loader:${project.loader_version}"
     implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+    testImplementation platform("org.junit:junit-bom:${project.junit_version}")
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 processResources {
@@ -63,6 +67,10 @@ java {
 tasks.withType(JavaCompile).configureEach {
     options.release = 25
     options.encoding = 'UTF-8'
+}
+
+tasks.named('test', Test) {
+    useJUnitPlatform { excludeTags 'native' }
 }
 
 apply from: 'gradle/native.gradle'

@@ -2,7 +2,7 @@
 
 Raynium 的 Java 层把 Minecraft 的资源、场景和界面转换为通用数据；native runtime 管理 GPU 资源和帧生命周期；具体 native 管线组织绘制并通过 RadRay RHI 输出画面。
 
-状态：渲染 runtime 与 MC 渲染接管仍为实施提案。native 构建、FFM 加载、ABI/分配器探针和 Release 打包已接入并完成本机基础验证，操作及范围见 [Native 工程操作](native-development.md)。已确认平台为 Windows，渲染层面向 RadRay RHI，Raynium 不分别实现 Vulkan 和 D3D12 接入。其余具体接口和实施顺序是下面提出的默认方案。MC 源码基线为本机生成的 26.3 源码，整理日期为 2026-10-26。
+状态：runtime 的 RHI 设备会话和 Java 生命周期已实现；资源、管线与 MC 渲染接管仍为实施提案。`rayniumruntime.dll` 的构建、FFM 加载、ABI 检查和 Release 打包已接入并完成本机基础验证；临时探针已删除，ABI 为 `3`。操作及范围见 [Native 工程操作](native-development.md)，跨语言契约的实施建议见 [FFM 互操作](ffm-interop.md)。已确认平台为 Windows，渲染层面向 RadRay RHI，Raynium 不分别实现 Vulkan 和 D3D12 接入。其余具体接口和实施顺序是下面提出的默认方案。MC 源码基线为本机生成的 26.3 源码，整理日期为 2026-10-26。
 
 职责边界见 [渲染接入设计](rendering-design.md)，已有模组的做法见 [接入调研](native-mod-research.md)。本文负责说明实现方式和先后依赖。
 
@@ -32,11 +32,11 @@ flowchart TD
 
 ## 模块与所有权
 
-以下是渲染阶段的组件划分。基础 bridge 已存在；`NativeBridge` 的加载与探针职责目前由 `NativeLibrary`、`NativeLibraryLocator`、`NativeBindings`、`NativeManifest` 承担，其余渲染组件尚未实现。
+以下是渲染阶段的组件划分。基础 bridge 已存在；`NativeBridge` 的加载与 ABI 检查职责目前由 `NativeLibrary`、`NativeLibraryLocator`、`NativeBindings`、`NativeManifest` 承担，`NativeRuntime` 已拥有 native runtime 与 DLL，其余渲染组件尚未实现。
 
 | 组件 | 所属 | 责任 |
 | --- | --- | --- |
-| `RayniumClientContext` | Raynium Java | 持有当前会话、各适配器和 native context，统一启停 |
+| `RayniumClientContext` | Raynium Java | 持有当前会话、各适配器和 native runtime，统一启停 |
 | `NativeBridge` | Raynium Java | 加载 DLL、FFM 调用、ABI 协商及诊断读取 |
 | `ResourceRegistry` | Raynium Java | MC 资源身份到 native 句柄的映射及资源重载代次 |
 | `TerrainAdapter` | Raynium Java | 标脏、区块任务、网格结果和可见区块列表 |
@@ -44,30 +44,26 @@ flowchart TD
 | `GuiAdapter` | Raynium Java | GUI 元素、字形、裁剪矩形、物品预览和模糊边界 |
 | `FramePacketWriter` | Raynium Java | 将本帧结果写入连续 native 内存 |
 | `WindowBridge` | Raynium Java | SDL 窗口到 HWND、尺寸、最小化和关闭通知 |
-| `raynium_bridge` | Raynium native | C ABI 校验及调用转换，不解释 MC 场景 |
-| `RenderRuntime` | RadRay 拟新增模块 | 资源表、上传、在途帧、延迟释放、输出目标 |
-| `ForwardPipeline` | RadRay 拟新增管线 | 材质、pass、shader、透明、后处理和 GUI 绘制 |
+| `rayniumruntime` | Raynium native | C ABI 校验及调用转换，不解释 MC 场景 |
+| `RayniumRuntime` | Raynium native | 已创建设备/Direct 队列；资源表、上传、在途帧、延迟释放与输出目标后续加入 |
+| `ForwardPipeline` | Raynium native 拟新增管线 | 材质、pass、shader、透明、后处理和 GUI 绘制 |
 
-建议目录组织如下，实际落地时按 RadRay 模块规则建立 `.h` / `.cpp` 同名文件对：
+runtime 当前位于 Raynium 的 native 工程，`.h` / `.cpp` 同名配对；管线后续加入，不要求先在 RadRay 新建模块：
 
 ```text
 Raynium/
   src/client/java/dev/raynium/
     client/ bridge/ resource/ terrain/ feature/ gui/ frame/ mixin/
   native/include/raynium/bridge.h
+  native/include/raynium/runtime.h
   native/src/bridge.cpp
-
-RadRay/
-  modules/runtime/include/radray/runtime/
-  modules/runtime/src/
-  modules/runtime/tests/
-  modules/pipelines/include/radray/pipelines/
-  modules/pipelines/src/
+  native/src/runtime.cpp
+  src/test/java/dev/raynium/bridge/  # JUnit 配置、ABI 和 runtime 测试
 ```
 
-依赖方向建议为 `runtime → render/core`、`pipelines → runtime/shader`、`raynium_bridge → runtime/pipelines`。shadercompiler 只出现在离线 shader 构建工具中。通用模块不依赖 Minecraft、Fabric、SDL Java 绑定或 FFM。
+当前依赖为 `rayniumruntime → RadRay::render/core`。未来管线依赖 runtime 与 shader 支持层。shadercompiler 只出现在离线 shader 构建工具中。通用模块不依赖 Minecraft、Fabric、SDL Java 绑定或 FFM。
 
-runtime 采用实例所有权：资源表、帧池、管线和诊断队列都由 context 持有。Java context 挂在客户端实例生命周期内；不新增全局资源注册表、全局回调或共享静态缓存。
+runtime 采用实例所有权：资源表、帧池、管线和诊断队列都由 runtime 持有。Java runtime 挂在客户端实例生命周期内；不新增全局资源注册表、全局回调或共享静态缓存。
 
 ## 通用数据契约
 
@@ -141,34 +137,34 @@ Java 25 提供 `Linker`、`MemorySegment` 和 `Arena`。FFM 可以调用普通 C
 
 第一版不逐顶点跨 FFI，不从 native 调回 Java 获取场景，也不从 GPU 完成线程调用 Java。诊断采用有界缓冲区，由 Java 主动读取。
 
-开发启动参数显式允许绑定所在模块的 native access；若 Fabric 加载的绑定处于 unnamed module，使用 `--enable-native-access=ALL-UNNAMED`。DLL 的加载 arena 和 downcall handle 至少活到 context 销毁完成，不能依赖 GC 决定 GPU 资源或动态库的关闭时机。
+开发启动参数显式允许绑定所在模块的 native access；若 Fabric 加载的绑定处于 unnamed module，使用 `--enable-native-access=ALL-UNNAMED`。DLL 的加载 arena 和 downcall handle 至少活到 runtime 销毁完成，不能依赖 GC 决定 GPU 资源或动态库的关闭时机。
 
-建议导出以下操作。名称是接口草案，不是现有符号：
+以下为现有入口与未来扩展；资源、帧和输出入口仍是草案。当前 ABI 的权威说明见 [Native 工程操作](native-development.md#c-abi-与内存边界)：
 
 | 操作 | 输入与结果 | 语义 |
 | --- | --- | --- |
 | `rn_query_abi` | ABI 版本、布局信息、特性位 | 加载后先协商，不匹配则不启用渲染替换 |
-| `rn_create_context` | Windows 输出窗口、runtime 配置 → context | 内部按 RadRay 配置创建设备和管线 |
+| `rn_create_runtime` | struct_size、后端 → 不透明 runtime | 已实现：仅创建设备与 Direct 队列，不接受窗口或创建管线 |
 | `rn_apply_resources` | 批量资源命令 → 每项状态、句柄 | 创建、区域更新、替换及逻辑删除 |
 | `rn_pump_resources` | 上传预算 → 进度/背压结果 | 不渲染画面时也能推进已接受资源 |
 | `rn_render_frame` | output、pipeline、FramePacket → 提交/输出结果 | 消费 CPU 数据，内部完成 acquire、录制、submit 与 present |
 | `rn_read_diagnostics` | 调用方缓冲区 → 条目 | 错误、能力与运行统计 |
 | `rn_resize_output` | 尺寸、呈现策略 → 状态 | 在完整帧调用之间改变输出 |
-| `rn_destroy_context` | context | 排空在途工作后销毁 |
+| `rn_destroy_runtime` | runtime | 已实现：等待队列、销毁设备/环境；Java 随后卸载 DLL |
 
 backend 不进入 Raynium 的材质、帧包或 Mixin 分支。runtime 的设备工厂集中调用 RadRay 现有设备创建接口，并消费 RadRay 的设备配置；不能假定当前 RHI 已经有一个无需实现的默认设备工厂。
 
 ### ABI 约束
 
-入口采用 C linkage、固定宽度整数、opaque context 和明确的输入输出容量，不传 C++ 容器、引用、异常或 Java 对象。批量数据采用一段内存加 offset/count；首版支持 Windows x64、小端。逐项定义字段宽度、对齐和 stride，不能直接把 C++ 编译器布局当成 wire 格式。
+入口采用 C linkage、固定宽度整数、opaque runtime 和明确的输入输出容量，不传 C++ 容器、引用、异常或 Java 对象。批量数据采用一段内存加 offset/count；首版支持 Windows x64、小端。逐项定义字段宽度、对齐和 stride，不能直接把 C++ 编译器布局当成 wire 格式。
 
 结构定义以一份 ABI 描述为权威，生成或集中维护两侧布局；`rn_query_abi` 返回协议版本及布局指纹。序列化格式修改必须升级版本，不能静默改变同名结构大小。
 
-资源句柄建议使用 64 位的 index + generation，0 表示空。句柄只在所属 context 内有效，按资源种类和代次检查；跨 context 传递不受支持。代次耗尽时退役槽位，避免旧句柄重新变为有效。
+资源句柄建议使用 64 位的 index + generation，0 表示空。句柄只在所属 runtime 内有效，按资源种类和代次检查；跨 runtime 传递不受支持。代次耗尽时退役槽位，避免旧句柄重新变为有效。
 
 `rn_apply_resources` 返回逐项结果，第一版不承诺整个批次原子成功。新纹理先创建并取得句柄，再创建引用它的材质；Java 只发布成功且依赖完整的资源组合。创建失败时保留旧资源或使用明确的 missing material。
 
-错误状态至少区分 ABI 不匹配、无效数据、过期句柄、资源不足、输出暂不可用、设备丢失。native 不通过新增 `catch (...)` 把任意异常转成成功或空结果；实施时遵守 RadRay 的异常约束，C 边界不允许 C++ 异常外溢。
+当前状态只分 `RN_STATUS_OK` / `RN_STATUS_FAILED`，ABI 不匹配、无效数据、资源不足等具体原因写在诊断字符串中，不继续扩展状态枚举。native 不通过新增 `catch (...)` 把任意异常转成成功或空结果；实施时遵守 RadRay 的异常约束，C 边界不允许 C++ 异常外溢。
 
 ### CPU 内存寿命
 
@@ -386,8 +382,8 @@ shader 使用 RadRay 的 shader 工具链离线生成产物。native 管线加�
 
 第一批只实现可驱动的通用基础：
 
-1. 确定 C ABI 布局、状态和 CPU 内存寿命，建立最小 `NativeBridge`。
-2. 在 RadRay 增加 runtime context、资源句柄表、单队列与两个帧槽。
+1. 已完成 C ABI 布局、状态、FFM 所有权、设备/Direct 队列及 MC 生命周期接入。
+2. 在 Raynium 的 `RayniumRuntime` 增加资源句柄表与两个帧槽。
 3. 加入一套只绘制纹理三角形/网格的 native 管线及离线 shader 产物。
 4. 用独立宿主传入 HWND、一个 mesh、一张纹理、一个 view 和 draw item。
 5. Java 以相同资源和帧数据调用它，再开始 MC 窗口与基础 GUI 接管。

@@ -1,19 +1,24 @@
 # Native 构建、加载与分发
 
-已实现 RadRay 固定版本拉取、`/MT` bridge、Gradle 显式 native 任务、Java 25 FFM loader 与 Release mod JAR 打包。当前只做 ABI、RadRay 调用和分配器探针，游戏继续使用原版渲染；runtime 和渲染 Mixin 尚未实现。本机编译与启动验证结果见下文，命令供后续复现。
+已实现 RadRay 固定版本拉取、`/MT` native 库、Gradle 显式 native 任务、Java 25 FFM loader 与 Release mod JAR 打包。库名和 CMake target 为 `rayniumruntime`，已实现 ABI/构建身份检查、RHI 设备/Direct 队列和 Java 生命周期；游戏继续使用原版渲染，资源、管线及渲染接管尚未实现。FFM 实施建议见 [互操作设计](ffm-interop.md)。
 
 ## 本机验证范围
 
 2026-10-26，Windows x64、Temurin JDK 25.0.4、MSVC 19.51.36260.0、固定 RadRay `95f725a35ced0a52ae0706207582788c011914ca`：
 
-- 经 `127.0.0.1:10808` 恢复 core/render 所需的 15 个第三方源码，并分别构建 Debug/Release 静态 CRT SDK。
-- `build`、`nativeStage`、`packageNativeMod`、`verifyNativePackage` 均成功；Gradle configuration cache 正常写入，后续 native 增量构建报告无须重编译。
-- `runClientNative` 启动 MC 26.3，Python 只读窗口截图确认进入首次欢迎界面，进程与窗口响应正常。日志确认 Debug DLL 加载、ABI `1`、RadRay 顶点 stride `12`、mimalloc mask `7`，实际 revision 与锁一致。
-- 独立 Java 进程使用最终 Release JAR 中的 Java 类和 DLL，通过 ZIP 文件系统提供 `ModContainer.findPath`，验证内置 payload 解包、内容缓存复用、FFM 探针、两次加载/关闭，以及构建身份不符、缓存被修改、缺少 native access 的拒绝路径。这覆盖 loader 的 JAR 路径，不等于另行安装到正式启动器后的整机测试。
+- core/render 所需的 15 个第三方包已通过代理恢复并准备 Debug/Release 静态 CRT SDK。
+- `nativeStage packageNativeMod` 成功，包含 Java 编译、Debug/Release DLL 构建和 Release JAR 打包检查。新增 runtime create/destroy；临时探针保持删除。
+- 标准 JUnit `test` 的 3 个纯 Java 用例通过；ABI 3 / 静态 Create 重构后，Debug/Release `nativeTest` 各 22 个用例通过（含新增 query 诊断与失败不改写 info 的检查），无失败、无跳过：在 NVIDIA GeForce RTX 3060 上分别创建、销毁和重新创建 D3D12/Vulkan 设备与 Direct 队列，验证错误参数、输出清空、诊断截断、空指针销毁、Java 错误线程关闭和重复关闭。Vulkan 环境被占用时返回初始化失败，失败对象不破坏已有实例，释放后可重建。Debug 日志确认 RHI validation=true，Release=false。
+- JUnit 迁移时，普通 `build` 通过且未触发 native 构建；确认 JAR 不含测试类/JUnit。相同 Release `nativeTest` 再次运行复用了 Gradle 配置缓存，但仍实际执行测试。最后细化 create 参数诊断后，Debug/Release 各重跑 15 个 `NativeAbiTest` 用例通过。
+- 独立 Java 进程使用最终 Release JAR 中的 Java 类和 DLL，通过 ZIP 文件系统提供 `ModContainer.findPath`，验证 `rayniumruntime.dll`、ABI `3`、内置 payload 解包、缓存复用、两次加载/关闭、D3D12/Vulkan 真实 RHI 创建/销毁，以及构建身份不符、缓存被修改、缺少 native access 的拒绝路径。Debug/Release 导出均只有版本、查询、create 和 destroy 四个入口。
+- 此前 ABI 2 的 MC 26.3 开发客户端分别用 D3D12/Vulkan 完成真实 RHI 初始化、运行 100 个 tick 并正常退出（进程码 0）。忽略目录中的测试 mod 调用 `client.stop()`；日志确认渲染线程 CLIENT_STOPPING → 等待队列 → runtime destroyed → DLL closed，没有桌面输入或生产测试钩子。
+- 此前 ABI 2 额外通过完整 `runClientNative -PrhiBackend=vulkan` Gradle 链启动并正常退出，确认参数转发；测试 fixture 仅通过忽略目录中的 init script 注入。
+- 此前 ABI 2 的隔离客户端由测试 fixture 预先占用 Vulkan 环境，真实 RHI 创建失败后确认关闭本次 DLL 引用，MC 生成包含后端、DLL/build ID、RadRay commit 和当时 status=3 的崩溃报告（当前统一为 FAILED=1）并退出（-1），没有退回原版启动。
+- 此次 ABI 3 / 静态 Create 重构未重跑 MC 客户端。未进入世界、未验证 swapchain/绘制、设备丢失或正式启动器安装。独立 JAR 测试不替代正式启动器验证。
 
 产物为 `build/libs/raynium-0.1.0-SNAPSHOT-windows-x86_64.jar`。本机验证脚本、日志和截图保存在忽略目录 `build/verification/`；不是随 mod 分发的文件。
 
-本次未进入世界或验证渲染替换。开发账号的 Realms 认证错误来自离线开发令牌；不影响客户端欢迎界面和 native 初始化。Release 编译存在 RadRay D3D12/Vulkan 实现中的 C4702 不可达代码警告，未造成构建失败。
+此前开发账号的 Realms 认证错误来自离线开发令牌；RadRay 完整 Release 编译中的 C4702 不可达代码警告未造成构建失败。当前初始化会执行真实 RadRay RHI 设备/队列创建，但尚无渲染提交；不能据此声称已替换 MC 渲染。
 
 ## 文件入口
 
@@ -21,11 +26,13 @@
 |---|---|
 | `native/radray.lock.json`、`tools/fetch_radray.py` | 固定上游提交、经代理显式拉取普通 Git checkout |
 | `native/CMakeLists.txt`、`native/CMakePresets.json` | C++20 bridge、静态 CRT、独立 Debug/Release 目录与构建身份 |
-| `native/include/raynium/bridge.h`、`native/src/bridge.cpp` | 固定尺寸 C ABI 和不创建设备的探针 |
+| `native/include/raynium/bridge.h`、`native/src/bridge.cpp` | C ABI 查询与 runtime create/destroy |
+| `native/include/raynium/runtime.h`、`native/src/runtime.cpp` | 设备/Direct 队列、后端初始化及逆序清理 |
+| `src/test/java/dev/raynium/bridge/` | 标准 JUnit 测试；后端配置、C ABI 边界与真实 RHI 生命周期 |
 | `tools/native.py` | MSVC 环境发现、调用 CMake、stage、依赖检查和 JAR 合并 |
 | `gradle/native.gradle` | Gradle native 任务，配置阶段不执行外部命令 |
 | `src/client/java/dev/raynium/bridge/` | manifest、开发/JAR 定位、解包缓存、FFM 和库寿命 |
-| `src/client/java/dev/raynium/client/RayniumClient.java` | 客户端初始化加载、退出时关闭库 |
+| `src/client/java/dev/raynium/client/RayniumClient.java` | CLIENT_STARTED 加载/创建、CLIENT_STOPPING 销毁/卸载、初始化崩溃报告 |
 
 ## 显式准备依赖
 
@@ -68,10 +75,13 @@ Debug 用于默认开发启动，Release 用于分发；只运行相应步骤也
 可选参数：
 
 ```powershell
+.\gradlew.bat runClientNative -PrhiBackend=vulkan
 .\gradlew.bat runClientNative -PnativeConfig=Release -PnativeParallel=8
 .\gradlew.bat nativeStage -PnativePython=C:/path/to/python.exe
 .\gradlew.bat nativeBuild -PradraySourceDir=C:/Users/xiaoxs/Desktop/RadRay
 ```
+
+`rhiBackend` 默认 `d3d12`，支持 `d3d12|vulkan`，传递给游戏 JVM 的 `raynium.rhi.backend`。正式启动器用 `-Draynium.rhi.backend=vulkan` 选择 Vulkan；不自动切换后端。Debug 默认启用 RHI 校验，驱动调试层/GPU validation 均关闭。
 
 `radraySourceDir` 用于联调本地 checkout，仍要求其静态 CRT SDK 已准备；默认不使用旁边的 RadRay。构建会记录实际 RadRay commit 和 dirty 状态。发布只接受锁定提交的干净 Release 构建。
 
@@ -79,7 +89,7 @@ Debug 用于默认开发启动，Release 用于分发；只运行相应步骤也
 
 Loom 的两个客户端运行配置都给 Minecraft JVM 添加 `--enable-native-access=ALL-UNNAMED`。这是游戏 JVM 参数，不是 Gradle daemon 参数；正式启动器也需添加它。loader 检查实际模块的 native access，权限未启用时报告启动参数要求。
 
-加载成功应出现三类日志：DLL 来源与实际路径；ABI/build ID/RadRay revision/dirty/config/CRT/toolchain；顶点 stride 为 `12`、分配器 mask 为 `7`。这只是 native 接入完成标志，不表示渲染接管。
+加载成功应记录 DLL 来源与实际路径，以及 ABI/build ID/RadRay revision/dirty/config/CRT/toolchain。当前要求 ABI `3` 和 create/destroy 导出，不再输出探针结果。随后记录 RHI 初始化阶段、后端和 GPU；只有 `Raynium runtime created` 表示设备与队列初始化完成，仍不代表管线或呈现完成。
 
 ## Stage、缓存和生命周期
 
@@ -94,7 +104,7 @@ build/native/stage/windows-x86_64/<Config>/
   current.json
   <manifest-sha256>/
     native-manifest.json
-    raynium_bridge.dll
+    rayniumruntime.dll
     licenses/<dependency>/...
 ```
 
@@ -104,7 +114,7 @@ Java 优先读取 `-Draynium.native.dir=<目录>`，该目录可以是带 `curre
 
 加载副本不会占用 linker 输出文件。重新编译后重启客户端即可加载新快照；不提供运行中 DLL 热切换，也不自动删除旧快照/游戏缓存。哈希用于一致性检查，不代替代码来源认证。
 
-`NativeLibrary` 实例持有 shared arena，由客户端入口拥有；退出事件关闭 arena。当前只有同步探针，没有 runtime、工作线程和 Java 回调。后续加入这些对象时，必须先停止调用并销毁 runtime，再关闭库。
+`RayniumClient` 拥有 `NativeRuntime`，后者持有不透明 native handle 和 `NativeLibrary`。库使用 shared arena；runtime 的创建与关闭受 Java 所有者线程检查约束。CLIENT_STARTED 创建，CLIENT_STOPPING 先销毁 runtime 再关闭库；不使用 Cleaner/shutdown hook。初始化失败清理部分 native 对象和 DLL 后显式生成 MC 崩溃报告。详细顺序和限制见 [设备会话](native-runtime-design.md#当前实现设备会话)。
 
 ## 发布 mod JAR
 
@@ -120,7 +130,7 @@ JAR 内包含：
 
 ```text
 natives/windows-x86_64/native-manifest.json
-natives/windows-x86_64/raynium_bridge.dll
+natives/windows-x86_64/rayniumruntime.dll
 META-INF/licenses/raynium-native/<dependency>/...
 ```
 
@@ -138,14 +148,47 @@ META-INF/licenses/raynium-native/<dependency>/...
 
 | 导出 | 契约 |
 |---|---|
-| `rn_get_abi_version()` | ABI 版本 `1` |
-| `rn_query_abi(info, capacity)` | 填充调用方的 240 字节结构，返回 `0` 成功、`1` 空指针、`2` 容量不足；失败不写输出 |
-| `rn_probe_vertex_stride()` | 调用 RadRay `GetVertexFormatSizeInBytes(FLOAT32X3)`，预期 `12` |
-| `rn_probe_allocator()` | CRT malloc、RadRay 对齐分配、C++ new 分别对应 bit 0/1/2，预期 `7` |
+| `rn_get_abi_version()` | ABI 版本 `3` |
+| `rn_query_abi(info, capacity, error_message, error_capacity)` | 填充调用方的 240 字节结构；失败不改动 info，原因写入诊断字符串 |
+| `rn_create_runtime(desc, out_runtime, error_message, error_capacity)` | 通过 RayniumRuntime::Create 创建完整对象；失败清理局部资源并将有效输出槽清零，原因写入诊断字符串 |
+| `rn_destroy_runtime(runtime)` | 等待 Direct 队列并销毁对象，NULL 无操作；非空对象只能销毁一次 |
 
-ABI 结构布局以 `bridge.h` 为准，包含四个 uint32 和固定容量 UTF-8 字符串。Java 检查尺寸、指针宽度、flags、build ID、RadRay revision、配置、平台和工具链与 manifest 一致，再运行两个探针。结构和临时内存由 Java arena 管理，不跨边界 free/delete。`NativeBindings` 使用普通 FFM downcall，不使用 critical 调用。
+`rn_query_abi` 与 `rn_create_runtime` 都只返回 OK/FAILED；具体原因写入 UTF-8 诊断字符串，不从返回码区分参数、容量或设备失败。query 也允许 NULL 诊断指针配零容量；诊断缓冲区必须与 info 分离。
 
-Debug/Release 均使用 `/MT` 和静态 mimalloc；Debug 保留调试信息和 RadRay 调试宏，不启用 `/MTd` 的 Debug CRT。mimalloc 自带分配符号替换，bridge 不再包含 `mimalloc-new-delete.h`。覆盖标准 CPU 堆分配入口，不覆盖 GPU 显存、系统/驱动内部或直接调用系统内存 API 的分配。运行时探针检查代表性调用，不是所有依赖路径的穷举证明。
+`rn_runtime_desc` 是 8 字节、4 字节对齐的两个 uint32：`struct_size` 必须为 8，`backend` 为 1（D3D12）或 2（Vulkan）。描述、输出指针槽和诊断缓冲区不能重叠，均只在调用期间借用。诊断使用 UTF-8，容量大于零时截断并 NUL 终止；NULL 诊断指针必须配零容量。当前诊断为 ASCII，截断不会切断多字节字符。native 对象只能由同一 DLL 的 destroy 释放。
+
+ABI 结构布局以 `bridge.h` 为准，包含四个 uint32 和固定容量 UTF-8 字符串。Java 检查尺寸、指针宽度、flags、build ID、RadRay revision、配置、平台和工具链与 manifest 一致。结构和临时内存由 Java arena 管理，不跨边界 free/delete。`NativeBindings` 使用普通 FFM downcall，不使用 critical 调用。
+
+当前 ABI 为 `3`：所有返回状态的函数只使用 `RN_STATUS_OK=0` 和 `RN_STATUS_FAILED=1`，query 增加诊断缓冲区参数；240 字节查询结构布局保持不变。Java 在调用新 query 前核对版本，manifest 也只接受 ABI 3；旧 ABI 1/2 payload 必须重新构建，不能复用旧签名。开发与发布均需重新构建/stage，旧 ABI 的 manifest 会被拒绝。stage 和 JAR 只收集 `rayniumruntime.dll`，不自动删除旧构建目录或旧内容缓存。
+
+Debug/Release 均使用 `/MT` 和静态 mimalloc；Debug 保留调试信息和 RadRay 调试宏，不启用 `/MTd` 的 Debug CRT。mimalloc 自带分配符号替换，bridge 不包含 `mimalloc-new-delete.h`。覆盖标准 CPU 堆分配入口，不覆盖 GPU 显存、系统/驱动内部或直接调用系统内存 API 的分配。
+
+## Java 与 RHI 测试
+
+测试统一放在 `src/test/java/`，使用 `gradle.properties` 固定版本的 JUnit Jupiter 与 JUnit Platform launcher。Loom 自动为标准 test 源码集提供 client 类及依赖。项目不再使用独立 smoke main、自定义 JavaCompile 或 JavaExec 测试入口。
+
+在 Raynium 根目录运行：
+
+```powershell
+.\gradlew.bat test
+.\gradlew.bat nativeTest
+.\gradlew.bat nativeTest -PnativeConfig=Release
+.\gradlew.bat nativeTest --tests "*.NativeRuntimeTest"
+```
+
+| 测试类 | 内容 | 任务 |
+| --- | --- | --- |
+| `NativeRuntimeBackendTest` | 后端配置解析和非法值 | `test` |
+| `NativeAbiTest` | 参数校验、输出清空、诊断截断和空句柄销毁 | `nativeTest` |
+| `NativeRuntimeTest` | 双后端创建/销毁/重建、线程限制、幂等关闭及 Vulkan 失败清理 | `nativeTest` |
+
+`test` 排除 `native` 标签，随标准 `check/build` 运行，不加载 DLL、不构建 native。`nativeTest` 是标准 Gradle `Test` 任务，只包含 `native` 标签；它复用 `testClasses`，依赖 `nativeStage`，在构建/stage 完成后启动测试 JVM。依赖仍须显式准备，执行需要 Windows x64 和 D3D12/Vulkan 驱动；缺少设备或 DLL 时明确失败，不跳过。
+
+native 测试 JVM 使用 Java 25、`--enable-native-access=ALL-UNNAMED` 与指定配置的 stage 路径。仅一个 worker，禁用 JUnit 并行；每个 runtime 的创建和销毁在同一线程，错误线程用例仅从额外线程调用预期被拒绝的 close。GPU/驱动状态不属于普通 Gradle 输入，因此 `nativeTest` 每次显式执行，不使用 up-to-date 或构建缓存结果。
+
+JUnit `@TempDir` 管理每个用例的 DLL 缓存目录。测试 fixture 和 try-with-resources 保证断言失败时也先释放 native runtime，再卸载 DLL，最后清理临时目录。用例无顺序依赖，测试观测与句柄跟踪仅存在于测试源码，不加入生产对象。
+
+报告分别位于 `build/reports/tests/test/index.html`、`build/reports/tests/nativeTest/index.html`，XML 位于 `build/test-results/<任务名>/`。IDEA 导入 Gradle 后会识别标准测试源码；native 用例通过 Gradle 的 `nativeTest` 任务运行，以获得构建依赖和 JVM 参数。测试类不打入普通或 native mod JAR。真实 MC 启动/退出仍由客户端生命周期验证覆盖，本次 JUnit 任务不启动游戏。
 
 ## 直接使用 CMake
 

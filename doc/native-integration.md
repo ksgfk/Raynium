@@ -1,6 +1,6 @@
 # RadRay 引入 Raynium 的构建与加载方案
 
-Raynium 已建立独立的 CMake native 工程，目标产物为 `raynium_bridge.dll`，静态链接 RadRay 所需模块。Java 25 使用 FFM 调用该 DLL 的 C ABI，Gradle 调度显式 native 构建和打包，运行时 loader 负责检查平台、解包、加载和版本。
+Raynium 已建立独立的 CMake native 工程，目标产物为 `rayniumruntime.dll`，静态链接 RadRay 所需模块。Java 25 使用 FFM 调用该 DLL 的 C ABI，Gradle 调度显式 native 构建和打包，运行时 loader 负责检查平台、解包、加载和版本。
 
 状态：native CMake 工程、RadRay 拉取脚本、Gradle native 任务、FFM loader 和 Release 分发代码已接入。本机编译、开发客户端启动与 Release payload 加载检查已通过，操作和具体范围见 [Native 工程操作](native-development.md)。当前固定 RadRay `95f725a35ced0a52ae0706207582788c011914ca`，目标为 Windows x86_64；runtime 本身的设计保留在 [Native runtime 功能设计](native-runtime-design.md)。
 
@@ -13,7 +13,7 @@ Java classpath 负责 Java 类和资源。C++ 静态库由 native linker 消费�
 ```text
 C++ 源码与 RadRay 静态库
     → CMake + 编译器 + linker
-    → raynium_bridge.dll
+    → rayniumruntime.dll
     → Gradle 打包为 JAR 资源
     → Java 解包到实际文件系统并加载
     → JNI 或 FFM 调用导出函数
@@ -75,7 +75,7 @@ RadRay 也已提供 `RADRAY_INSTALL`、`RadRayConfig.cmake` 和 `RadRay::` 导�
 
 ```cmake
 find_package(RadRay CONFIG REQUIRED COMPONENTS render)
-target_link_libraries(raynium_bridge PRIVATE RadRay::render)
+target_link_libraries(rayniumruntime PRIVATE RadRay::render)
 ```
 
 安装包只导出 RadRay 自身，消费方仍需找到兼容的第三方包。这个方式适合独立 SDK/CI 缓存，当前一起开发 runtime 时会增加反复安装步骤，因此首版只实现源码引入模式，保留包模式的扩展位置。[RadRay 安装规则](../../RadRay/cmake/Install.cmake)、[包配置](../../RadRay/cmake/RadRayConfig.cmake.in)
@@ -85,10 +85,11 @@ target_link_libraries(raynium_bridge PRIVATE RadRay::render)
 ### 一个对 Java 暴露的 DLL
 
 ```text
-raynium_bridge.dll
+rayniumruntime.dll
   ├─ bridge.cpp 的 C 导出接口
   ├─ RadRay::render / RadRay::core
-  └─ 后续接入 runtime、pipeline 及所需 shader decoder
+  ├─ RayniumRuntime 的设备与 Direct 队列
+  └─ 后续接入资源服务、pipeline 及所需 shader decoder
 ```
 
 RadRay 的 C++ 类、STL 容器和 RHI 虚接口保留在 DLL 内部。C 导出函数只使用固定宽度类型、字节范围、opaque handle 和明确的版本契约。`bridge.h` 是 bridge ABI 的权威，Java 布局通过版本与尺寸检查匹配它。
@@ -124,10 +125,10 @@ set(RADRAY_ENABLE_AUTO_OPTIMIZATION OFF)
 set(RADRAY_INSTALL OFF)
 
 add_subdirectory("${RADRAY_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/radray")
-add_library(raynium_bridge SHARED src/bridge.cpp)
-target_include_directories(raynium_bridge PRIVATE include)
-target_compile_features(raynium_bridge PRIVATE cxx_std_20)
-target_link_libraries(raynium_bridge PRIVATE RadRay::render)
+add_library(rayniumruntime SHARED src/bridge.cpp)
+target_include_directories(rayniumruntime PRIVATE include)
+target_compile_features(rayniumruntime PRIVATE cxx_std_20)
+target_link_libraries(rayniumruntime PRIVATE RadRay::render)
 ```
 
 将依赖三元组、compiler、generator、CRT 和 Debug/Release 放在 preset/toolchain 中，保证它们在创建 targets 之前确定。当前使用 Windows x64 MSVC、`CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` 和 `windows-x64-msvc-staticcrt` 依赖包；这是编译工具链选择，不改变 RadRay 管理图形后端的边界。
@@ -159,7 +160,7 @@ target_link_libraries(raynium_bridge PRIVATE RadRay::render)
 
 首版 API 数量少，手写小型 binding 即可；以后若头文件明显增大，再增加针对 `bridge.h` 的显式 jextract 生成任务，输出到 build/generated。不要把整个 RadRay C++ 头文件树交给 Java binding 工具。
 
-当前 `NativeLibrary` 实例持有 library arena，客户端入口拥有它；`NativeBindings` 在加载阶段建立 SymbolLookup 对应的 downcall handles 并执行 ABI/探针检查。初始化和客户端退出事件显式配对。后续增加长期使用的 runtime bindings 时由实例继续持有，先结束 native runtime、线程和回调，再关闭 library arena；不在运行中热卸载 DLL。
+客户端入口拥有 `NativeRuntime`，它持有 native handle 与 `NativeLibrary`；后者保存 library arena 和 `NativeBindings`。绑定在加载阶段建立 downcall handles 并检查 ABI/构建身份。CLIENT_STARTED 创建 RHI，CLIENT_STOPPING 先销毁 RHI 再卸载 DLL。线程、内存和失败清理见 [FFM 互操作](ffm-interop.md)。
 
 RenderFrame、上传或 fence 等待可能耗时或阻塞，使用普通 downcall。C2ME 快速数学函数所用的 `Linker.Option.critical` 不适用于这些调用。[JDK critical 调用约束](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/foreign/Linker.Option.html)
 
@@ -212,7 +213,7 @@ Raynium/
     stage/windows-x86_64/<Debug|Release>/
       current.json
       <manifest-sha256>/
-        raynium_bridge.dll
+        rayniumruntime.dll
         native-manifest.json
         licenses/<dependency>/...
 ```
@@ -221,7 +222,7 @@ Raynium/
 
 ```text
 natives/windows-x86_64/
-  raynium_bridge.dll
+  rayniumruntime.dll
   native-manifest.json
 META-INF/licenses/raynium-native/<dependency>/...
 ```
@@ -242,8 +243,8 @@ loader 的选择顺序为：显式开发目录 `-Draynium.native.dir=...`，否�
 2. 将实际 payload 发布到游戏目录下 `.raynium/natives/windows-x86_64/<content-hash>/`。
 3. 检查已有完整副本，或写入独立 staging 目录，校验后再发布；多进程使用文件锁协调解包。
 4. 检查游戏 JVM native access 权限，以绝对路径调用 `SymbolLookup.libraryLookup`。
-5. 绑定并调用 `rn_query_abi`，检查二进制实际版本与布局。
-6. 执行 RadRay 顶点格式和 mimalloc 分配器探针；当前不创建 runtime 会话或设备，不接管 MC 绘制。
+5. 先调用版本入口核对 ABI 3，再用带诊断缓冲区的 `rn_query_abi` 检查布局与构建身份。
+6. 记录加载结果，通过 `rn_create_runtime` 创建 RHI 设备/Direct 队列；创建失败清理并输出 MC 崩溃报告，仍不接管 MC 绘制。
 
 所有内容路径落在 loader 自己的根目录内，当前仅接受固定 DLL 文件名。已有损坏缓存直接报错，不覆盖、不删除；暂未实现旧缓存自动清理。
 
@@ -261,16 +262,16 @@ Debug/Release 均使用 `/MT`，不分发动态 VC++ CRT。Debug 保留调试信
 
 ## 首个前置任务的范围
 
-四项前置工作已写入源码与任务，并完成本机基础验证：
+构建/加载基础与 RHI 初始化已写入源码及任务，验证范围见下方链接：
 
 1. 已建立 native CMake 宿主，默认消费脚本按锁定提交拉取的 RadRay 源码，链接 `RadRay::render`。
-2. 已按固定提交切换 `/MT`，移除重复 new/delete 替换头；`bridge.h/.cpp` 导出版本查询、240 字节 ABI/build 描述、RadRay 顶点格式和分配器探针。
+2. 已按固定提交切换 `/MT`，移除重复 new/delete 替换头；`rayniumruntime.dll` 提供版本查询、240 字节 ABI/build 描述和 runtime create/destroy。临时探针已删除，ABI 为 `3`。
 3. 已建立 Gradle configure/build/stage 和开发启动链，包含桌面 IDEA 所需 MSVC 子进程环境发现。
-4. 已建立 Java FFM loader 与 binding，开发目录和 JAR 来源共用内容缓存，由客户端初始化加载并在退出时关闭 library arena。
+4. 已建立 Java FFM loader 与 binding，开发目录和 JAR 来源共用内容缓存，由客户端 CLIENT_STARTED 加载并创建 RHI，在 CLIENT_STOPPING 销毁 runtime 后关闭 library arena。
 5. 已提供独立 Release 打包入口，合并 DLL、manifest 与上游许可证；独立包检查任务不触发构建。
 
-首版仍使用原版 MC 渲染，Mixin 不必接管世界或窗口。runtime 和 pipeline 尚未实现时，不引用不存在的 `RadRay::runtime` target；后续模块完成后再扩展 bridge 的链接依赖与 C ABI。
+首版仍使用原版 MC 渲染，Mixin 不必接管世界或窗口。`RayniumRuntime` 实现在本项目 native 工程并调用 `RadRay::render`，不引用不存在的 `RadRay::runtime` target；后续扩展资源、管线和帧接口。
 
 已验证开发目录加载、JAR 解包加载、构建身份不匹配、缓存损坏、重复加载/释放和 native access 缺失等路径；架构不匹配、系统 DLL 缺失、多个游戏进程同时启动及正式启动器安装等场景尚未验证。结果以 [本机验证范围](native-development.md#本机验证范围) 为准。
 
-前置任务完成的标志是：**IDEA 启动 MC 后，Java 能通过 FFM 调用静态链接进 bridge 的 RadRay 代码，并且同样的 DLL 能随 mod JAR 分发加载。**
+当前前置能力是：Java 能加载 native 库并核对 ABI/构建身份，DLL 能随 mod JAR 分发加载；runtime 已创建真实 RHI 设备与队列，资源提交和绘制在后续实现中接入。
