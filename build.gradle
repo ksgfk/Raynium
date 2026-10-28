@@ -24,6 +24,11 @@ loom {
             runDir = 'run'
             vmArg '--enable-native-access=ALL-UNNAMED'
             property 'raynium.rhi.backend', providers.gradleProperty('rhiBackend').getOrElse('d3d12')
+            property 'raynium.rhi.validation', providers.gradleProperty('rhiValidation').getOrElse('false')
+            property 'raynium.preview.enabled', providers.gradleProperty('previewEnabled').getOrElse('true')
+            if (providers.gradleProperty('vulkanValidation').getOrElse('false').toBoolean()) {
+                programArg '--vulkanValidation'
+            }
         }
         clientNative {
             inherit client

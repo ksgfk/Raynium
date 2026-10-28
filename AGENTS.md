@@ -1,7 +1,3 @@
-# Raynium
-
-Minecraft Fabric 客户端模组。当前 Java 通过 FFM/C ABI 加载 native runtime，后者通过 RadRay RHI 创建设备和 Direct 队列；游戏仍使用原版渲染。
-
 ## 文档入口
 
 本文件也是长期文档，负责仓库级约束与导航。按任务读取，不预加载整个 `doc/`。

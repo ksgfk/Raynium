@@ -20,7 +20,11 @@ final class NativeTestSupport implements AutoCloseable {
     private final List<MemorySegment> runtimes = new ArrayList<>();
     private final MethodHandle create;
     private final MethodHandle query;
+    private final MethodHandle initEnv;
+    private final MethodHandle destroyEnv;
+    private boolean ownsEnvironment;
     private final MethodHandle destroy;
+    final MemorySegment envDesc;
     final MemorySegment desc;
     final MemorySegment output;
     final MemorySegment error;
@@ -32,6 +36,10 @@ final class NativeTestSupport implements AutoCloseable {
             var symbols = SymbolLookup.libraryLookup(payload.libraryPath(), arena);
             new NativeBindings(symbols).inspect(payload.manifest());
             var linker = Linker.nativeLinker();
+            initEnv = linker.downcallHandle(symbols.find("rn_init_env").orElseThrow(),
+                    FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+            destroyEnv = linker.downcallHandle(symbols.find("rn_destroy_env").orElseThrow(),
+                    FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
             query = linker.downcallHandle(symbols.find("rn_query_abi").orElseThrow(),
                     FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT,
                             ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
@@ -40,9 +48,12 @@ final class NativeTestSupport implements AutoCloseable {
                             ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
             destroy = linker.downcallHandle(symbols.find("rn_destroy_runtime").orElseThrow(),
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
-            desc = arena.allocate(8, 4);
-            desc.set(ValueLayout.JAVA_INT, 0, 8);
-            desc.set(ValueLayout.JAVA_INT, 4, 1);
+            envDesc = arena.allocate(12, 4);
+            envDesc.set(ValueLayout.JAVA_INT, 0, 12);
+            envDesc.set(ValueLayout.JAVA_INT, 4, 1);
+            envDesc.set(ValueLayout.JAVA_INT, 8, Boolean.getBoolean("raynium.rhi.validation") ? 1 : 0);
+            desc = arena.allocate(20, 4);
+            desc.set(ValueLayout.JAVA_INT, 0, 20);
             output = arena.allocate(ValueLayout.ADDRESS);
             error = arena.allocate(256);
             info = arena.allocate(240, 4);
@@ -77,6 +88,18 @@ final class NativeTestSupport implements AutoCloseable {
         return (int) query.invokeExact(info, capacity, diagnostic, diagnosticCapacity);
     }
 
+    int initEnv(MemorySegment descriptor, MemorySegment diagnostic, int capacity) throws Throwable {
+        int status = (int) initEnv.invokeExact(descriptor, diagnostic, capacity);
+        if (status == 0) ownsEnvironment = true;
+        return status;
+    }
+
+    int destroyEnv(MemorySegment diagnostic, int capacity) throws Throwable {
+        int status = (int) destroyEnv.invokeExact(diagnostic, capacity);
+        if (status == 0) ownsEnvironment = false;
+        return status;
+    }
+
     int create(MemorySegment descriptor, MemorySegment out, MemorySegment diagnostic, int capacity) throws Throwable {
         int status = (int) create.invokeExact(descriptor, out, diagnostic, capacity);
         if (status == 0 && !out.equals(MemorySegment.NULL)) {
@@ -100,6 +123,16 @@ final class NativeTestSupport implements AutoCloseable {
     @Override
     public void close() {
         while (!runtimes.isEmpty()) destroy(runtimes.getLast());
+        if (ownsEnvironment) {
+            try {
+                int status = destroyEnv(error, 256);
+                if (status != 0) throw new IllegalStateException(error.getString(0));
+            } catch (RuntimeException | Error failure) {
+                throw failure;
+            } catch (Throwable failure) {
+                throw new IllegalStateException("Cannot destroy test environment", failure);
+            }
+        }
         arena.close();
     }
 }

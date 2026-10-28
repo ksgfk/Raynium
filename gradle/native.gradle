@@ -64,6 +64,7 @@ tasks.register('nativeTest', Test) {
     jvmArgs '--enable-native-access=ALL-UNNAMED'
     maxParallelForks = 1
     systemProperty 'junit.jupiter.execution.parallel.enabled', 'false'
+    systemProperty 'raynium.rhi.validation', providers.gradleProperty('rhiValidation').getOrElse('false')
     systemProperty 'raynium.native.dir', layout.buildDirectory.dir("native/stage/windows-x86_64/${nativeConfig}").get().asFile.absolutePath
     // GPU/driver state is external to Gradle's inputs; explicit invocations always run.
     outputs.upToDateWhen { false }

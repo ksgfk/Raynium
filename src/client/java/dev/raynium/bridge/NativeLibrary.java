@@ -4,12 +4,12 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.SymbolLookup;
 import org.slf4j.Logger;
 
-public final class NativeLibrary implements AutoCloseable {
+final class NativeLibrary implements AutoCloseable {
     private final Arena arena;
     private final NativeBindings bindings;
     private boolean closed;
 
-    public NativeLibrary(NativeLibraryLocator.Payload payload, Logger logger) {
+    NativeLibrary(NativeLibraryLocator.Payload payload, Logger logger) {
         if (!NativeLibrary.class.getModule().isNativeAccessEnabled()) {
             throw new IllegalStateException("Enable native access on the Minecraft JVM: --enable-native-access=ALL-UNNAMED");
         }
@@ -37,7 +37,7 @@ public final class NativeLibrary implements AutoCloseable {
     @Override
     public void close() {
         if (!closed) {
-            // The owning NativeRuntime must destroy its handle before unloading the DLL.
+            // The owning NativeEnvironment must destroy its environment before unloading the DLL.
             arena.close();
             closed = true;
         }

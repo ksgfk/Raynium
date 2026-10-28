@@ -56,7 +56,7 @@ if(radray_status)
 endif()
 set(RAYNIUM_TOOLCHAIN "${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}")
 file(GLOB_RECURSE identity_files CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/include/*" "${CMAKE_CURRENT_SOURCE_DIR}/src/*"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/*" "${CMAKE_CURRENT_SOURCE_DIR}/src/*" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/*"
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/*" "${RADRAY_SOURCE_DIR}/modules/*"
     "${RADRAY_SOURCE_DIR}/cmake/*")
 list(APPEND identity_files "${CMAKE_CURRENT_LIST_FILE}" "${CMAKE_CURRENT_SOURCE_DIR}/CMakePresets.json"
@@ -98,8 +98,10 @@ set(RADRAY_INSTALL OFF)
 add_subdirectory("${RADRAY_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/radray")
 
 add_library(rayniumruntime SHARED
+    src/environment.cpp include/raynium/environment.h
     src/bridge.cpp include/raynium/bridge.h
-    src/runtime.cpp include/raynium/runtime.h)
+    src/runtime.cpp include/raynium/runtime.h
+    src/preview.cpp include/raynium/preview.h)
 target_compile_features(rayniumruntime PRIVATE cxx_std_20)
 target_include_directories(rayniumruntime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_compile_definitions(rayniumruntime PRIVATE RAYNIUM_RUNTIME_EXPORTS)

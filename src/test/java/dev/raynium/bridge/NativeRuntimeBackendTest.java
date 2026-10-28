@@ -10,15 +10,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NativeRuntimeBackendTest {
     @ParameterizedTest
-    @EnumSource(NativeRuntime.Backend.class)
-    void parsesBackendProperty(NativeRuntime.Backend backend) {
-        assertEquals(backend, NativeRuntime.Backend.fromProperty(backend.propertyValue()));
+    @EnumSource(NativeEnvironment.Backend.class)
+    void parsesBackendProperty(NativeEnvironment.Backend backend) {
+        assertEquals(backend, NativeEnvironment.Backend.fromProperty(backend.propertyValue()));
     }
 
     @Test
     void rejectsUnknownBackend() {
         var failure = assertThrows(IllegalArgumentException.class,
-                () -> NativeRuntime.Backend.fromProperty("invalid"));
+                () -> NativeEnvironment.Backend.fromProperty("invalid"));
         assertTrue(failure.getMessage().contains("raynium.rhi.backend"));
     }
 }

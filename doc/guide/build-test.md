@@ -10,25 +10,100 @@ payload、ABI、缓存和关闭顺序见[互操作与加载](../architecture/int
 
 ## 当前验证范围
 
-2026-10-26，基于当时的源码和 `native/radray.lock.json` 指定的 RadRay，
-使用 Windows 11 x64、Temurin 25.0.4.1、Gradle 9.8.2、MSVC 19.51.36260.0 和 RTX 4080 完成以下验证。
-以下是上述环境的运行记录，不保证其他机器或后续源码自动满足同样结果。
+### 2026-10-28：C++ bridge 与固定底层枚举
+
+在下节单例环境的同一机器和工具链上，将 bridge 改为 C++ 头文件后，重新执行
+`build nativeTest -PrhiValidation=true`、
+`nativeTest packageNativeMod -PnativeConfig=Release -PrhiValidation=true` 和 `verifyNativePackage`，
+均附 `--console=plain --no-parallel`。Java 构建成功，Debug/Release 各 39 个 native 用例通过，
+Release 打包与包校验通过；纯 Java 测试复用本轮先前的通过结果。
+两配置的 `dumpbin /exports` 均确认九个 C 导出名称保持不变，日志无驱动校验错误。
+已拉取 RadRay 远端 develop，其版本与锁文件和干净工作树一致，无需更新依赖。
+本次仅在后台构建和测试，未启动 MC；证据位于 `build/verification/bridge-fixed-enums-20261028/`。
+
+### 2026-10-28：单例环境与 ABI 6
+
+本轮在 Windows x64 / Temurin 25.0.4.1 / MSVC 19.51.36260.0 / RTX 3060 / NVIDIA 591.44 /
+Vulkan SDK 1.4.357.0 上验证；RadRay 使用锁定的干净源码，未修改依赖。
+以下 Gradle 命令均附 `--console=plain --no-parallel`。
+
+| 命令 | 结果 |
+| --- | --- |
+| `gradlew.bat build nativeTest -PrhiValidation=true` | Java/native 构建、4 个纯 Java 与 39 个 Debug native 测试通过 |
+| `gradlew.bat nativeTest packageNativeMod -PnativeConfig=Release -PrhiValidation=true` | 39 个 Release native 测试通过，ABI 6 Release stage/mod JAR 构建成功 |
+| `gradlew.bat verifyNativePackage` | 包结构与哈希检查通过 |
+| `gradlew.bat runClientNative -PrhiValidation=true -PvulkanValidation=true` | ABI 6 加载、早期环境初始化及 D3D12 设备创建成功；交互验证未完成，随后主动终止本次验证进程 |
+
+测试覆盖单例重复初始化、环境描述和诊断参数、无环境创建 runtime、环境在活跃 runtime 下拒绝销毁、
+错误线程、幂等关闭、失败后原所有者继续使用、同一环境内设备重建及环境销毁后重新初始化。
+D3D12 专项分别关闭/开启 driver validation，在环境初始化后创建独立 Vulkan 宿主，
+同一环境内创建两次 runtime，每次实际共享并逐像素检查两帧 17×9 UV。
+原有双后端三种尺寸、连续帧、导入失败和同步重建测试继续通过。
+两配置测试日志无 DXGI/D3D12 或 Vulkan 校验错误；Release 上游代码仍有两处 C4702 警告。
+
+游戏日志显示 11:25:59 创建唯一 DXGI factory 并完成环境初始化，早于 MC 图形后端初始化；
+11:26:01 创建 D3D12 设备，driver validation 为 true。MC 此次使用 OpenGL，预览按规则禁用。
+为避免干扰用户前台工作，停止窗口操作并终止本次启动；Gradle 因进程被终止返回失败。
+本轮没有完成 MC Vulkan 预览、资源重载、窗口切换或游戏正常退出验证，不能用自动测试替代这些结论。
+
+构建/游戏日志和两配置测试 XML 位于本机忽略目录 `build/verification/native-environment-20261028/`。
+旧版 ABI 5 的运行记录保留在下一节，不代表本轮重新完成了其中的游戏操作。
+
+### 2026-10-28：D3D12 校验提前启用与 ABI 5
+
+在本次工作树、锁定的 RadRay、Windows 11 x64 / Temurin 25.0.4.1 / MSVC 19.51.36260.0 /
+RTX 4080 / NVIDIA 621.01 / Vulkan SDK 1.4.363.0 上执行以下命令，均附 `--console=plain --no-parallel`。
+
+| 命令 | 结果 |
+| --- | --- |
+| `gradlew.bat build nativeTest -PrhiValidation=true` | Java/native 构建、4 个纯 Java 与原有 26 个 Debug native 用例通过 |
+| `gradlew.bat nativeTest -PrhiValidation=true` | 补充早期入口与库所有权用例后，30 个 Debug native 用例通过 |
+| `gradlew.bat nativeTest packageNativeMod -PnativeConfig=Release -PrhiValidation=true` | 30 个 Release native 用例通过，ABI 5 Release DLL/stage/mod JAR 构建成功 |
+| `gradlew.bat verifyNativePackage` | 包结构与哈希检查通过 |
+| `gradlew.bat runClientNative -PrhiValidation=true -PvulkanValidation=true` | D3D12 → MC Vulkan，进入已有开发世界、UV 显示、资源重载、全屏/窗口切换、返回标题及正常退出通过 |
+
+新增用例检查早期入口的诊断缓冲区约束、重复启用、已准备 library 转交 runtime 后的寿命和失败清理。
+游戏日志中，08:40:05 记录早期 D3D12 校验已启用，08:40:07 MC 选择 Vulkan，08:40:10 native
+记录 `driver validation=true` 并创建共享预览；窗口切换后预览在 213×120 与 640×360 间重建。
+08:42:24 runtime/DLL 按顺序关闭，Gradle 成功退出。游戏日志有实际 D3D12 诊断消息，无 DXGI/D3D12 或 Vulkan 校验错误，
+无 `DEVICE_RESET` / `DEVICE_LOST`。native 测试中两次 `vk has actived VkInstance` 来自预期的占用环境失败用例。
+MC Services 网络和开发账户 Realms 鉴权错误不影响本次本地世界验证。
+
+完整日志、两配置的 native 测试报告和游戏截图保存在本机忽略目录 `build/verification/dx12-validation-20261028/`。
+此次游戏运行使用 Debug payload；Release 验证范围为 native 测试和打包，未运行 Release 游戏或其他 GPU/驱动环境。
+
+### 2026-10-27：共享预览验证
+
+2026-10-27，基于本次工作树和 `native/radray.lock.json` 锁定的 RadRay develop，
+使用 Windows 11 x64、Temurin 25.0.4.1、Gradle 9.8.2、MSVC 19.51.36260.0、
+RTX 4080 / NVIDIA 621.01、Vulkan SDK 1.4.363.0 完成以下验证。
+以下是该环境的运行记录，不保证其他机器或后续源码自动满足同样结果。
 
 | 实际命令（均附 `--console=plain --no-parallel`） | 结果 |
 | --- | --- |
-| `gradlew.bat assemble testClasses` | Java 源码与测试类编译通过 |
-| `gradlew.bat nativeStage packageNativeMod` | Debug/Release DLL、stage 与 Release mod JAR 构建成功 |
-| `gradlew.bat build nativeTest verifyNativePackage` | 纯 Java 3 个、Debug native 22 个用例通过，包结构及哈希检查通过 |
-| `gradlew.bat nativeTest -PnativeConfig=Release` | Release native 22 个用例通过 |
+| `gradlew.bat build nativeTest -PrhiValidation=true` | Java 构建、4 个纯 Java 和 26 个 Debug native 测试通过 |
+| `gradlew.bat nativeTest packageNativeMod -PnativeConfig=Release -PrhiValidation=true` | 26 个 Release native 测试通过，Release DLL/stage/mod JAR 构建成功 |
+| `gradlew.bat verifyNativePackage` | 包结构、manifest 和哈希检查通过 |
+| `gradlew.bat runClientNative -PrhiValidation=true -PvulkanValidation=true` | D3D12 → MC Vulkan，世界内 UV、资源重载、全屏/窗口切换、最小化恢复和正常退出通过 |
+| `gradlew.bat runClientNative -PrhiBackend=vulkan -PrhiValidation=true -PvulkanValidation=true` | Vulkan → MC Vulkan，同组游戏操作和正常退出通过 |
+| `gradlew.bat runClientNative -PnativeConfig=Release -PpreviewEnabled=false -PvulkanValidation=true` | 原版标题画面正常，无预览且未启用共享扩展，退出成功 |
+| `gradlew.bat runClientNative -PvulkanValidation=true` | 最终 D3D12 代码复核全屏重建与提交 fence 排空，退出成功 |
 
-共 47 次执行，0 失败、0 跳过。两种配置均在 RTX 4080 上创建/销毁 D3D12/Vulkan 设备与 Direct 队列，
-覆盖 ABI 参数边界、线程关闭限制、重复关闭与 Vulkan 失败清理。Debug RHI validation=true，Release=false。
-Release 的 RadRay D3D12/Vulkan 实现各有一处 C4702 不可达代码警告，未导致失败。
+自动测试共 56 次执行，0 失败、0 跳过。共享测试在每个后端上以 257×131、1×1、319×177
+三种尺寸各交接 8 帧，逐像素检查 UV 与区域外像素，覆盖创建参数、序号、导入失败清理、等待和重建。
+两配置的 native 驱动诊断均开启；消费者启用 Vulkan 同步验证。Debug RHI 检查开启，Release 关闭。
+最终测试与游戏日志没有 Vulkan 校验错误；测试中的 `vk has actived VkInstance` 是预期失败清理用例。
+Release 上游代码有两处 C4702 不可达代码警告，未导致失败。
+MC 环境另有 OSHI/Perflib 计数器、开发账户 Realms 鉴权及资源重载 post effect 警告，不影响该轮预览验证。
+
+实际游戏检查确认可见 UV 左上黑、右上红、左下绿、右下黄，显示于右上角，原版区域外画面正常。
+游戏验证中修复了 MC 最终 blit 的 Y 翻转补偿、Win32 semaphore 导入的 LWJGL 校验兼容以及等待结构计数。
+该轮 D3D12 游戏运行尚未启用 driver validation，其诊断只在独立测试进程验证；早期启用修复的验证见本节 2026-10-28 记录。
+
 产物为 `build/libs/raynium-0.1.0-SNAPSHOT-windows-x86_64.jar`。
-原始日志、两配置报告副本与汇总保存在本机忽略目录 `build/verification/build-test-20261026/`，不随仓库分发。
-
-该轮验证未启动 MC 客户端、未进入世界、未验证正式启动器安装，也未执行最终 JAR 的独立加载探针。
-旧 ABI 客户端验证不代表当前 ABI 3 已完成同样验证；当前没有 swapchain/绘制实现。
+测试报告副本、最终日志和游戏截图保存在本机忽略目录 `build/verification/preview-20261027/`，不随仓库分发。
+未验证正式启动器安装、多 GPU 切换或其他厂商 GPU；未主动注入 device lost/超时，也未在缺少共享能力的硬件运行。
+无预览开关与 OpenGL 的禁用分支已运行，导入失败资源清理由 Vulkan 验证测试覆盖。
 
 ## Java 构建与运行
 
@@ -64,7 +139,19 @@ python external/RadRay/tools/build_third_party.py build --triplet windows-x64-ms
 python external/RadRay/tools/build_third_party.py build --triplet windows-x64-msvc-staticcrt --config Release --parallel 8
 ```
 
-Debug 用于默认开发启动，Release 用于分发；只运行相应步骤也可以。构建本身离线，缺包则停止。当前关闭 shader compiler/tools，不要求 DXC SDK。不要复用旧 `windows-x64-msvc` 动态 CRT 包。若手动缩小依赖集合，stage 所需许可证来自 core/render 使用的第三方源码目录，需保留这些源码。
+Debug 用于默认开发启动，Release 用于分发；只运行相应步骤也可以。构建本身离线，缺包则停止。
+普通构建使用已嵌入的 shader 字节码，关闭 RadRay shader compiler/tools，不要求 DXC SDK。
+不要复用旧 `windows-x64-msvc` 动态 CRT 包。若手动缩小依赖集合，stage 所需许可证来自 core/render 使用的第三方源码目录，需保留这些源码。
+
+修改 `native/shaders/uv.hlsl` 后显式准备锁定 DXC 并重新生成头文件，再运行 native 构建：
+
+```powershell
+python external/RadRay/tools/fetch_sdks.py restore --only radray_dxc
+python tools/compile_preview_shaders.py
+```
+
+脚本默认使用 `external/RadRay/SDKs/radray_dxc/extracted/bin/dxc.exe`，也可通过 `--dxc` 指定路径。
+同一 HLSL 编译为 DXIL/SPIR-V，输出到 `native/include/raynium/uv_bytecode.h`；运行时不打包编译器。
 
 ## 开发启动与 IDEA
 
@@ -82,12 +169,24 @@ Debug 用于默认开发启动，Release 用于分发；只运行相应步骤也
 
 ```powershell
 .\gradlew.bat runClientNative -PrhiBackend=vulkan
+.\gradlew.bat runClientNative -PrhiBackend=vulkan -PrhiValidation=true -PvulkanValidation=true
+.\gradlew.bat runClientNative -PpreviewEnabled=false
 .\gradlew.bat runClientNative -PnativeConfig=Release -PnativeParallel=8
 .\gradlew.bat nativeStage -PnativePython=C:/path/to/python.exe
 .\gradlew.bat nativeBuild -PradraySourceDir=C:/path/to/RadRay
 ```
 
-`rhiBackend` 默认 `d3d12`，支持 `d3d12|vulkan`，传递给游戏 JVM 的 `raynium.rhi.backend`。正式启动器用 `-Draynium.rhi.backend=vulkan` 选择 Vulkan；不自动切换后端。Debug 默认启用 RHI 校验，驱动调试层/GPU validation 均关闭。
+`rhiBackend` 默认 `d3d12`，支持 `d3d12|vulkan`，传递给游戏 JVM 的 `raynium.rhi.backend`。
+正式启动器用 `-Draynium.rhi.backend=vulkan` 选择 Vulkan；不自动切换后端。
+MC 自身须在视频设置中选择 Vulkan 并重启，runtime 后端参数不替 MC 切换图形 API。
+预览默认开启，`previewEnabled=false` 对应 `-Draynium.preview.enabled=false`。
+
+Debug 默认启用 RadRay RHI 检查。`rhiValidation=true`（JVM 属性 `raynium.rhi.validation`）
+显式启用 native 驱动诊断，默认 false。客户端初始化入口通过 `rn_init_env` 准备所选后端的环境，
+D3D12 在此创建 factory 并启用调试层，早于 MC 图形初始化；CLIENT_STARTED 复用环境创建 runtime。
+也可通过独立 `nativeTest -PrhiValidation=true` 验证。
+`vulkanValidation=true` 给 MC 添加 `--vulkanValidation` 参数，检查 MC Vulkan 命令流。
+两者含义不同；native Vulkan 开关同时启用同步验证。GPU validation 未开启。
 
 `radraySourceDir` 用于联调本地 checkout，仍要求其静态 CRT SDK 已准备；默认不使用旁边的 RadRay。构建会记录实际 RadRay commit 和 dirty 状态。发布只接受锁定提交的干净 Release 构建。
 
@@ -95,7 +194,9 @@ Debug 用于默认开发启动，Release 用于分发；只运行相应步骤也
 
 Loom 的两个客户端运行配置都给 Minecraft JVM 添加 `--enable-native-access=ALL-UNNAMED`。这是游戏 JVM 参数，不是 Gradle daemon 参数；正式启动器也需添加它。loader 检查实际模块的 native access，权限未启用时报告启动参数要求。
 
-加载成功应记录 DLL 来源与实际路径，以及 ABI/build ID/RadRay revision/dirty/config/CRT/toolchain。当前要求 ABI `3` 和 create/destroy 导出，不再输出探针结果。随后记录 RHI 初始化阶段、后端和 GPU；只有 `Raynium runtime created` 表示设备与队列初始化完成，仍不代表管线或呈现完成。
+加载成功应记录 DLL 来源与实际路径，以及 ABI/build ID/RadRay revision/dirty/config/CRT/toolchain。
+当前要求 ABI `6` 和九个导出。`Raynium runtime created` 表示设备与队列完成；
+`Raynium shared preview ready` 表示共享资源已创建和导入，实际显示仍须检查游戏画面。
 
 ## 发布 mod JAR
 
@@ -127,6 +228,7 @@ Loom 的两个客户端运行配置都给 Minecraft JVM 添加 `--enable-native-
 ```powershell
 .\gradlew.bat test
 .\gradlew.bat nativeTest
+.\gradlew.bat nativeTest -PrhiValidation=true
 .\gradlew.bat nativeTest -PnativeConfig=Release
 .\gradlew.bat nativeTest --tests "*.NativeRuntimeTest"
 ```
@@ -134,14 +236,20 @@ Loom 的两个客户端运行配置都给 Minecraft JVM 添加 `--enable-native-
 | 测试类 | 内容 | 任务 |
 | --- | --- | --- |
 | `NativeRuntimeBackendTest` | 后端配置解析和非法值 | `test` |
+| `PreviewRegionTest` | 显示矩形、MC Y 翻转后的复制位置和小窗口边界 | `test` |
 | `NativeAbiTest` | 参数校验、输出清空、诊断截断和空句柄销毁 | `nativeTest` |
-| `NativeRuntimeTest` | 双后端创建/销毁/重建、线程限制、幂等关闭及 Vulkan 失败清理 | `nativeTest` |
+| `NativeRuntimeTest` | 双后端环境/设备创建、重建、线程限制、幂等关闭、单例保护及早期 factory 共享绘制 | `nativeTest` |
+| `NativePreviewTest` | 双后端共享到独立 Vulkan 消费者，逐像素 UV/区域外验证、连续交接、等待、重建和导入失败清理 | `nativeTest` |
 
 `test` 排除 `native` 标签，随标准 `check/build` 运行，不加载 DLL、不构建 native。`nativeTest` 是标准 Gradle `Test` 任务，只包含 `native` 标签；它复用 `testClasses`，依赖 `nativeStage`，在构建/stage 完成后启动测试 JVM。依赖仍须显式准备，执行需要 Windows x64 和 D3D12/Vulkan 驱动；缺少设备或 DLL 时明确失败，不跳过。
 
 native 测试 JVM 使用 Java 25、`--enable-native-access=ALL-UNNAMED` 与指定配置的 stage 路径。仅一个 worker，禁用 JUnit 并行；每个 runtime 的创建和销毁在同一线程，错误线程用例仅从额外线程调用预期被拒绝的 close。GPU/驱动状态不属于普通 Gradle 输入，因此 `nativeTest` 每次显式执行，不使用 up-to-date 或构建缓存结果。
 
-JUnit `@TempDir` 管理每个用例的 DLL 缓存目录。测试 fixture 和 try-with-resources 保证断言失败时也先释放 native runtime，再卸载 DLL，最后清理临时目录。用例无顺序依赖，测试观测与句柄跟踪仅存在于测试源码，不加入生产对象。
+JUnit `@TempDir` 管理每个用例的 DLL 缓存目录。测试 fixture 和 try-with-resources 保证断言失败时也先释放 native runtime 和环境，再卸载 DLL，最后清理临时目录。用例无顺序依赖，测试观测与句柄跟踪仅存在于测试源码，不加入生产对象。
+
+预览测试在三种尺寸上各交接 8 帧，使用测试专属读回 buffer 校验每个像素；生产路径无读回。
+消费者启用 Khronos validation 和同步验证，依赖本机安装的 Vulkan SDK/layer；缺失时测试失败。
+原生后端诊断日志与 JUnit 结果一起检查，游戏内生命周期仍须单独运行。
 
 报告分别位于 `build/reports/tests/test/index.html`、`build/reports/tests/nativeTest/index.html`，XML 位于 `build/test-results/<任务名>/`。IDEA 导入 Gradle 后会识别标准测试源码；native 用例通过 Gradle 的 `nativeTest` 任务运行，以获得构建依赖和 JVM 参数。测试类不打入普通或 native mod JAR。JUnit 任务不启动游戏，不能替代真实 MC 生命周期或绘制验证。
 

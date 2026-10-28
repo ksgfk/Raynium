@@ -34,6 +34,53 @@ class NativeAbiTest {
     }
 
     @Test
+    void environmentRejectsInvalidDiagnosticBuffers() throws Throwable {
+        assertEquals(1, abi.initEnv(abi.envDesc, MemorySegment.NULL, 1));
+        assertEquals(1, abi.destroyEnv(MemorySegment.NULL, 1));
+    }
+
+    @Test
+    void environmentClearsDiagnosticsAndAllowsOmittingThem() throws Throwable {
+        abi.error.fill((byte) 0x7f);
+        assertEquals(0, abi.initEnv(abi.envDesc, abi.error, 1));
+        assertEquals((byte) 0, abi.error.get(ValueLayout.JAVA_BYTE, 0));
+        assertEquals((byte) 0x7f, abi.error.get(ValueLayout.JAVA_BYTE, 1));
+        assertEquals(0, abi.destroyEnv(MemorySegment.NULL, 0));
+        assertEquals(0, abi.destroyEnv(MemorySegment.NULL, 0));
+        assertEquals(0, abi.initEnv(abi.envDesc, MemorySegment.NULL, 0));
+        assertEquals(0, abi.destroyEnv(abi.error, 1));
+        assertEquals((byte) 0x7f, abi.error.get(ValueLayout.JAVA_BYTE, 1));
+    }
+
+    @Test
+    void environmentRejectsNullDescriptor() throws Throwable {
+        assertEquals(1, abi.initEnv(MemorySegment.NULL, abi.error, 256));
+        assertTrue(abi.error.getString(0).contains("rn_env_desc"));
+    }
+
+    @ParameterizedTest @ValueSource(ints = {0, 8, 16})
+    void environmentRejectsIncorrectDescriptorSize(int size) throws Throwable {
+        abi.envDesc.set(ValueLayout.JAVA_INT, 0, size);
+        assertEquals(1, abi.initEnv(abi.envDesc, abi.error, 256));
+        assertTrue(abi.error.getString(0).contains("expected 12 bytes"));
+    }
+
+    @Test
+    void environmentRejectsUnknownFlagsAndAllowsRetry() throws Throwable {
+        abi.envDesc.set(ValueLayout.JAVA_INT, 8, 2);
+        assertEquals(1, abi.initEnv(abi.envDesc, abi.error, 256));
+        assertTrue(abi.error.getString(0).contains("environment flags"));
+        abi.envDesc.set(ValueLayout.JAVA_INT, 8, 0);
+        assertEquals(0, abi.initEnv(abi.envDesc, abi.error, 256));
+    }
+
+    @Test
+    void runtimeRequiresEnvironment() throws Throwable {
+        reject(abi.desc, abi.error, 256);
+        assertTrue(abi.error.getString(0).contains("not initialized"));
+    }
+
+    @Test
     void rejectsNullDescriptor() throws Throwable {
         reject(MemorySegment.NULL, abi.error, 256);
         assertTrue(abi.error.getString(0).contains("desc is null"));
@@ -55,22 +102,22 @@ class NativeAbiTest {
     void rejectsIncorrectDescriptorSize(int size) throws Throwable {
         abi.desc.set(ValueLayout.JAVA_INT, 0, size);
         reject(abi.desc, abi.error, 256);
-        assertTrue(abi.error.getString(0).contains("struct_size; expected 8 bytes"));
+        assertTrue(abi.error.getString(0).contains("struct_size; expected 20 bytes"));
     }
 
     @Test
     void rejectsUnknownBackendWithDiagnostic() throws Throwable {
-        abi.desc.set(ValueLayout.JAVA_INT, 4, 99);
-        reject(abi.desc, abi.error, 256);
+        abi.envDesc.set(ValueLayout.JAVA_INT, 4, 99);
+        assertEquals(1, abi.initEnv(abi.envDesc, abi.error, 256));
         assertTrue(abi.error.getString(0).contains("Unknown RHI backend"));
     }
 
     @ParameterizedTest
     @ValueSource(ints = {1, 5})
     void truncatesDiagnosticWithinCapacity(int capacity) throws Throwable {
-        abi.desc.set(ValueLayout.JAVA_INT, 4, 99);
+        abi.envDesc.set(ValueLayout.JAVA_INT, 4, 99);
         abi.error.fill((byte) 0x7f);
-        reject(abi.desc, abi.error, capacity);
+        assertEquals(1, abi.initEnv(abi.envDesc, abi.error, capacity));
         assertEquals(capacity == 1 ? "" : "Unkn", abi.error.getString(0));
         assertEquals((byte) 0x7f, abi.error.get(ValueLayout.JAVA_BYTE, capacity), "byte after buffer must remain untouched");
     }
@@ -84,6 +131,13 @@ class NativeAbiTest {
     @Test
     void acceptsNullDestroy() {
         abi.destroy(MemorySegment.NULL);
+    }
+
+    @ParameterizedTest @ValueSource(ints = {4, 1})
+    void rejectsUnknownFlagsOrInvalidHostNode(int flags) throws Throwable {
+        abi.desc.set(ValueLayout.JAVA_INT, 4, flags);
+        reject(abi.desc, abi.error, 256);
+        assertTrue(abi.error.getString(0).contains("flags or host node mask"));
     }
 
     @Test

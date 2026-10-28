@@ -1,36 +1,84 @@
-> - 适用: 修改已有 RHI 设备会话及其创建、关闭和所有权
+> - 适用: 修改 RHI 设备会话、共享预览绘制及其所有权
 > - 权威: 本文维护 native C++ 职责与生命周期；C ABI/FFM 和 MC 适配分别由互操作与接入文档负责
-> - 锚点: `native/include/raynium/runtime.h`, `native/src/runtime.cpp`, `native/CMakeLists.txt`, `native/radray.lock.json`, `src/test/java/dev/raynium/bridge/NativeRuntimeTest.java`
+> - 锚点: `native/include/raynium/environment.h`, `native/src/environment.cpp`, `native/include/raynium/runtime.h`, `native/src/runtime.cpp`, `native/include/raynium/preview.h`, `native/src/preview.cpp`, `native/shaders/uv.hlsl`, `native/radray.lock.json`
 
-# Native runtime 设备会话
+# Native runtime
 
-当前 native runtime 通过 RadRay RHI 创建设备及一条 Direct 队列。Raynium 没有资源上传、管线、帧执行或输出接口。
+runtime 通过 RadRay RHI 创建设备和一条 Direct 队列，并支持一个共享 UV 预览 RT。
+没有 swapchain、场景资源服务或世界渲染实现。MC 接入见 [Minecraft 接入](minecraft-integration.md)，
+接口和借用规则见 [互操作与加载](interop.md)，实际验证范围见[构建与测试](../guide/build-test.md#当前验证范围)。
 
-客户端生命周期见 [Minecraft 接入](minecraft-integration.md)，C ABI 与 FFM 见 [互操作与加载](interop.md)，已有验证记录见[构建与测试](../guide/build-test.md#当前验证范围)。
+## 单例环境与设备会话
 
-## 当前实现：设备会话
+每份已加载 DLL 持有一个 `RayniumEnvironment`，由 `rn_init_env` 创建、`rn_destroy_env` 销毁。
+`RayniumEnvironment::Create` 在局部 RAII 中准备 DXGI factory 或 Vulkan instance，全部成功后
+才构造并发布有效环境，不创建 GPU 设备。重复初始化失败，不替换原环境。
+Vulkan 创建失败的 guard 只清理本次成功取得的环境，不关闭已有环境。
 
-`native/include/raynium/runtime.h` 与 `native/src/runtime.cpp` 定义不可复制、不可移动的 `raynium::RayniumRuntime`，编译进 `rayniumruntime.dll`，通过 RadRay RHI 创建一个设备及一条 Direct 队列。`static bool Create(backend, output, error)` 是唯一创建入口：先在局部 RAII 对象中准备 Factory/环境、Device 和 Queue，全部成功后才调用私有构造函数。没有默认构造或 Initialize；成功返回 true 并交付有效对象，失败返回 false 和诊断字符串，不产生半初始化 runtime。output 必须为空，失败不改动它。本阶段没有 swapchain、资源表、渲染管线或帧提交，MC 继续原版绘制。
+后端与 driver validation 在环境初始化时固定。`raynium.rhi.backend=d3d12|vulkan`
+默认 D3D12，不自动切换。Debug/Release 分别使用 RadRay 默认启用/关闭的 RHI 检查；
+driver validation 在 Vulkan 启用调试和同步验证，在 D3D12 启用 DXGI/D3D12 诊断，GPU validation 未开启。
 
-Java `NativeRuntime` 拥有不透明的 `rn_runtime*` 和 DLL。`RayniumClient` 在 Fabric `CLIENT_STARTED` 创建它，在 `CLIENT_STOPPING` 关闭它。两处均在 MC 渲染线程；创建不依赖世界加载，资源重载、进出世界不重建 runtime。`CLIENT_STARTED` 位于 `Minecraft.run()` 的异常捕获之前，所以 Java 初始化失败时显式构造 CrashReport 并调用 `emergencySaveAndCrash`，不依赖主循环捕获。
+D3D12 factory 及其诊断上下文一直由环境持有，runtime 创建与重建借用同一个 factory，
+不会再次创建 factory 或调用 EnableDebugLayer。游戏在 MC 图形初始化前初始化环境；
+CLIENT_STARTED 获取宿主 GPU 后创建设备。环境销毁不会关闭进程级 D3D12 调试层。
+调试层必须在 D3D12 设备创建前启用，见
+[Microsoft EnableDebugLayer 契约](https://learn.microsoft.com/en-us/windows/win32/api/d3d12sdklayers/nf-d3d12sdklayers-id3d12debug-enabledebuglayer)。
 
-默认 D3D12，`raynium.rhi.backend=d3d12|vulkan` 显式选择；所选后端失败时清理创建过程的局部资源并终止启动，不自动切换后端。普通 Java 开发运行未选择 native payload 时保持原有可选模式。初始化/销毁 C ABI 与参数规则以[当前 C ABI](interop.md#当前-c-abi) 和 `bridge.h` 为准。
+`RayniumRuntime::Create` 借用环境，在局部 RAII 对象中准备 Device 和 Direct Queue，
+全部成功后才调用私有构造函数。output 必须为空，失败不改变它，也不销毁环境。
+环境和 runtime 均无默认构造或 Initialize；队列由设备所有，runtime 仅借用。
 
-| 后端 | 创建顺序 | 清理顺序 |
+环境最多有一个活跃 runtime；销毁后可在同一环境内重建。无环境或已有 runtime 时创建失败，
+runtime 存活时环境销毁失败并保留资源。所有生命周期调用在环境初始化线程串行执行。
+环境初始化、设备创建及关闭的日志分别记录各自阶段；runtime ready 日志包含两种 validation 状态。
+
+两种设备均开启 RadRay external resource 扩展。传入宿主 GPU 身份时，按 LUID/node mask
+匹配适配器；无法匹配时保留可用设备并记录警告，导入端拒绝不同 GPU 的预览。
+无宿主身份时使用 RadRay 的高性能设备选择。设备创建失败仍属于游戏启动失败。
+
+| 后端 | 环境初始化 | runtime 创建/关闭 | 环境销毁 |
+| --- | --- | --- | --- |
+| D3D12 | 创建 DXGI factory、配置诊断 | 借用 factory → Device/Direct Queue；关闭时 Wait → Device | 释放 factory 和诊断上下文 |
+| Vulkan | InitEnv、配置诊断 | 借用 instance → Device/Direct Queue；关闭时 Wait → Device | ShutdownEnv |
+
+资源重载与切换世界不重建设备。退出依次关闭预览、runtime、环境，再卸载 DLL。
+环境不是运行期切换后端的入口；没有 native 工作线程、回调或 GC/Cleaner 回收路径。
+
+## 共享预览与 UV 绘制
+
+`Preview::Create` 使用局部 `Resources` RAII 准备全部资源，成功后才构造预览对象。
+一个 runtime 只允许一个预览；创建不提交 GPU 工作。尺寸范围为每轴 1..16384。
+资源包括一张 RGBA8_UNORM、单 mip/层/采样、颜色附件和复制源用途的纹理，
+两条可导出 timeline fence（ready/consumed），以及单个 allocator/command buffer、view、shader 和 pipeline。
+
+| 后端 | 纹理导出 | fence 导出 |
 | --- | --- | --- |
-| D3D12 | DXGI Factory → 高性能适配器 → Device → Direct Queue | 队列 Wait → Device → Factory |
-| Vulkan | InitEnv → 高性能物理设备 → Device → Direct Queue | 队列 Wait → Device → ShutdownEnv |
+| D3D12 | D3D12Resource | D3D12Fence |
+| Vulkan | OpaqueWin32 | OpaqueWin32 |
 
-队列是设备所有的借用对象，不单独 delete。Create 的局部 guard 只在本次取得 Vulkan 环境所有权后负责 ShutdownEnv；成功构造后将该责任交给 runtime；RadRay 目前只允许一个活跃 Vulkan 环境。宿主契约是每客户端一个活跃 runtime，释放后可以重新创建。当前没有全局 registry，也不支持跨线程并发访问 RHI。
+导出 Win32 句柄由预览中的 RadRay RAII 对象持有，Java 仅借用导入。
+Vulkan 导出还携带精确分配大小、memory type、device/driver UUID 和图像创建参数。
+两种路径均使用 dedicated allocation，offset=0；所有权转移只涉及小 RT。
 
-Debug 启用 RadRay 默认 RHI 校验，Release 关闭；驱动调试层、同步验证层和 GPU validation 均未开启。日志包含创建阶段、后端、GPU 名称和队列等待，底层具体失败原因仍由 RadRay 输出。当前没有 Java 日志 upcall，runtime 和 bridge 也没有 C++ try/catch；RHI 返回的可恢复失败转换为状态码，底层异常或不可恢复驱动错误不承诺生成 Java 崩溃报告。
+`native/shaders/uv.hlsl` 使用全屏三角形与 SV_Position 实际绘制，
+DXIL/SPIR-V 均由同一源离线生成到 `uv_bytecode.h`，嵌入 DLL。
+显示结果为 `(u,v,0,1)`，左上原点。预览 shader 的 V 分量反向以补偿 MC 最终 blit 的 Y 翻转；
+这是当前开发显示路径的坐标约定。运行时不依赖 DXC，不读回像素。
 
-正常退出严格先销毁 runtime，再关闭 library arena。当前没有 native 工作线程或回调。强杀进程、JVM/native 崩溃及其他模组提前终止生命周期事件不保证执行关闭回调；不通过 shutdown hook 在未知线程操作 RHI。
+每次 Draw 的序号从 1 开始严格递增。复用命令槽前，CPU 等待自身上一轮 ready 完成（5 秒上限）；
+GPU 提交等待 consumed(n−1)，acquire 小 RT、绘制、release 到 Common/GENERAL，再 signal ready(n)。
+首帧从 Undefined 初始化，不等待 consumed。每条 timeline 仅有一个 signal 方。
+正常帧不调用整队列 Wait；等待、提交和复制关系见 [MC 接入](minecraft-integration.md#逐帧交接)。
 
-## 依赖能力与项目边界
+销毁先由宿主完成消费并销毁导入对象，native `Finish` 确认自身提交完成后才释放资源。
+超时返回失败且保留预览；不能把超时当完成，不能随后卸载 DLL。
+C ABI 不捕获底层异常，RadRay 的不可恢复错误不保证转换成 FAILED；强杀或设备丢失不保证正常关闭。
 
-2026-10-26 调查时，`native/radray.lock.json` 指定的 RadRay 公共 RHI 定义了纹理、命令、读回 buffer、`CopyTextureToBuffer`、Map/Invalidate 和 fence 同步接口。Raynium 当前仅消费设备与队列创建/关闭，没有调用这些读回或绘制接口。
+## 依赖边界
 
-该版本的公共 RHI 没有完整的共享图像/同步对象导入导出接口；`ResourceHint::External` 的存在不表示已有跨设备共享服务。源码位置见 RadRay 仓库中的 [rhi.h](https://github.com/ksgfk/RadRay)（`modules/render/include/radray/render/rhi.h`）、[D3D12 实现](https://github.com/ksgfk/RadRay)（`modules/render/src/d3d12/d3d12_impl.cpp`）与 [Vulkan 实现](https://github.com/ksgfk/RadRay)（`modules/render/src/vk/vulkan_impl.cpp`）。
-
-资源、帧、管线与输出的设计讨论见[思考历史](../history/2026-10-26-rendering-design-notes.md#当时的-native-runtime-草案)，不属于本文的已实现契约。
+2026-10-27 更新到 `native/radray.lock.json` 锁定的 RadRay develop 源码，
+本项目消费 `ExternalResourceExtension` 的支持查询、导出纹理/fence、身份和 external ownership barrier。
+上游入口为 [RadRay 仓库](https://github.com/ksgfk/RadRay)，接口位于
+`modules/render/include/radray/render/rhi.h`，实现位于 `modules/render/src/d3d12/` 和 `modules/render/src/vk/`。
+Raynium 不维护通用共享资源系统；Java 的 Vulkan 导入仅服务开发预览。

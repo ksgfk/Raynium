@@ -2,64 +2,72 @@
 #include <new>
 #include <utility>
 #include <radray/logger.h>
-#include <radray/scope_guard.h>
+#include <raynium/environment.h>
 
 namespace raynium {
 
 using namespace radray::render;
 
-RayniumRuntime::RayniumRuntime(radray::unique_ptr<DXGIFactory> factory,
-                               radray::shared_ptr<Device> device,
-                               CommandQueue* directQueue,
-                               bool ownsVulkanEnvironment) noexcept
-    : _factory(std::move(factory)),
-      _device(std::move(device)),
-      _directQueue(directQueue),
-      _ownsVulkanEnvironment(ownsVulkanEnvironment) {}
+namespace {
+template<class Infos, class CreateDevice>
+void MatchHost(radray::shared_ptr<Device>& device, const Infos& infos, uint32_t preferred,
+               CreateDevice create, const std::optional<ExternalDeviceIdentity>& host) {
+    if (!host) return;
+    const auto matches = [&](Device& candidate) {
+        auto extension = candidate.GetExternalResourceExtension();
+        if (!extension) return false;
+        auto identity = extension->GetDeviceIdentity();
+        auto* value = std::get_if<ExternalDeviceIdentity>(&identity);
+        return value && *value == *host;
+    };
+    if (matches(*device)) return;
+    for (const auto& info : infos) {
+        if (info.Index == preferred) continue;
+        auto candidate = create(info.Index);
+        if (candidate && matches(*candidate.Get())) {
+            device = candidate.Release();
+            return;
+        }
+    }
+    RADRAY_WARN_LOG("Raynium: no external-resource adapter matches the host; preview will be unavailable");
+}
+}
+
+RayniumRuntime::RayniumRuntime(radray::shared_ptr<Device> device,
+                               CommandQueue* directQueue) noexcept
+    : _device(std::move(device)), _directQueue(directQueue) {}
 
 RayniumRuntime::~RayniumRuntime() noexcept {
     RADRAY_INFO_LOG("RayniumRuntime: waiting for Direct queue");
     _directQueue->Wait();
     _device.reset();
-    _factory.reset();
-    if (_ownsVulkanEnvironment) InstanceVulkan::ShutdownEnv();
 }
 
-bool RayniumRuntime::Create(RenderBackend backend, radray::unique_ptr<RayniumRuntime>& output,
-                           std::string_view& error) noexcept {
+bool RayniumRuntime::Create(RayniumEnvironment& environment, radray::unique_ptr<RayniumRuntime>& output,
+                           std::string_view& error, const std::optional<ExternalDeviceIdentity>& host) noexcept {
     error = {};
     if (output) {
         error = "RayniumRuntime Create output must be empty";
         return false;
     }
 
-    bool ownsVulkanEnvironment = false;
-    // Declared before device/factory so failure destroys them before the environment.
-    auto environmentCleanup = radray::MakeScopeGuard([&]() noexcept {
-        if (ownsVulkanEnvironment) InstanceVulkan::ShutdownEnv();
-    });
-    radray::unique_ptr<DXGIFactory> factory;
+    const auto backend = environment.GetBackend();
     radray::shared_ptr<Device> device;
     RADRAY_INFO_LOG("RayniumRuntime: creating {}", backend);
 
     switch (backend) {
         case RenderBackend::D3D12: {
-            RADRAY_INFO_LOG("RayniumRuntime: creating DXGI factory");
-            auto createdFactory = DXGIFactory::Create({});
-            if (!createdFactory) {
-                error = "D3D12: DXGI factory creation failed";
-                return false;
-            }
-            factory = createdFactory.Release();
+            auto* factory = &environment.GetFactory();
             auto adapter = factory->SelectHighPerformanceAdapter();
             if (!adapter) {
                 error = "D3D12: no suitable high-performance adapter";
                 return false;
             }
             D3D12DeviceDescriptor desc{};
-            desc.Factory = factory.get();
+            desc.Factory = factory;
             desc.AdapterIndex = adapter;
             desc.QueueCounts = {1, 0, 0};
+            desc.EnableExternalResource = true;
             RADRAY_INFO_LOG("RayniumRuntime: creating D3D12 device on adapter {}", *adapter);
             auto createdDevice = Device::Create(DeviceDescriptor{desc});
             if (!createdDevice) {
@@ -67,19 +75,14 @@ bool RayniumRuntime::Create(RenderBackend backend, radray::unique_ptr<RayniumRun
                 return false;
             }
             device = createdDevice.Release();
+            MatchHost(device, factory->GetAdapters(), *adapter, [&](uint32_t index) {
+                desc.AdapterIndex = index;
+                return Device::Create(DeviceDescriptor{desc});
+            }, host);
             break;
         }
         case RenderBackend::Vulkan: {
-            RADRAY_INFO_LOG("RayniumRuntime: creating Vulkan environment");
-            VulkanInstanceDescriptor instanceDesc{};
-            instanceDesc.AppName = "Raynium";
-            instanceDesc.EngineName = "RayniumRuntime";
-            auto instance = InstanceVulkan::InitEnv(instanceDesc);
-            if (!instance) {
-                error = "Vulkan: environment creation failed (loader, instance or active environment)";
-                return false;
-            }
-            ownsVulkanEnvironment = true;
+            auto* instance = &environment.GetVulkanInstance();
             auto adapter = instance->SelectHighPerformancePhysicalDevice();
             if (!adapter) {
                 error = "Vulkan: no suitable high-performance physical device";
@@ -89,6 +92,7 @@ bool RayniumRuntime::Create(RenderBackend backend, radray::unique_ptr<RayniumRun
             VulkanDeviceDescriptor desc{};
             desc.PhysicalDeviceIndex = adapter;
             desc.Queues = queues;
+            desc.EnableExternalResource = true;
             RADRAY_INFO_LOG("RayniumRuntime: creating Vulkan device on adapter {}", *adapter);
             auto createdDevice = Device::Create(DeviceDescriptor{desc});
             if (!createdDevice) {
@@ -96,6 +100,10 @@ bool RayniumRuntime::Create(RenderBackend backend, radray::unique_ptr<RayniumRun
                 return false;
             }
             device = createdDevice.Release();
+            MatchHost(device, instance->GetPhysicalDevices(), *adapter, [&](uint32_t index) {
+                desc.PhysicalDeviceIndex = index;
+                return Device::Create(DeviceDescriptor{desc});
+            }, host);
             break;
         }
         default:
@@ -109,14 +117,14 @@ bool RayniumRuntime::Create(RenderBackend backend, radray::unique_ptr<RayniumRun
         return false;
     }
     radray::unique_ptr<RayniumRuntime> runtime{new (std::nothrow) RayniumRuntime{
-        std::move(factory), std::move(device), directQueue.Get(), ownsVulkanEnvironment}};
+        std::move(device), directQueue.Get()}};
     if (!runtime) {
         error = "Cannot allocate RayniumRuntime";
         return false;
     }
-    environmentCleanup.Dismiss();
-    RADRAY_INFO_LOG("RayniumRuntime: ready backend={} GPU={} Direct queues=1 RHI validation={}",
-                   runtime->_device->GetBackend(), runtime->_device->GetDetail().GpuName, RhiValidationOptions{}.IsEnabled);
+    RADRAY_INFO_LOG("RayniumRuntime: ready backend={} GPU={} Direct queues=1 RHI validation={} driver validation={}",
+                   runtime->_device->GetBackend(), runtime->_device->GetCapabilities().Detail.GpuName,
+                   RhiValidationOptions{}.IsEnabled, environment.IsValidationEnabled());
     output = std::move(runtime);
     return true;
 }

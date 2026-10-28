@@ -2,8 +2,11 @@
 
 #include <string_view>
 #include <radray/render/rhi.h>
+#include <radray/render/external_resource.h>
 
 namespace raynium {
+
+class RayniumEnvironment;
 
 // See doc/architecture/native-runtime.md for the runtime ownership contract.
 class RayniumRuntime final {
@@ -17,20 +20,21 @@ public:
 
     // output must be empty. Success transfers a complete object and clears error;
     // failure leaves output unchanged and returns a diagnostic with static lifetime.
-    [[nodiscard]] static bool Create(radray::render::RenderBackend backend,
+    // environment must outlive the runtime; its factory/instance is only borrowed.
+    [[nodiscard]] static bool Create(RayniumEnvironment& environment,
                                     radray::unique_ptr<RayniumRuntime>& output,
-                                    std::string_view& error) noexcept;
+                                    std::string_view& error,
+                                    const std::optional<radray::render::ExternalDeviceIdentity>& host = {}) noexcept;
+
+    radray::render::Device& GetDevice() noexcept { return *_device; }
+    radray::render::CommandQueue& GetQueue() noexcept { return *_directQueue; }
 
 private:
-    RayniumRuntime(radray::unique_ptr<radray::render::DXGIFactory> factory,
-                   radray::shared_ptr<radray::render::Device> device,
-                   radray::render::CommandQueue* directQueue,
-                   bool ownsVulkanEnvironment) noexcept;
+    RayniumRuntime(radray::shared_ptr<radray::render::Device> device,
+                   radray::render::CommandQueue* directQueue) noexcept;
 
-    radray::unique_ptr<radray::render::DXGIFactory> _factory;
     radray::shared_ptr<radray::render::Device> _device;
     radray::render::CommandQueue* _directQueue;
-    bool _ownsVulkanEnvironment;
 };
 
 }  // namespace raynium

@@ -20,11 +20,18 @@ final class NativeBindings {
             MemoryLayout.sequenceLayout(24, ValueLayout.JAVA_BYTE).withName("platform"),
             MemoryLayout.sequenceLayout(64, ValueLayout.JAVA_BYTE).withName("toolchain"));
     private final StructLayout runtimeDescLayout = MemoryLayout.structLayout(
-            ValueLayout.JAVA_INT.withName("struct_size"), ValueLayout.JAVA_INT.withName("backend"));
+            ValueLayout.JAVA_INT.withName("struct_size"), ValueLayout.JAVA_INT.withName("flags"),
+            ValueLayout.JAVA_INT.withName("node_mask"),
+            MemoryLayout.sequenceLayout(8, ValueLayout.JAVA_BYTE).withName("luid"));
     private final MethodHandle version;
     private final MethodHandle query;
+    private final MethodHandle initEnvironment;
+    private final MethodHandle destroyEnvironment;
     private final MethodHandle create;
     private final MethodHandle destroy;
+    private final MethodHandle createPreview;
+    private final MethodHandle drawPreview;
+    private final MethodHandle destroyPreview;
 
     NativeBindings(SymbolLookup library) {
         Linker linker = Linker.nativeLinker();
@@ -32,9 +39,20 @@ final class NativeBindings {
         version = bind(linker, library, "rn_get_abi_version", scalar);
         query = bind(linker, library, "rn_query_abi", FunctionDescriptor.of(ValueLayout.JAVA_INT,
                 ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+        initEnvironment = bind(linker, library, "rn_init_env",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+        destroyEnvironment = bind(linker, library, "rn_destroy_env",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
         create = bind(linker, library, "rn_create_runtime", FunctionDescriptor.of(ValueLayout.JAVA_INT,
                 ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
         destroy = bind(linker, library, "rn_destroy_runtime", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
+        createPreview = bind(linker, library, "rn_create_preview", FunctionDescriptor.of(ValueLayout.JAVA_INT,
+                ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+        drawPreview = bind(linker, library, "rn_draw_preview", FunctionDescriptor.of(ValueLayout.JAVA_INT,
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+        destroyPreview = bind(linker, library, "rn_destroy_preview", FunctionDescriptor.of(ValueLayout.JAVA_INT,
+                ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
     }
 
     int inspect(NativeManifest expected) {
@@ -68,17 +86,49 @@ final class NativeBindings {
         }
     }
 
-    MemorySegment createRuntime(NativeRuntime.Backend backend) {
+    void initEnvironment(NativeEnvironment.Backend backend, boolean validation) {
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment desc = scratch.allocate(12, 4);
+            desc.set(ValueLayout.JAVA_INT, 0, 12);
+            desc.set(ValueLayout.JAVA_INT, 4, backend.nativeValue());
+            desc.set(ValueLayout.JAVA_INT, 8, validation ? 1 : 0);
+            MemorySegment error = scratch.allocate(1024);
+            int status = (int) initEnvironment.invokeExact(desc, error, 1024);
+            if (status != 0) throw new IllegalStateException("rn_init_env failed: " + error.getString(0));
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new IllegalStateException("Cannot initialize native environment", failure);
+        }
+    }
+
+    void destroyEnvironment() {
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment error = scratch.allocate(1024);
+            int status = (int) destroyEnvironment.invokeExact(error, 1024);
+            if (status != 0) throw new IllegalStateException("rn_destroy_env failed: " + error.getString(0));
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new IllegalStateException("Cannot destroy native environment", failure);
+        }
+    }
+
+    MemorySegment createRuntime(NativeRuntime.HostGpu host) {
         try (Arena scratch = Arena.ofConfined()) {
             MemorySegment desc = scratch.allocate(runtimeDescLayout);
             desc.set(ValueLayout.JAVA_INT, runtimeDescLayout.byteOffset(MemoryLayout.PathElement.groupElement("struct_size")),
                     (int) runtimeDescLayout.byteSize());
-            desc.set(ValueLayout.JAVA_INT, runtimeDescLayout.byteOffset(MemoryLayout.PathElement.groupElement("backend")), backend.nativeValue());
+            desc.set(ValueLayout.JAVA_INT, 4, host == null ? 0 : 1);
+            if (host != null) {
+                desc.set(ValueLayout.JAVA_INT, 8, host.nodeMask());
+                MemorySegment.copy(MemorySegment.ofArray(host.luid()), 0, desc, 12, 8);
+            }
             MemorySegment output = scratch.allocate(ValueLayout.ADDRESS);
             MemorySegment error = scratch.allocate(1024);
             int status = (int) create.invokeExact(desc, output, error, 1024);
             if (status != 0) {
-                throw new IllegalStateException("rn_create_runtime(" + backend.propertyValue() + ") failed, status="
+                throw new IllegalStateException("rn_create_runtime failed, status="
                         + status + ": " + error.getString(0));
             }
             MemorySegment handle = output.get(ValueLayout.ADDRESS, 0);
@@ -99,6 +149,59 @@ final class NativeBindings {
             throw failure;
         } catch (Throwable failure) {
             throw new IllegalStateException("Cannot destroy the Raynium runtime", failure);
+        }
+    }
+
+    record CreatedPreview(MemorySegment handle, NativePreview.Info info) {}
+
+    CreatedPreview createPreview(MemorySegment runtime, int width, int height) {
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment desc = scratch.allocate(16, 4);
+            desc.set(ValueLayout.JAVA_INT, 0, 16);
+            desc.set(ValueLayout.JAVA_INT, 4, width);
+            desc.set(ValueLayout.JAVA_INT, 8, height);
+            MemorySegment output = scratch.allocate(ValueLayout.ADDRESS);
+            MemorySegment info = scratch.allocate(128, 8);
+            MemorySegment error = scratch.allocate(1024);
+            int status = (int) createPreview.invokeExact(runtime, desc, output, info, 128, error, 1024);
+            if (status != 0) throw new IllegalStateException("rn_create_preview: " + error.getString(0));
+            MemorySegment handle = output.get(ValueLayout.ADDRESS, 0);
+            if (handle.equals(MemorySegment.NULL)) throw new IllegalStateException("Null preview on success");
+            try {
+                return new CreatedPreview(handle, NativePreview.Info.read(info));
+            } catch (RuntimeException | Error failure) {
+                // Creation has not submitted GPU work, so an unreadable descriptor is safe to release.
+                try { destroyPreview(handle); } catch (RuntimeException cleanup) { failure.addSuppressed(cleanup); }
+                throw failure;
+            }
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new IllegalStateException("Cannot create preview", failure);
+        }
+    }
+
+    void drawPreview(MemorySegment preview, long sequence) {
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment error = scratch.allocate(1024);
+            int status = (int) drawPreview.invokeExact(preview, sequence, error, 1024);
+            if (status != 0) throw new IllegalStateException("rn_draw_preview: " + error.getString(0));
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new IllegalStateException("Cannot draw preview", failure);
+        }
+    }
+
+    void destroyPreview(MemorySegment preview) {
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment error = scratch.allocate(1024);
+            int status = (int) destroyPreview.invokeExact(preview, error, 1024);
+            if (status != 0) throw new IllegalStateException("rn_destroy_preview: " + error.getString(0));
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new IllegalStateException("Cannot destroy preview", failure);
         }
     }
 
