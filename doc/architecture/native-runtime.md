@@ -4,8 +4,8 @@
 
 # Native runtime
 
-runtime 通过 RadRay RHI 创建设备和一条 Direct 队列，并支持一个共享 UV 预览 RT。
-没有 swapchain、场景资源服务或世界渲染实现。MC 接入见 [Minecraft 接入](minecraft-integration.md)，
+runtime 通过 RadRay RHI 创建设备和一条 Direct 队列，支持一个共享预览 RT 和一个独立 SOLID 地形会话。
+地形资源与绘制见[地形预览](terrain-preview.md)；没有 swapchain 或通用场景资源服务。MC 接入见 [Minecraft 接入](minecraft-integration.md)，
 接口和借用规则见 [互操作与加载](interop.md)，实际验证范围见[构建与测试](../guide/build-test.md#当前验证范围)。
 
 ## 单例环境与设备会话
@@ -42,7 +42,7 @@ runtime 存活时环境销毁失败并保留资源。所有生命周期调用在
 | D3D12 | 创建 DXGI factory、配置诊断 | 借用 factory → Device/Direct Queue；关闭时 Wait → Device | 释放 factory 和诊断上下文 |
 | Vulkan | InitEnv、配置诊断 | 借用 instance → Device/Direct Queue；关闭时 Wait → Device | ShutdownEnv |
 
-资源重载与切换世界不重建设备。退出依次关闭预览、runtime、环境，再卸载 DLL。
+资源重载与切换世界不重建设备。退出依次关闭输出预览、地形会话、runtime、环境，再卸载 DLL。
 环境不是运行期切换后端的入口；没有 native 工作线程、回调或 GC/Cleaner 回收路径。
 
 ## 共享预览与 UV 绘制
@@ -50,7 +50,7 @@ runtime 存活时环境销毁失败并保留资源。所有生命周期调用在
 `Preview::Create` 使用局部 `Resources` RAII 准备全部资源，成功后才构造预览对象。
 一个 runtime 只允许一个预览；创建不提交 GPU 工作。尺寸范围为每轴 1..16384。
 资源包括一张 RGBA8_UNORM、单 mip/层/采样、颜色附件和复制源用途的纹理，
-两条可导出 timeline fence（ready/consumed），以及单个 allocator/command buffer、view、shader 和 pipeline。
+两条可导出 timeline fence（ready/consumed），以及两组 allocator/command buffer、view、UV shader 和 pipeline；另有私有 D32 深度附件供地形绘制。
 
 | 后端 | 纹理导出 | fence 导出 |
 | --- | --- | --- |
@@ -59,14 +59,14 @@ runtime 存活时环境销毁失败并保留资源。所有生命周期调用在
 
 导出 Win32 句柄由预览中的 RadRay RAII 对象持有，Java 仅借用导入。
 Vulkan 导出还携带精确分配大小、memory type、device/driver UUID 和图像创建参数。
-两种路径均使用 dedicated allocation，offset=0；所有权转移只涉及小 RT。
+两种路径均使用 dedicated allocation，offset=0；输出交接只转移小 RT；地形输入有独立的所有权与 timeline。
 
 `native/shaders/uv.hlsl` 使用全屏三角形与 SV_Position 实际绘制，
 DXIL/SPIR-V 均由同一源离线生成到 `uv_bytecode.h`，嵌入 DLL。
 显示结果为 `(u,v,0,1)`，左上原点。预览 shader 的 V 分量反向以补偿 MC 最终 blit 的 Y 翻转；
 这是当前开发显示路径的坐标约定。运行时不依赖 DXC，不读回像素。
 
-每次 Draw 的序号从 1 开始严格递增。复用命令槽前，CPU 等待自身上一轮 ready 完成（5 秒上限）；
+每次 Draw 的序号从 1 开始严格递增。复用命令槽前，CPU 等待该槽前次 ready(n−2) 完成（5 秒上限）；
 GPU 提交等待 consumed(n−1)，acquire 小 RT、绘制、release 到 Common/GENERAL，再 signal ready(n)。
 首帧从 Undefined 初始化，不等待 consumed。每条 timeline 仅有一个 signal 方。
 正常帧不调用整队列 Wait；等待、提交和复制关系见 [MC 接入](minecraft-integration.md#逐帧交接)。
@@ -77,8 +77,8 @@ C ABI 不捕获底层异常，RadRay 的不可恢复错误不保证转换成 FAI
 
 ## 依赖边界
 
-2026-10-27 更新到 `native/radray.lock.json` 锁定的 RadRay develop 源码，
+2026-10-29 更新到 `native/radray.lock.json` 锁定的 RadRay develop 源码，
 本项目消费 `ExternalResourceExtension` 的支持查询、导出纹理/fence、身份和 external ownership barrier。
 上游入口为 [RadRay 仓库](https://github.com/ksgfk/RadRay)，接口位于
 `modules/render/include/radray/render/rhi.h`，实现位于 `modules/render/src/d3d12/` 和 `modules/render/src/vk/`。
-Raynium 不维护通用共享资源系统；Java 的 Vulkan 导入仅服务开发预览。
+Raynium 不维护通用共享资源系统；Java 的 Vulkan 导入服务预览输出和地形输入；当前锁定源码支持多 mip 的 ExternalTextureDescriptor，仍需按实际描述、用途、设备和驱动查询支持。

@@ -93,6 +93,9 @@ final class VulkanConsumer implements AutoCloseable {
     }
 
     void copyAndCheck(VulkanPreviewImage shared, long sequence, int width, int height) {
+        copyAndCheckSolid(shared,sequence,width,height,null);
+    }
+    void copyAndCheckSolid(VulkanPreviewImage shared, long sequence, int width, int height, int[] expected) {
         int fullWidth = width + 35, fullHeight = height + 29, x0 = 17, y0 = 11;
         int byteCount = fullWidth * fullHeight * 4;
         long target = 0, targetMemory = 0, buffer = 0, bufferMemory = 0;
@@ -161,6 +164,7 @@ final class VulkanConsumer implements AutoCloseable {
                     int r = inside ? Math.round((x - x0 + .5f) / width * 255) : 8;
                     int g = inside ? Math.round((1 - (y - y0 + .5f) / height) * 255) : 16;
                     int b = inside ? 0 : 32;
+                    if(inside && expected!=null) { r=expected[0]; g=expected[1]; b=expected[2]; }
                     int offset = (y * fullWidth + x) * 4;
                     assertEquals(r, Byte.toUnsignedInt(pixels.get(offset)), 1, "red x=" + x + " y=" + y);
                     assertEquals(g, Byte.toUnsignedInt(pixels.get(offset + 1)), 1, "green x=" + x + " y=" + y);
@@ -175,6 +179,61 @@ final class VulkanConsumer implements AutoCloseable {
             if (targetMemory != 0) vkFreeMemory(device, targetMemory, null);
         }
         assertTrue(errors.isEmpty(), String.join("\n", errors));
+    }
+
+    void writeTerrainInputs(java.util.List<VulkanPreviewImage> images, boolean split, int width, int height, int mips, long sequence) {
+        writeTerrainInputs(images,split,width,height,mips,sequence,false);
+    }
+    void writeTerrainInputs(java.util.List<VulkanPreviewImage> images, boolean split, int width, int height, int mips, long sequence, boolean flat) {
+        long texture=0, memory=0;
+        try(var stack=MemoryStack.stackPush()) {
+            var handle=stack.mallocLong(1);
+            var create=VkImageCreateInfo.calloc(stack).sType$Default().imageType(VK_IMAGE_TYPE_2D).format(VK_FORMAT_R8G8B8A8_UNORM)
+                .mipLevels(mips).arrayLayers(1).samples(VK_SAMPLE_COUNT_1_BIT).tiling(VK_IMAGE_TILING_OPTIMAL)
+                .usage(VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+            create.extent().set(Math.max(width,16),Math.max(height,16),1);
+            check(vkCreateImage(device,create,null,handle),"create terrain test source"); texture=handle.get(0);
+            var requirements=VkMemoryRequirements.calloc(stack); vkGetImageMemoryRequirements(device,texture,requirements);
+            var allocation=VkMemoryAllocateInfo.calloc(stack).sType$Default().allocationSize(requirements.size())
+                .memoryTypeIndex(memoryType(requirements.memoryTypeBits(),VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,stack));
+            check(vkAllocateMemory(device,allocation,null,handle),"allocate terrain test source"); memory=handle.get(0);
+            check(vkBindImageMemory(device,texture,memory,0),"bind terrain test source");
+            check(vkResetCommandPool(device,pool,0),"reset producer pool"); check(vkResetFences(device,fence),"reset producer fence");
+            var allocate=VkCommandBufferAllocateInfo.calloc(stack).sType$Default().commandPool(pool).level(VK_COMMAND_BUFFER_LEVEL_PRIMARY).commandBufferCount(1);
+            var pointer=stack.mallocPointer(1); check(vkAllocateCommandBuffers(device,allocate,pointer),"allocate producer commands");
+            var command=new VkCommandBuffer(pointer.get(0),device);
+            check(vkBeginCommandBuffer(command,VkCommandBufferBeginInfo.calloc(stack).sType$Default()),"begin producer commands");
+            var barrier=VkImageMemoryBarrier.calloc(1,stack).sType$Default().image(texture).oldLayout(VK_IMAGE_LAYOUT_UNDEFINED).newLayout(VK_IMAGE_LAYOUT_GENERAL)
+                .srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED).dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED).dstAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
+            barrier.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).levelCount(mips).layerCount(1);
+            vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,null,null,barrier);
+            for(int mip=0;mip<mips;mip++) {
+                var color=VkClearColorValue.calloc(stack).float32(0,(32+(flat?0:mip)*32)/255f).float32(1,(64+(flat?0:mip)*16)/255f).float32(2,128/255f).float32(3,1);
+                var range=VkImageSubresourceRange.calloc(1,stack).aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).baseMipLevel(mip).levelCount(1).layerCount(1);
+                vkCmdClearColorImage(command,texture,VK_IMAGE_LAYOUT_GENERAL,color,range);
+            }
+            for(var image:images) image.beginWrite(command);
+            for(int mip=0;mip<mips;mip++) images.get(split?mip:0).copyFrom(command,texture,mip,split?0:mip,0,0,Math.max(1,width>>mip),Math.max(1,height>>mip));
+            // Reuse source level zero for a white lightmap, after all atlas reads finish.
+            var memoryBarrier=VkMemoryBarrier.calloc(1,stack).sType$Default().srcAccessMask(VK_ACCESS_TRANSFER_READ_BIT).dstAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
+            vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,memoryBarrier,null,null);
+            var white=VkClearColorValue.calloc(stack).float32(0,1).float32(1,1).float32(2,1).float32(3,1);
+            var base=VkImageSubresourceRange.calloc(1,stack).aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).levelCount(1).layerCount(1);
+            vkCmdClearColorImage(command,texture,VK_IMAGE_LAYOUT_GENERAL,white,base);
+            memoryBarrier.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT).dstAccessMask(VK_ACCESS_TRANSFER_READ_BIT);
+            vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,memoryBarrier,null,null);
+            images.getLast().copyFrom(command,texture,0,0,0,0,16,16);
+            for(var image:images) image.endWrite(command);
+            check(vkEndCommandBuffer(command),"end producer commands");
+            var values=VkTimelineSemaphoreSubmitInfo.calloc(stack).sType$Default().pWaitSemaphoreValues(stack.longs(sequence)).pSignalSemaphoreValues(stack.longs(sequence));
+            var submit=VkSubmitInfo.calloc(1,stack).sType$Default().pNext(values.address()).pCommandBuffers(stack.pointers(command))
+                .pWaitSemaphores(stack.longs(images.getFirst().readySemaphore())).pWaitDstStageMask(stack.ints(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT))
+                .pSignalSemaphores(stack.longs(images.getFirst().consumedSemaphore()));
+            check(vkQueueSubmit(queue,submit,fence),"submit terrain inputs"); check(vkWaitForFences(device,fence,true,5_000_000_000L),"wait terrain input copies");
+        } finally {
+            if(texture!=0) vkDestroyImage(device,texture,null);
+            if(memory!=0) vkFreeMemory(device,memory,null);
+        }
     }
 
     @Override public void close() {

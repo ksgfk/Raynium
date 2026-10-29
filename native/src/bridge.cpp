@@ -3,6 +3,8 @@
 #include <raynium/runtime.h>
 #include <raynium/environment.h>
 #include <raynium/preview.h>
+#include <raynium/terrain.h>
+#include <bit>
 #include <radray/logger.h>
 #include <algorithm>
 #include <cstddef>
@@ -45,6 +47,12 @@ static_assert(offsetof(rn_preview_info, allocation_offset) == 112);
 struct rn_runtime {
     radray::unique_ptr<raynium::RayniumRuntime> runtime;
     rn_preview* preview{nullptr};
+    rn_terrain* terrain{nullptr};
+};
+
+struct rn_terrain {
+    rn_runtime* owner;
+    radray::unique_ptr<raynium::Terrain> terrain;
 };
 
 struct rn_preview {
@@ -198,7 +206,7 @@ rn_status rn_create_runtime(const rn_runtime_desc* desc, rn_runtime** out_runtim
 
 void rn_destroy_runtime(rn_runtime* runtime) noexcept {
     if (!runtime) return;
-    if (runtime != activeRuntime || !environment || !environment->IsOwnerThread() || runtime->preview) {
+    if (runtime != activeRuntime || !environment || !environment->IsOwnerThread() || runtime->preview || runtime->terrain) {
         RADRAY_ERR_LOG("Cannot destroy runtime: wrong owner/thread or live preview");
         return;
     }
@@ -266,4 +274,55 @@ rn_status rn_destroy_preview(rn_preview* preview, char* error_message, uint32_t 
     preview->owner->preview = nullptr;
     delete preview;
     return RN_STATUS_OK;
+}
+
+static_assert(sizeof(rn_terrain_desc)==24);
+static_assert(sizeof(rn_terrain_mesh)==56);
+static_assert(sizeof(rn_terrain_draw)==32);
+static_assert(sizeof(rn_terrain_frame)==248);
+static_assert(offsetof(rn_terrain_frame,projection)==64);
+
+rn_status rn_create_terrain(rn_runtime* runtime, const rn_terrain_desc* desc, rn_terrain** output,
+    rn_preview_info* images, uint32_t capacity, char* error, uint32_t error_capacity) noexcept {
+    if(output) *output=nullptr;
+    WriteError(error,error_capacity,{});
+    if(!error && error_capacity) return RN_STATUS_FAILED;
+    if(runtime!=activeRuntime || !runtime || !environment || !environment->IsOwnerThread() || runtime->terrain ||
+       !desc || !output || !images || desc->struct_size!=sizeof(*desc) || desc->reserved || desc->split_mips>1 ||
+       !desc->width || !desc->height || desc->width>16384 || desc->height>16384 || !desc->mip_levels ||
+       desc->mip_levels>uint32_t(std::bit_width(std::max(desc->width,desc->height))) ||
+       capacity<(desc->split_mips ? desc->mip_levels+1 : 2)) {
+        WriteError(error,error_capacity,"Invalid terrain descriptor, owner, or image capacity"); return RN_STATUS_FAILED;
+    }
+    radray::unique_ptr<rn_terrain> owned{new(std::nothrow) rn_terrain{runtime,{}}};
+    if(!owned) { WriteError(error,error_capacity,"Cannot allocate terrain handle"); return RN_STATUS_FAILED; }
+    rn_preview_info result[16]{}; radray::string failure;
+    if(!raynium::Terrain::Create(*runtime->runtime,*desc,owned->terrain,result,failure)) {
+        WriteError(error,error_capacity,failure); return RN_STATUS_FAILED;
+    }
+    std::copy_n(result,desc->split_mips ? desc->mip_levels+1 : 2,images);
+    *output=owned.release(); runtime->terrain=*output; return RN_STATUS_OK;
+}
+rn_status rn_draw_terrain(rn_preview* preview, rn_terrain* terrain, uint64_t sequence,
+    const rn_terrain_frame* frame, char* error, uint32_t error_capacity) noexcept {
+    WriteError(error,error_capacity,{});
+    if(!error && error_capacity) return RN_STATUS_FAILED;
+    if(!preview || !terrain || !frame || preview->owner!=terrain->owner ||
+       !environment || !environment->IsOwnerThread()) {
+        WriteError(error,error_capacity,"Invalid terrain draw owner or frame"); return RN_STATUS_FAILED;
+    }
+    radray::string failure;
+    if(!preview->preview->DrawTerrain(sequence,*terrain->terrain,*frame,failure)) {
+        WriteError(error,error_capacity,failure); return RN_STATUS_FAILED;
+    }
+    return RN_STATUS_OK;
+}
+rn_status rn_destroy_terrain(rn_terrain* terrain, char* error, uint32_t error_capacity) noexcept {
+    WriteError(error,error_capacity,{});
+    if(!error && error_capacity) return RN_STATUS_FAILED;
+    if(!terrain) return RN_STATUS_OK;
+    if(!environment || !environment->IsOwnerThread()) { WriteError(error,error_capacity,"Wrong terrain thread"); return RN_STATUS_FAILED; }
+    radray::string failure;
+    if(!terrain->terrain->Finish(failure)) { WriteError(error,error_capacity,failure); return RN_STATUS_FAILED; }
+    terrain->owner->terrain=nullptr; delete terrain; return RN_STATUS_OK;
 }

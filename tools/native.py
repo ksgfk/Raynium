@@ -120,7 +120,7 @@ def collect_licenses(radray, destination):
 
 def check_manifest(manifest):
     if (manifest.get('schemaVersion') != 1 or manifest.get('platform') != 'windows-x86_64'
-            or manifest.get('abiVersion') != 6 or manifest.get('abiInfoSize') != 240
+            or manifest.get('abiVersion') != 7 or manifest.get('abiInfoSize') != 240
             or manifest.get('crt') != 'MT' or manifest.get('configuration') not in ('Debug', 'Release')
             or not isinstance(manifest.get('radrayDirty'), bool)):
         raise RuntimeError('Unsupported native manifest.')

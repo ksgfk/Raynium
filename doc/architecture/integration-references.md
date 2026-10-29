@@ -358,7 +358,7 @@ MCVR 的 chunk instance 变换使用整数相机 base 加小数 fraction，并�
 
 ### 与 Raynium 当前状态的关系
 
-本次只调查，不向 Raynium 加入场景采集接口。Raynium 当前仍是 native UV 小 RT 与 MC Vulkan 的帧末共享复制；没有上述地形、实体、纹理镜像或光源导出，当前事实见 [Minecraft 接入](minecraft-integration.md)。小 RT 在主屏幕中只占一个矩形，这个输出位置本身没有定义需要从 MC 世界采集哪些对象。
+该次调查没有加入场景采集接口。Raynium 后续实现的 SOLID 地形预览、共享输入及其边界见[地形预览](terrain-preview.md)；第三方源码调查不代表本项目已实现相同接口。
 
 版本边界已有实际源码差异：Raynium 的 MC 26.3 `SectionCompiler.compile` 使用 `BlockStateModelSet`、模型 quad output 和流体输出；`DefaultVertexFormat.BLOCK` 有 Position、Color、UV0、UV2，没有 Normal。动态对象经状态提取、submit nodes 和 feature dispatcher 组织。两模组旧版的 `SectionBuilder` / `VertexConsumerProvider` 注入点与顶点假设不能当成 26.3 已有接口。具体源码定位与生成方式仍由 [Minecraft 渲染流程](minecraft-rendering.md)维护。
 

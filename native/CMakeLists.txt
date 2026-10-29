@@ -101,7 +101,8 @@ add_library(rayniumruntime SHARED
     src/environment.cpp include/raynium/environment.h
     src/bridge.cpp include/raynium/bridge.h
     src/runtime.cpp include/raynium/runtime.h
-    src/preview.cpp include/raynium/preview.h)
+    src/preview.cpp include/raynium/preview.h
+    src/terrain.cpp include/raynium/terrain.h)
 target_compile_features(rayniumruntime PRIVATE cxx_std_20)
 target_include_directories(rayniumruntime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_compile_definitions(rayniumruntime PRIVATE RAYNIUM_RUNTIME_EXPORTS)

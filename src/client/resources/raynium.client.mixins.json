@@ -2,7 +2,18 @@
   "required": true,
   "package": "dev.raynium.client.mixin",
   "compatibilityLevel": "JAVA_25",
-  "client": ["MinecraftPreviewMixin", "VulkanFeatureSetsMixin", "VulkanCommandEncoderAccessor"],
+  "client": [
+    "MinecraftPreviewMixin",
+    "VulkanFeatureSetsMixin",
+    "VulkanCommandEncoderAccessor",
+    "SectionCompilerMixin",
+    "SectionResultsMixin",
+    "CompiledSectionMeshMixin",
+    "LevelTerrainMixin",
+    "GameTerrainMixin",
+    "TerrainAtlasMixin",
+    "TerrainLightmapMixin"
+  ],
   "injectors": {
     "defaultRequire": 1
   }

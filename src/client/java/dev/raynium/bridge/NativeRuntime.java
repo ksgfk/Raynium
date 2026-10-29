@@ -18,6 +18,7 @@ public final class NativeRuntime implements AutoCloseable {
     private MemorySegment handle = MemorySegment.NULL;
     private boolean closed;
     private NativePreview preview;
+    private NativeTerrain terrain;
 
     NativeRuntime(NativeEnvironment environment, NativeBindings bindings, Logger logger, HostGpu host) {
         this.environment = environment;
@@ -40,6 +41,16 @@ public final class NativeRuntime implements AutoCloseable {
         return preview;
     }
 
+    public NativeTerrain createTerrain(int width, int height, int mipLevels, boolean splitMips) {
+        checkOpen();
+        if (terrain != null) throw new IllegalStateException("Runtime already has terrain");
+        terrain = NativeTerrain.create(this,bindings,handle,width,height,mipLevels,splitMips);
+        return terrain;
+    }
+    void releasedTerrain(NativeTerrain value) {
+        if (terrain != value) throw new IllegalStateException("Terrain owner mismatch");
+        terrain=null;
+    }
     void checkOpen() {
         environment.checkOpen();
         if (closed) throw new IllegalStateException("Runtime is closed");
@@ -58,7 +69,7 @@ public final class NativeRuntime implements AutoCloseable {
     public void close() {
         checkThread();
         if (closed) return;
-        if (preview != null) throw new IllegalStateException("Close the preview after consumer completion before closing runtime");
+        if (preview != null || terrain != null) throw new IllegalStateException("Close the preview and terrain after consumer completion before closing runtime");
         if (!handle.equals(MemorySegment.NULL)) {
             bindings.destroyRuntime(handle);
             handle = MemorySegment.NULL;

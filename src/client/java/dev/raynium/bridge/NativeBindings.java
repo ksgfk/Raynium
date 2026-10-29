@@ -32,6 +32,7 @@ final class NativeBindings {
     private final MethodHandle createPreview;
     private final MethodHandle drawPreview;
     private final MethodHandle destroyPreview;
+    final MethodHandle createTerrain, drawTerrain, destroyTerrain;
 
     NativeBindings(SymbolLookup library) {
         Linker linker = Linker.nativeLinker();
@@ -53,6 +54,12 @@ final class NativeBindings {
                 ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
         destroyPreview = bind(linker, library, "rn_destroy_preview", FunctionDescriptor.of(ValueLayout.JAVA_INT,
                 ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+        createTerrain=bind(linker,library,"rn_create_terrain",FunctionDescriptor.of(ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
+        drawTerrain=bind(linker,library,"rn_draw_terrain",FunctionDescriptor.of(ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_LONG,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
+        destroyTerrain=bind(linker,library,"rn_destroy_terrain",FunctionDescriptor.of(ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
     }
 
     int inspect(NativeManifest expected) {

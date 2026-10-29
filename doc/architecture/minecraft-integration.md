@@ -47,10 +47,19 @@ handle 和 name 非空。导入函数检查函数地址和句柄后，通过 LWJ
 最终可见左上为黑，右上红，左下绿，右下黄。
 源码命名基线与生成入口见 [Minecraft 渲染流程](minecraft-rendering.md)。
 
+## 地形接入
+
+默认内容由 `client/terrain` 和地形 Mixin 提供，只采集 SOLID；CUTOUT 与 TRANSLUCENT 不进入预览。
+`SectionCompilerMixin` 在 worker 返回时复制顶点，`CompiledSectionMeshMixin` 绑定同一结果和关闭事件；
+`LevelTerrainMixin` 在原版准备地形 draw 时冻结已采用的可见 mesh；`GameTerrainMixin` 捕获最终世界投影。
+图集动画与 lightmap 的脏标记在原版写入时更新。lightmap 创建增加 COPY_SRC 用途。
+`Lightmap.render` 返回后录制输入复制和 signal；原版 `GameRenderer.render` 返回后提交 native 绘制，再复制输出 RT。
+数据、输入同步和 fallback 的权威说明见[地形预览](terrain-preview.md)。
+
 ## 逐帧交接
 
 ```text
-runtime: 等待自身上一轮完成 → GPU wait consumed(n−1) → acquire → 绘制 → release → ready(n)
+runtime: 复用命令槽时等待 n−2 完成 → GPU wait consumed(n−1) → acquire → 绘制 → release → ready(n)
 MC:      原版绘制 → wait ready(n) → acquire → copy → release → consumed(n) → 原有 blit/submit/present
 ```
 
@@ -58,12 +67,12 @@ MC:      原版绘制 → wait ready(n) → acquire → copy → release → con
 wait/signal 添加到同一提交构建器，不增加正常帧中途 submit。
 小 RT acquire/release 只改变外部所有权；源和主 RT 在复制时均为 GENERAL。
 复制前后使用 ALL_COMMANDS / MEMORY_READ|WRITE 内存屏障衔接原版绘制和最终读取。
-runtime 的单槽复用与导出对象见 [Native runtime](native-runtime.md#共享预览与-uv-绘制)。
+runtime 的双槽复用与导出对象见 [Native runtime](native-runtime.md#共享预览与-uv-绘制)。
 
 尺寸改变时，先调用 backend encoder.submit 排出待执行工作，通过原有 MC 提交 fence 确认整次提交完成，再等待最后 consumed 和 ready，
 销毁 Java 导入对象及 native 预览，再以新尺寸创建，序号归零。backend submit 不触发 frontend 的 endFrame。
 最小化或无效尺寸暂停预览。退出执行相同排空顺序，随后关闭 runtime/DLL。
-不建立多槽、异步退役或 generation 协议。
+输出 resize 保留独立的地形会话、图集和几何；地形版本与退役协议见[地形预览](terrain-preview.md)。
 
 MC 非 Vulkan、显式关闭、能力不足、创建或导入失败时记录原因，本会话禁用预览并继续原版游戏。
 清理只在完成等待成功后释放资源；超时或 device lost 导致清理失败向上传播，保留活跃所有者，
@@ -71,6 +80,6 @@ MC 非 Vulkan、显式关闭、能力不足、创建或导入失败时记录原�
 
 ## 当前边界与验证
 
-原版世界、手持物、后处理、GUI 和呈现继续执行。预览仅覆盖指定矩形，内容是 native GPU 绘制的 UV。
-没有世界采集、区块映射、通用资源服务或窗口接管；运行路径不经过 CPU 像素读回。
+原版世界、手持物、后处理、GUI 和呈现继续执行。预览仅覆盖指定矩形，默认内容是 native GPU 绘制的 SOLID 地形，UV 可作为诊断模式。
+复用 MC 区块编译、采用和可见性，没有通用资源服务或窗口接管；运行路径不经过 CPU 像素读回。
 开关、启动命令、实际环境和覆盖限制见[构建与测试](../guide/build-test.md)。

@@ -3,8 +3,8 @@
 基于 Fabric 的 Minecraft 客户端模组，包含 Java FFM/C ABI 桥接与使用 RadRay RHI 的 native 设备会话。
 
 当前已接通 native 构建与分发、Java FFM、ABI 检查和 D3D12/Vulkan 设备会话。
-Windows MC Vulkan 可在右上角显示 native 共享 UV 小 RT 开发预览；原版世界渲染和呈现继续运行。
-通用资源服务、场景接入和窗口接管尚未实现。具体状态与文档索引见[架构地图](doc/architecture/overview.md)。
+Windows MC Vulkan 可在右上角显示 native 共享小 RT 的 SOLID 地形预览（保留 UV 诊断模式）；原版世界渲染和呈现继续运行。
+CUTOUT、TRANSLUCENT、通用资源服务和窗口接管尚未实现。具体状态与文档索引见[架构地图](doc/architecture/overview.md)。
 
 ## 开发入口
 

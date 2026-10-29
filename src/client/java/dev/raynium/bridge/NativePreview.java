@@ -44,6 +44,8 @@ public final class NativePreview implements AutoCloseable {
         bindings.drawPreview(handle, sequence);
     }
 
+    MemorySegment handle() { checkOpen(); return handle; }
+
     private void checkOpen() {
         owner.checkOpen();
         if (handle.equals(MemorySegment.NULL)) throw new IllegalStateException("Preview is closed");

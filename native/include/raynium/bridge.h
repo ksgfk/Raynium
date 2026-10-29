@@ -2,7 +2,40 @@
 
 #include <stdint.h>
 
-#define RN_ABI_VERSION 6u
+#if defined(RAYNIUM_RUNTIME_EXPORTS)
+#define RAYNIUM_API __declspec(dllexport)
+#else
+#define RAYNIUM_API __declspec(dllimport)
+#endif
+#define RN_ABI_VERSION 7u
+
+struct rn_runtime;
+struct rn_preview;
+struct rn_terrain;
+
+// Fixed-width unscoped enums preserve the Java FFM integer layout.
+enum rn_status : uint32_t {
+    RN_STATUS_OK = 0,
+    RN_STATUS_FAILED = 1
+};
+
+enum rn_backend : uint32_t {
+    RN_BACKEND_D3D12 = 1,
+    RN_BACKEND_VULKAN = 2
+};
+
+enum rn_runtime_flags : uint32_t {
+    RN_RUNTIME_MATCH_GPU = 1
+};
+
+enum rn_env_flags : uint32_t {
+    RN_ENV_VALIDATION = 1
+};
+
+enum rn_shared_handle_type : uint32_t {
+    RN_SHARED_D3D12 = 1,
+    RN_SHARED_OPAQUE_WIN32 = 2
+};
 
 // Strings are UTF-8, zero-terminated and stored inline; no allocation crosses this ABI.
 struct rn_abi_info {
@@ -17,31 +50,37 @@ struct rn_abi_info {
     char toolchain[64];
 };
 
-// Fixed-width unscoped enums preserve the Java FFM integer layout.
-enum rn_status : uint32_t {
-    RN_STATUS_OK = 0,
-    RN_STATUS_FAILED = 1
+struct rn_terrain_desc {
+    uint32_t struct_size, width, height, mip_levels;
+    uint32_t split_mips, reserved;
 };
 
-enum rn_backend : uint32_t {
-    RN_BACKEND_D3D12 = 1,
-    RN_BACKEND_VULKAN = 2
+// All pointers are borrowed for one draw call. IDs are monotonic within an epoch.
+struct rn_terrain_mesh {
+    uint64_t id;
+    const void* vertices;
+    uint32_t vertex_count, reserved;
+    uint32_t group_vertices[7];
 };
 
-struct rn_runtime;
-struct rn_preview;
-
-enum rn_runtime_flags : uint32_t {
-    RN_RUNTIME_MATCH_GPU = 1
+struct rn_terrain_draw {
+    uint64_t id;
+    int32_t origin[3];
+    float visibility;
+    uint32_t group_mask, reserved;
 };
 
-enum rn_env_flags : uint32_t {
-    RN_ENV_VALIDATION = 1
-};
-
-enum rn_shared_handle_type : uint32_t {
-    RN_SHARED_D3D12 = 1,
-    RN_SHARED_OPAQUE_WIN32 = 2
+struct rn_terrain_frame {
+    uint32_t struct_size, flags; // bit 0: direct draws; bit 1: atlas changed; bit 2: RGSS; bit 3: profile
+    uint64_t epoch, input_sequence;
+    const rn_terrain_mesh* updates;
+    const rn_terrain_draw* draws;
+    const uint64_t* removed;
+    uint32_t update_count, draw_count, removed_count, anisotropy;
+    float projection[16], view[16];
+    int32_t camera_block[3];
+    float camera_fraction[3];
+    float fog_color[4], fog_distances[4];
 };
 
 struct rn_env_desc {
@@ -88,12 +127,6 @@ struct rn_preview_info {
     uint32_t dedicated;
     uint32_t reserved;
 };
-
-#if defined(RAYNIUM_RUNTIME_EXPORTS)
-#define RAYNIUM_API __declspec(dllexport)
-#else
-#define RAYNIUM_API __declspec(dllimport)
-#endif
 
 // This header requires C++; exported functions use C linkage for Java FFM.
 extern "C" {
@@ -147,6 +180,17 @@ RAYNIUM_API rn_status rn_draw_preview(rn_preview* preview, uint64_t sequence,
 // NULL succeeds. Success destroys the preview; its pointer must not be reused.
 RAYNIUM_API rn_status rn_destroy_preview(rn_preview* preview,
                                       char* error_message, uint32_t error_capacity) noexcept;
+
+// Two images for direct sharing; mip_levels + 1 for split-mip fallback (lightmap last).
+// ready is signaled by native, starting at 1 after initialization/release; consumed
+// is signaled by the host after writing. Each successful frame consumes input(n),
+// then releases all input images and signals ready(n+1). No CPU pixel transfer.
+RAYNIUM_API rn_status rn_create_terrain(rn_runtime* runtime, const rn_terrain_desc* desc,
+    rn_terrain** output, rn_preview_info* images, uint32_t image_capacity,
+    char* error_message, uint32_t error_capacity) noexcept;
+RAYNIUM_API rn_status rn_draw_terrain(rn_preview* preview, rn_terrain* terrain, uint64_t sequence,
+    const rn_terrain_frame* frame, char* error_message, uint32_t error_capacity) noexcept;
+RAYNIUM_API rn_status rn_destroy_terrain(rn_terrain* terrain, char* error_message, uint32_t error_capacity) noexcept;
 
 }  // extern "C"
 

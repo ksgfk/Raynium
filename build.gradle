@@ -25,6 +25,11 @@ loom {
             vmArg '--enable-native-access=ALL-UNNAMED'
             property 'raynium.rhi.backend', providers.gradleProperty('rhiBackend').getOrElse('d3d12')
             property 'raynium.rhi.validation', providers.gradleProperty('rhiValidation').getOrElse('false')
+            property 'raynium.preview.content', providers.gradleProperty('previewContent').getOrElse('terrain')
+            property 'raynium.terrain.textureTransfer', providers.gradleProperty('terrainTextureTransfer').getOrElse('auto')
+            property 'raynium.terrain.profile', providers.gradleProperty('terrainProfile').getOrElse('false')
+            property 'raynium.terrain.disableFaceCull', providers.gradleProperty('terrainDisableFaceCull').getOrElse('false')
+            property 'raynium.terrain.directDraw', providers.gradleProperty('terrainDirectDraw').getOrElse('false')
             property 'raynium.preview.enabled', providers.gradleProperty('previewEnabled').getOrElse('true')
             if (providers.gradleProperty('vulkanValidation').getOrElse('false').toBoolean()) {
                 programArg '--vulkanValidation'

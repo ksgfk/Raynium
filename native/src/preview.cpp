@@ -1,5 +1,6 @@
 #include <raynium/preview.h>
 #include <raynium/uv_bytecode.h>
+#include <raynium/terrain.h>
 #include <algorithm>
 #include <limits>
 #include <new>
@@ -38,7 +39,7 @@ bool Preview::Create(RayniumRuntime& runtime, uint32_t width, uint32_t height,
     auto extension = device.GetExternalResourceExtension();
     if (!extension) { error = "External resources unavailable"; return false; }
     const bool vulkan = device.GetBackend() == RenderBackend::Vulkan;
-    const ExternalResourceDescriptor external{vulkan ? ExternalMemoryHandleType::OpaqueWin32 : ExternalMemoryHandleType::D3D12Resource};
+    const ExternalTextureDescriptor external{vulkan ? ExternalMemoryHandleType::OpaqueWin32 : ExternalMemoryHandleType::D3D12Resource};
     const auto fenceType = vulkan ? ExternalFenceHandleType::OpaqueWin32 : ExternalFenceHandleType::D3D12Fence;
     const TextureDescriptor desc{.Dim = TextureDimension::Dim2D, .Width = width, .Height = height,
         .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM,
@@ -64,19 +65,27 @@ bool Preview::Create(RayniumRuntime& runtime, uint32_t width, uint32_t height,
     resources.layout = device.CreatePipelineLayout({{}, {&push, 1}}).Unwrap();
     resources.view = device.CreateTextureView({resources.texture.get(), TextureDimension::Dim2D,
         desc.Format, {0, 1, 0, 1}, TextureViewUsage::RenderTarget}).Unwrap();
-    resources.allocator = device.CreateCommandAllocator(&runtime.GetQueue()).Unwrap();
-    if (!resources.vs || !resources.ps || !resources.layout || !resources.view || !resources.allocator) {
+    auto depthDesc=desc; depthDesc.Format=TextureFormat::D32_FLOAT; depthDesc.Usage=TextureUse::DepthStencilWrite;
+    resources.depth=device.CreateTexture(depthDesc).Unwrap();
+    if (!resources.depth) { error="Cannot create preview depth"; return false; }
+    resources.depthView=device.CreateTextureView({resources.depth.get(),TextureDimension::Dim2D,TextureFormat::D32_FLOAT,{0,1,0,1},TextureViewUsage::DepthWrite}).Unwrap();
+    for (auto& slot:resources.slots) {
+        slot.allocator=device.CreateCommandAllocator(&runtime.GetQueue()).Unwrap();
+        if (!slot.allocator) { error="Cannot create preview command allocator"; return false; }
+        slot.command=device.CreateCommandBuffer(slot.allocator.get()).Unwrap();
+        if (!slot.command) { error="Cannot create preview command buffer"; return false; }
+    }
+    if (!resources.vs || !resources.ps || !resources.layout || !resources.view || !resources.depthView) {
         error = "Cannot create UV shader, layout, view or command allocator";
         return false;
     }
-    resources.command = device.CreateCommandBuffer(resources.allocator.get()).Unwrap();
     auto primitive = PrimitiveState::Default();
     primitive.Cull = CullMode::None;
     const auto color = ColorTargetState::Default(desc.Format);
     resources.pipeline = device.CreateGraphicsPipelineState({.PipelineLayout = resources.layout.get(),
         .VS = ShaderEntry{resources.vs.get(), "VSMain"}, .PS = ShaderEntry{resources.ps.get(), "PSMain"}, .Primitive = primitive,
         .MultiSample = {1, std::numeric_limits<uint64_t>::max(), false}, .ColorTargets = {&color, 1}}).Unwrap();
-    if (!resources.command || !resources.pipeline) { error = "Cannot create UV pipeline or command buffer"; return false; }
+    if (!resources.pipeline) { error = "Cannot create UV pipeline or command buffer"; return false; }
     const auto& exported = resources.textureExport.Info;
     rn_preview_info result{};
     result.struct_size = sizeof(result);
@@ -118,37 +127,55 @@ bool Preview::Finish(radray::string& error) noexcept {
 }
 
 bool Preview::Draw(uint64_t sequence, radray::string& error) noexcept {
+    return DrawInternal(sequence,nullptr,nullptr,error);
+}
+bool Preview::DrawTerrain(uint64_t sequence, Terrain& terrain, const rn_terrain_frame& frame, radray::string& error) noexcept {
+    if (!terrain.Validate(frame,error)) return false;
+    return DrawInternal(sequence,&terrain,&frame,error);
+}
+bool Preview::DrawInternal(uint64_t sequence, Terrain* terrain, const rn_terrain_frame* frame, radray::string& error) noexcept {
     error.clear();
     if (!sequence || sequence == std::numeric_limits<uint64_t>::max() || sequence != _submitted + 1) {
-        error = "Preview sequence must start at 1 and increase by one";
-        return false;
+        error="Preview sequence must start at 1 and increase by one"; return false;
     }
-    if (!Finish(error)) return false;
-    auto& r = _resources;
-    r.allocator->Reset();
-    r.command->Begin();
-    Barrier(*r.command, r.texture.get(), _submitted ? TextureState::Common : TextureState::Undefined,
-        TextureState::RenderTarget, _submitted ? ExternalOwnershipTransfer::Acquire : ExternalOwnershipTransfer::None);
-    const RenderPassColorAttachment color{r.view.get(), LoadAction::Clear, StoreAction::Store};
-    auto pass = r.command->BeginRenderPass({.Colors = {&color, 1}, .Width = _width, .Height = _height}).Unwrap();
-    if (!pass) { r.command->End(); error = "Cannot begin UV render pass"; return false; }
-    pass->BindGraphicsPipelineState(r.pipeline.get());
-    pass->SetViewport({0, 0, float(_width), float(_height), 0, 1});
-    pass->SetScissor({0, 0, _width, _height});
-    const float size[]{float(_width), float(_height)};
-    const bool pushed = pass->SetPushConstants(0, 0, std::as_bytes(std::span{size}));
-    if (pushed) pass->Draw(3, 1, 0, 0);
-    r.command->EndRenderPass(std::move(pass));
-    Barrier(*r.command, r.texture.get(), TextureState::RenderTarget, TextureState::Common, ExternalOwnershipTransfer::Release);
-    r.command->End();
-    if (!pushed) { error = "Cannot set UV constants"; return false; }
-    CommandBuffer* commands[]{r.command.get()};
-    Fence* signals[]{r.ready.get()};
-    Fence* waits[]{r.consumed.get()};
-    _runtime.GetQueue().Submit({.CmdBuffers = commands, .SignalFences = signals, .SignalValues = {&sequence, 1},
-        .WaitFences = _submitted ? std::span{waits} : std::span<Fence*>{},
-        .WaitValues = _submitted ? std::span{&_submitted, 1} : std::span<uint64_t>{}});
-    _submitted = sequence;
+    if (sequence>2 && !_resources.ready->WaitFor(sequence-2,5000)) {
+        error="Preview command slot completion timed out; resources remain live"; return false;
+    }
+    auto& r=_resources; const uint32_t index=uint32_t((sequence-1)%2); auto& slot=r.slots[index];
+    slot.allocator->Reset(); slot.command->Begin();
+    if (terrain && !terrain->Prepare(*slot.command,index,*frame,error)) { slot.command->End(); return false; }
+    Barrier(*slot.command,r.texture.get(),_submitted ? TextureState::Common : TextureState::Undefined,
+        TextureState::RenderTarget,_submitted ? ExternalOwnershipTransfer::Acquire : ExternalOwnershipTransfer::None);
+    if (terrain) Barrier(*slot.command,r.depth.get(),_depthInitialized ? TextureState::DepthWrite : TextureState::Undefined,
+        TextureState::DepthWrite,ExternalOwnershipTransfer::None);
+    RenderPassColorAttachment color{r.view.get(),LoadAction::Clear,StoreAction::Store};
+    if (terrain) std::copy_n(frame->fog_color,4,color.Clear.Value.begin());
+    RenderPassBeginDescriptor begin{.Colors={&color,1},.Width=_width,.Height=_height};
+    if (terrain) begin.DepthStencil=RenderPassDepthStencilAttachment{.View=r.depthView.get(),.DepthLoad=LoadAction::Clear,
+        .DepthStore=StoreAction::Store,.Clear={0.0f,0}};
+    auto pass=slot.command->BeginRenderPass(begin).Unwrap();
+    if (!pass) { slot.command->End(); error="Cannot begin preview render pass"; return false; }
+    pass->SetViewport({0,0,float(_width),float(_height),0,1}); pass->SetScissor({0,0,_width,_height});
+    bool pushed=true;
+    if (terrain) terrain->Render(*pass,index,(frame->flags&1)!=0);
+    else {
+        pass->BindGraphicsPipelineState(r.pipeline.get()); const float size[]{float(_width),float(_height)};
+        pushed=pass->SetPushConstants(0,0,std::as_bytes(std::span{size})); if(pushed) pass->Draw(3,1,0,0);
+    }
+    slot.command->EndRenderPass(std::move(pass));
+    Barrier(*slot.command,r.texture.get(),TextureState::RenderTarget,TextureState::Common,ExternalOwnershipTransfer::Release);
+    if (terrain) terrain->Release(*slot.command,index);
+    slot.command->End();
+    if (!pushed) { error="Cannot set UV constants"; return false; }
+    CommandBuffer* commands[]{slot.command.get()};
+    Fence* signals[]{r.ready.get(),terrain ? terrain->Ready() : nullptr};
+    uint64_t signalValues[]{sequence,terrain ? frame->input_sequence+1 : 0};
+    Fence* waits[2]{}; uint64_t waitValues[2]{}; size_t waitCount=0;
+    if (_submitted) { waits[waitCount]=r.consumed.get(); waitValues[waitCount++]=_submitted; }
+    if (terrain) { waits[waitCount]=terrain->Available(); waitValues[waitCount++]=frame->input_sequence; }
+    _runtime.GetQueue().Submit({.CmdBuffers=commands,.SignalFences={signals,terrain ? 2u : 1u},
+        .SignalValues={signalValues,terrain ? 2u : 1u},.WaitFences={waits,waitCount},.WaitValues={waitValues,waitCount}});
+    _submitted=sequence; if(terrain) { _depthInitialized=true; terrain->Submitted(frame->input_sequence); }
     return true;
 }
 }

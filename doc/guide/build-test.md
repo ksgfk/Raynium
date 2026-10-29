@@ -10,6 +10,35 @@ payload、ABI、缓存和关闭顺序见[互操作与加载](../architecture/int
 
 ## 当前验证范围
 
+### 2026-10-29：SOLID 地形与 ABI 7
+
+在 Windows x64 / Temurin 25.0.4.1 / MSVC 19.51.36260.0 / RTX 4080 / NVIDIA 621.01 /
+Vulkan SDK 1.4.363.0 上验证；RadRay 已更新到锁文件指定的干净源码。以下命令均附 `--console=plain --no-parallel`。
+
+| 命令 | 结果 |
+| --- | --- |
+| `gradlew.bat build nativeTest -PrhiValidation=true -PterrainProfile=true` | 8 个纯 Java 测试及 49 个 Debug native 测试通过 |
+| `gradlew.bat nativeTest packageNativeMod -PnativeConfig=Release -PrhiValidation=true -PterrainProfile=true` | 49 个 Release native 测试通过，ABI 7 分发 JAR 构建成功 |
+| `gradlew.bat verifyNativePackage` | 包结构与哈希检查通过 |
+| `gradlew.bat runClientNative -PrhiValidation=true -PvulkanValidation=true` | D3D12 → MC Vulkan 直接多 mip 输入；进入开发世界、SOLID 预览、F3+T、全屏/窗口切换、返回标题与正常退出通过 |
+| `gradlew.bat runClientNative -PrhiBackend=vulkan -PterrainTextureTransfer=split -PterrainProfile=true -PrhiValidation=true -PvulkanValidation=true` | Vulkan → MC Vulkan 强制 split fallback；世界显示、F3+T、返回标题与正常退出通过；合批修改后再次进入同一世界并正常退出 |
+
+新增 native 用例覆盖双后端 × 直接/逐 mip 两种模式：非方形图集全部 mip 的逐像素结果、直接/间接 draw、
+连续替换和移除、反向深度、大整数坐标、无网格更新帧、epoch 清空、采样设置变化、UV 后首次地形和空面组。
+注入不兼容 GPU 身份使直接导入失败，验证清理后可创建并使用 split；纯 Java 测试覆盖两条路径均失败时传播错误。
+本次测试与游戏日志未出现 RHI、D3D12 或 Vulkan 同步校验错误；GPU validation 未开启。
+游戏的 MC Services/开发账户网络鉴权报错不影响本地世界验证。
+
+同一开发世界、相同 213×120 预览 RT、Debug 和驱动校验配置下，约 915 个可见 section、约 2394 个面组 draw：
+按距离段/顶点页合批前，CPU 地形帧调用 p50 约 8.6 ms；合批后约 1.5 ms，GPU 光栅 p50 约 0.06 ms。
+这是两次运行中稳定采样窗口的观察，世界时间和少量 section 更新仍在变化，不是严格隔离的基准。
+CPU 指标包含槽位等待与 FFM/native 录制，原版仍同时绘制，不能据此推算独立渲染器 FPS。
+
+覆盖仍限于本机 GPU/驱动和开发世界，未完成多厂商、复杂资源包、所有视效/模型的逐像素对照或大规模性能矩阵。
+直接路径与 fallback 均有自动测试；实机 D3D12 操作早于最后的面组/合批调整，最后版本的实机合批复测使用 Vulkan split。
+最后两处边界修正（首次深度状态、零字节写入）由随后两配置 native 测试验证，未再次启动游戏。
+日志及两配置 XML 保存在本机忽略目录 `build/verification/terrain-20261029/`。
+
 ### 2026-10-28：C++ bridge 与固定底层枚举
 
 在下节单例环境的同一机器和工具链上，将 bridge 改为 C++ 头文件后，重新执行
@@ -143,15 +172,16 @@ Debug 用于默认开发启动，Release 用于分发；只运行相应步骤也
 普通构建使用已嵌入的 shader 字节码，关闭 RadRay shader compiler/tools，不要求 DXC SDK。
 不要复用旧 `windows-x64-msvc` 动态 CRT 包。若手动缩小依赖集合，stage 所需许可证来自 core/render 使用的第三方源码目录，需保留这些源码。
 
-修改 `native/shaders/uv.hlsl` 后显式准备锁定 DXC 并重新生成头文件，再运行 native 构建：
+修改 `native/shaders/uv.hlsl` 或 `terrain.hlsl` 后显式准备锁定 DXC 并重新生成头文件，再运行 native 构建：
 
 ```powershell
 python external/RadRay/tools/fetch_sdks.py restore --only radray_dxc
 python tools/compile_preview_shaders.py
+python tools/compile_preview_shaders.py --shader terrain
 ```
 
 脚本默认使用 `external/RadRay/SDKs/radray_dxc/extracted/bin/dxc.exe`，也可通过 `--dxc` 指定路径。
-同一 HLSL 编译为 DXIL/SPIR-V，输出到 `native/include/raynium/uv_bytecode.h`；运行时不打包编译器。
+同一 HLSL 编译为 DXIL/SPIR-V，分别输出到 `native/include/raynium/uv_bytecode.h` 和 `terrain_bytecode.h`；运行时不打包编译器。
 
 ## 开发启动与 IDEA
 
@@ -180,6 +210,12 @@ python tools/compile_preview_shaders.py
 正式启动器用 `-Draynium.rhi.backend=vulkan` 选择 Vulkan；不自动切换后端。
 MC 自身须在视频设置中选择 Vulkan 并重启，runtime 后端参数不替 MC 切换图形 API。
 预览默认开启，`previewEnabled=false` 对应 `-Draynium.preview.enabled=false`。
+默认内容是 SOLID 地形；`-PpreviewContent=uv` 恢复 UV 诊断。`-PterrainTextureTransfer=auto|direct|split`
+选择自动降级、强制多 mip 共享或强制逐 mip fallback（JVM 属性 `raynium.terrain.textureTransfer`）。
+`-PterrainDirectDraw=true` 和 `-PterrainDisableFaceCull=true` 提供对照路径。
+`-PterrainProfile=true` 记录 CPU/GPU 分阶段 p50/p95/p99、上传字节和驻留统计；GPU 需支持 timestamp query。
+对应 JVM 属性为 `raynium.terrain.directDraw`、`raynium.terrain.disableFaceCull`、`raynium.terrain.profile`。
+Debug RHI/driver validation 会增加 CPU 开销，性能对比应记录配置且固定视点、RT 尺寸和场景。
 
 Debug 默认启用 RadRay RHI 检查。`rhiValidation=true`（JVM 属性 `raynium.rhi.validation`）
 显式启用 native 驱动诊断，默认 false。客户端初始化入口通过 `rn_init_env` 准备所选后端的环境，
@@ -195,8 +231,8 @@ D3D12 在此创建 factory 并启用调试层，早于 MC 图形初始化；CLIE
 Loom 的两个客户端运行配置都给 Minecraft JVM 添加 `--enable-native-access=ALL-UNNAMED`。这是游戏 JVM 参数，不是 Gradle daemon 参数；正式启动器也需添加它。loader 检查实际模块的 native access，权限未启用时报告启动参数要求。
 
 加载成功应记录 DLL 来源与实际路径，以及 ABI/build ID/RadRay revision/dirty/config/CRT/toolchain。
-当前要求 ABI `6` 和九个导出。`Raynium runtime created` 表示设备与队列完成；
-`Raynium shared preview ready` 表示共享资源已创建和导入，实际显示仍须检查游戏画面。
+当前要求 ABI `7` 和十二个导出。`Raynium runtime created` 表示设备与队列完成；
+`Raynium shared preview ready` 表示输出资源已创建和导入；`Raynium SOLID terrain inputs ready` 记录输入模式及 mip 数。实际显示仍须检查游戏画面。
 
 ## 发布 mod JAR
 
@@ -239,6 +275,8 @@ Loom 的两个客户端运行配置都给 Minecraft JVM 添加 `--enable-native-
 | `PreviewRegionTest` | 显示矩形、MC Y 翻转后的复制位置和小窗口边界 | `test` |
 | `NativeAbiTest` | 参数校验、输出清空、诊断截断和空句柄销毁 | `nativeTest` |
 | `NativeRuntimeTest` | 双后端环境/设备创建、重建、线程限制、幂等关闭、单例保护及早期 factory 共享绘制 | `nativeTest` |
+| `MeshPayloadTest` / `TextureTransferTest` | 保守面组、越界模型、顶点拥有权和失败降级 | `test` |
+| `NativeTerrainTest` | 双后端/两传输模式的 mip 像素、连续帧、深度、大坐标、epoch 和导入失败恢复 | `nativeTest` |
 | `NativePreviewTest` | 双后端共享到独立 Vulkan 消费者，逐像素 UV/区域外验证、连续交接、等待、重建和导入失败清理 | `nativeTest` |
 
 `test` 排除 `native` 标签，随标准 `check/build` 运行，不加载 DLL、不构建 native。`nativeTest` 是标准 Gradle `Test` 任务，只包含 `native` 标签；它复用 `testClasses`，依赖 `nativeStage`，在构建/stage 完成后启动测试 JVM。依赖仍须显式准备，执行需要 Windows x64 和 D3D12/Vulkan 驱动；缺少设备或 DLL 时明确失败，不跳过。

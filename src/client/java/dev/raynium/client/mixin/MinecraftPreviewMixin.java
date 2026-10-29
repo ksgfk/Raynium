@@ -15,6 +15,10 @@ abstract class MinecraftPreviewMixin implements PreviewHost {
 
     @Override public void raynium$setPreview(PreviewOverlay preview) { raynium$preview = preview; }
 
+    @Override public void raynium$prepareTerrain() { if(raynium$preview!=null) raynium$preview.prepareTerrain((Minecraft)(Object)this); }
+    @Inject(method="renderFrame",at=@At("HEAD"))
+    private void raynium$beginFrame(CallbackInfo ci) { dev.raynium.client.terrain.TerrainCapture.beginFrame(); }
+
     @Inject(method = "renderFrame", at = @At(value = "INVOKE",
             target = "Lnet/minecraft/client/renderer/GameRenderer;render()V", shift = At.Shift.AFTER))
     private void raynium$copyPreview(CallbackInfo callback) {

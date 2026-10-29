@@ -4,29 +4,33 @@
 
 # 互操作与加载
 
-当前 Java 25 通过 FFM 加载 `rayniumruntime.dll`，C ABI 为 6。接口包含版本/构建身份查询、环境初始化/销毁、设备会话和共享 UV 预览；没有通用资源、场景帧或读回入口。
+当前 Java 25 通过 FFM 加载 `rayniumruntime.dll`，C ABI 为 7。接口包含版本/构建身份查询、环境初始化/销毁、设备会话和共享预览与 SOLID 地形帧；没有通用资源或像素读回入口。
 运行命令与验证范围见[构建与测试](../guide/build-test.md)，C++ 设备所有权见[Native runtime](native-runtime.md)。
 
 ## 当前 C ABI
 
 | 导出 | 契约 |
 |---|---|
-| `rn_get_abi_version()` | ABI 版本 `6` |
+| `rn_get_abi_version()` | ABI 版本 `7` |
 | `rn_query_abi(info, capacity, error_message, error_capacity)` | 填充调用方的 240 字节结构；失败不改动 info，原因写入诊断字符串 |
 | `rn_init_env(desc, error_message, error_capacity)` | 创建 DLL 单例环境，不返回句柄；重复初始化失败且保留原环境；不创建 GPU 设备 |
 | `rn_destroy_env(error_message, error_capacity)` | 无环境时成功；存在 runtime 或从其他线程调用时失败并保留环境；成功后释放 factory/instance |
 | `rn_create_runtime(desc, out_runtime, error_message, error_capacity)` | 在已有环境中通过 RayniumRuntime::Create 创建唯一设备会话；失败清理局部资源并清零输出槽，保留环境 |
-| `rn_destroy_runtime(runtime)` | 预览全部销毁后，等待 Direct 队列并销毁对象，NULL 无操作；非空对象只能销毁一次 |
+| `rn_destroy_runtime(runtime)` | 预览与地形会话全部销毁后，等待 Direct 队列并销毁对象，NULL 无操作；非空对象只能销毁一次 |
 | `rn_create_preview(runtime, desc, out_preview, info, capacity, error, error_capacity)` | 每 runtime 一个预览；返回不透明句柄和 128 字节导入描述；失败清空输出句柄且保持 info 不变；创建不提交 GPU 工作 |
 | `rn_draw_preview(preview, sequence, error, error_capacity)` | 序号从 1 严格递增，提交 UV 绘制；下一次调用前宿主必须提交消费及 consumed signal |
 | `rn_destroy_preview(preview, error, error_capacity)` | 宿主先完成消费并释放导入对象；等待 native 完成后销毁，NULL 成功；超时保留活跃对象 |
+| `rn_create_terrain` | 创建独立地形会话与共享图集/lightmap；初始化并释放输入所有权；布局与输入方向见[地形预览](terrain-preview.md#abi-7-地形布局) |
+| `rn_draw_terrain` | 批量增量网格、可见 draw、相机及雾写入已有预览；输入只在调用期间借用 |
+| `rn_destroy_terrain` | 宿主先完成输入复制并关闭导入对象；等待 native 完成，超时保留对象 |
+
 
 全部状态入口只返回 OK/FAILED；具体原因写入 UTF-8 诊断字符串，不从返回码区分参数、容量或设备失败。NULL 诊断指针必须配零容量；所有参数缓冲区互不重叠。
 
 `bridge.h` 由 C++ 编译器使用，导出函数显式采用 `extern "C"` 和 `noexcept`，不提供纯 C 编译兼容分支。
 状态、后端、runtime/env 标志和共享句柄类型使用非作用域 `enum : uint32_t`；
 状态函数返回 `rn_status`，相关描述字段直接使用对应枚举类型。
-枚举底层类型、数值、结构尺寸/对齐及导出符号保持原有 ABI 6 契约，Java FFM 继续以 32 位整数读写。
+原有枚举底层类型、数值和预览结构布局不变，新增地形入口使版本升为 ABI 7，Java FFM 继续以 32 位整数读写。
 `RN_ABI_VERSION` 保留为版本宏，DLL 导入/导出修饰由 `RAYNIUM_API` 宏选择。
 
 `rn_env_desc` 为 12 字节、4 字节对齐：struct_size/backend/flags。
@@ -39,14 +43,14 @@ flags 位值 1（`RN_RUNTIME_MATCH_GPU`）请求匹配宿主 GPU，匹配时 nod
 
 ABI 结构布局以 `bridge.h` 为准；查询结构包含四个 uint32 和固定容量 UTF-8 字符串。Java 检查尺寸、指针宽度、flags、build ID、RadRay revision、配置、平台和工具链与 manifest 一致。结构和临时内存由 Java arena 管理，不跨边界 free/delete。`NativeBindings` 使用普通 FFM downcall，不使用 critical 调用。
 
-ABI 6 的状态仍仅为 `RN_STATUS_OK=0` 和 `RN_STATUS_FAILED=1`，240 字节查询结构保持不变。
-Java 在调用 query 前核对版本，manifest 也只接受 ABI 6；旧 payload 必须重新构建/stage。
+ABI 7 的状态仍仅为 `RN_STATUS_OK=0` 和 `RN_STATUS_FAILED=1`，240 字节查询结构保持不变。
+Java 在调用 query 前核对版本，manifest 也只接受 ABI 7；旧 payload 必须重新构建/stage。
 stage 和 JAR 只收集 `rayniumruntime.dll`，不自动删除旧构建目录或内容缓存。
 
 ## 接口边界
 
 当前调用链是 `RayniumClient → NativeEnvironment/NativeRuntime → NativeBindings/FFM → C ABI → RayniumEnvironment/RayniumRuntime → RadRay RHI`。
-`bridge.h/.cpp` 承担跨语言入口，DLL 导出两个查询、环境 init/destroy、runtime create/destroy 和三个预览函数。没有 Java 场景数据或完整帧输入进入 native。
+`bridge.h/.cpp` 承担跨语言入口，DLL 导出两个查询、环境 init/destroy、runtime create/destroy 、三个预览函数和三个地形函数。新增三个地形入口，批量传入网格更新、可见 draw 和相机/雾参数。
 
 `NativeBindings` 用 `FunctionDescriptor` 描述签名，在库加载时查找符号并缓存 MethodHandle，通过 `invokeExact` 调用；全部使用普通 downcall，没有 critical 选项或 upcall。
 
@@ -78,7 +82,7 @@ Java `NativePreview.Info.read` 显式读取导入描述，实际 GPU 共享测�
 
 handle_type 为 1 时表示 D3D12Resource/D3D12Fence，为 2 时表示 OpaqueWin32。
 opaque 路径必须使用导出端的完整 Vulkan 元数据；D3D12 路径由导入设备查询内存类型。
-当前没有 ResourceBatch/FramePacket 布局、schema 协商或自动绑定生成器。
+地形帧布局见[地形预览](terrain-preview.md#abi-7-地形布局)；没有 schema 协商或自动绑定生成器。
 
 `rn_query_abi` 返回布局、ABI 和构建身份。Java 在调用 query 前先检查版本，再将查询内容与 manifest 对照；不兼容版本会被拒绝。
 JDK `MemoryLayout.structLayout` 不自动插入 C 编译器 padding。见 [JDK 25 MemoryLayout](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/foreign/MemoryLayout.html)。
@@ -103,7 +107,7 @@ JDK `MemoryLayout.structLayout` 不自动插入 C 编译器 padding。见 [JDK 2
 生命周期和逐帧调用来自 MC 渲染线程。`NativeEnvironment` 保存初始化线程，环境、runtime、预览操作沿用该线程检查。
 native 创建 runtime 和销毁环境同样检查环境所属线程；所有调用由调用方串行执行，ABI 查询不依赖环境。
 library 使用 shared arena，参数和返回缓冲区使用 confined scratch arena；shared arena 不使 native runtime 自动线程安全。
-每帧通过一次 draw downcall 提交预览；没有资源批次、native 工作线程或跨语言共享命令队列。
+每帧通过一次 draw downcall 提交预览；地形更新与 draw 同批传入；没有 native 工作线程或跨语言共享命令队列。
 
 ## 错误与回调
 
@@ -118,13 +122,13 @@ Java 将失败状态转换为 `IllegalStateException`；预览创建/导入失�
 
 `NativeEnvironment implements AutoCloseable` 拥有成功初始化的单例环境和 `NativeLibrary`，
 后者保存绑定和 DLL arena。环境通过 `createRuntime(hostGpu)` 创建至多一个 `NativeRuntime`，
-runtime 持有父环境引用、设备句柄和至多一个 `NativePreview`，关闭 runtime 不卸载 DLL。
+runtime 持有父环境引用、设备句柄、至多一个 `NativePreview` 和一个 `NativeTerrain`，关闭 runtime 不卸载 DLL。
 
 游戏在客户端初始化入口加载 DLL 并初始化所选后端的环境；CLIENT_STARTED 再创建设备和预览。
 初始化失败只关闭本次加载的 library；重复初始化失败不销毁原有环境。
 设备创建失败保留环境，客户端启动失败处理按预览 → runtime → 环境 → DLL 顺序清理。
 
-Java close 幂等，有活跃预览时拒绝关闭 runtime，有活跃 runtime 时拒绝关闭环境。
+Java close 幂等，有活跃预览或地形会话时拒绝关闭 runtime，有活跃 runtime 时拒绝关闭环境。
 预览关闭成功后才排空 Direct 队列并销毁 runtime；环境销毁成功后才关闭 library arena。
 预览创建成功但 Java 无法解析返回描述时，立即销毁尚未提交的 native 预览。
 清理失败保留未关闭的 Java 所有者与 DLL，不继续向上释放；没有引用计数或隐式级联销毁。
@@ -135,7 +139,7 @@ Fabric 当前使用 unnamed module，游戏 JVM 继续显式设置 `--enable-nat
 
 ## 构建身份与 payload
 
-`native/CMakeLists.txt` 用独立 binary 目录将锁定 RadRay 作为源码子工程引入，静态链接 `RadRay::render/core`，只导出 bridge 的九个 C 入口。
+`native/CMakeLists.txt` 用独立 binary 目录将锁定 RadRay 作为源码子工程引入，静态链接 `RadRay::render/core`，只导出 bridge 的十二个 C 入口。
 当前只生成一个 Windows x86_64 DLL，Debug/Release 均使用 `/MT` 和静态 mimalloc，Debug 保留调试宏而不启用 `/MTd`；bridge 不再包含重复的 new/delete 替换头。
 配置阶段不恢复依赖，发布要求锁定提交的干净 Release 源码。当前未实现 RadRay 安装包消费模式。
 
@@ -167,7 +171,7 @@ loader 的选择顺序为：显式开发目录 `-Draynium.native.dir=...`，否�
 2. 将实际 payload 发布到游戏目录下 `.raynium/natives/windows-x86_64/<content-hash>/`。
 3. 检查已有完整副本，或写入独立 staging 目录，校验后再发布；多进程使用文件锁协调解包。
 4. 检查游戏 JVM native access 权限，以绝对路径调用 `SymbolLookup.libraryLookup`。
-5. 先调用版本入口核对 ABI 6，再用带诊断缓冲区的 `rn_query_abi` 检查布局与构建身份。
+5. 先调用版本入口核对 ABI 7，再用带诊断缓冲区的 `rn_query_abi` 检查布局与构建身份。
 6. 客户端初始化入口调用 `rn_init_env` 创建环境；CLIENT_STARTED 再通过 `rn_create_runtime` 创建 RHI 设备/Direct 队列。
    早期准备失败由 Fabric 初始化失败路径报告，设备创建失败清理并输出 MC 崩溃报告，仍不接管 MC 绘制。
 

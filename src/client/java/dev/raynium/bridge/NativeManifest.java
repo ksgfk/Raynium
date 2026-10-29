@@ -8,7 +8,7 @@ import java.nio.charset.StandardCharsets;
 public record NativeManifest(int abiVersion, int abiInfoSize, String buildId, String radrayCommit,
                              boolean radrayDirty, String configuration, String platform,
                              String toolchain, FileEntry library) {
-    public static final int ABI_VERSION = 6;
+    public static final int ABI_VERSION = 7;
     public record FileEntry(String path, long size, String sha256) {}
 
     public static NativeManifest parse(byte[] bytes) {

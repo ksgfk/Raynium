@@ -19,6 +19,8 @@ public final class VulkanPreviewImage implements AutoCloseable {
     private final NativePreview.Info info;
     private final long image, memory, ready, consumed;
     private boolean closed;
+    private final int mipLevels;
+    private final boolean input;
 
     public static NativeRuntime.HostGpu hostGpu(VkPhysicalDevice physical) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -43,6 +45,9 @@ public final class VulkanPreviewImage implements AutoCloseable {
     }
 
     public static VulkanPreviewImage create(VkDevice device, int queueFamily, NativePreview.Info info) {
+        return create(device,queueFamily,info,1,false);
+    }
+    public static VulkanPreviewImage create(VkDevice device, int queueFamily, NativePreview.Info info, int mipLevels, boolean input) {
         if (!device.getCapabilities().VK_KHR_external_memory_win32 || !device.getCapabilities().VK_KHR_external_semaphore_win32)
             throw new IllegalStateException("MC Vulkan external memory/semaphore Win32 extensions are unavailable");
         boolean opaque = info.handleType() == 2;
@@ -52,7 +57,9 @@ public final class VulkanPreviewImage implements AutoCloseable {
             throw new IllegalArgumentException("Invalid shared preview descriptor");
         int memoryType = opaque ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT : VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
         int semaphoreType = opaque ? VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT : VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT;
-        int usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        int usage = input ? VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        if (mipLevels<1 || mipLevels>15) throw new IllegalArgumentException("Invalid shared mip count");
         long image = 0, memory = 0, ready = 0, consumed = 0;
         boolean success = false;
         try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -81,7 +88,7 @@ public final class VulkanPreviewImage implements AutoCloseable {
 
             var externalImage = VkExternalMemoryImageCreateInfo.calloc(stack).sType$Default().handleTypes(memoryType);
             var imageInfo = VkImageCreateInfo.calloc(stack).sType$Default().pNext(externalImage.address())
-                    .imageType(VK_IMAGE_TYPE_2D).format(VK_FORMAT_R8G8B8A8_UNORM).mipLevels(1).arrayLayers(1)
+                    .imageType(VK_IMAGE_TYPE_2D).format(VK_FORMAT_R8G8B8A8_UNORM).mipLevels(mipLevels).arrayLayers(1)
                     .samples(VK_SAMPLE_COUNT_1_BIT).tiling(VK_IMAGE_TILING_OPTIMAL).usage(usage)
                     .sharingMode(VK_SHARING_MODE_EXCLUSIVE).initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
             imageInfo.extent().set(info.width(), info.height(), 1);
@@ -118,7 +125,7 @@ public final class VulkanPreviewImage implements AutoCloseable {
             check(vkBindImageMemory(device, image, memory, 0), "bind shared memory");
             ready = importSemaphore(device, info.readyHandle(), semaphoreType, stack);
             consumed = importSemaphore(device, info.consumedHandle(), semaphoreType, stack);
-            var result = new VulkanPreviewImage(device, queueFamily, info, image, memory, ready, consumed);
+            var result = new VulkanPreviewImage(device, queueFamily, info, image, memory, ready, consumed, mipLevels, input);
             success = true;
             return result;
         } finally {
@@ -127,9 +134,10 @@ public final class VulkanPreviewImage implements AutoCloseable {
     }
 
     private VulkanPreviewImage(VkDevice device, int queueFamily, NativePreview.Info info,
-                               long image, long memory, long ready, long consumed) {
+                               long image, long memory, long ready, long consumed, int mipLevels, boolean input) {
         this.device = device; this.queueFamily = queueFamily; this.info = info;
         this.image = image; this.memory = memory; this.ready = ready; this.consumed = consumed;
+        this.mipLevels=mipLevels; this.input=input;
     }
 
     private static int memoryType(VkPhysicalDeviceMemoryProperties properties, int allowed) {
@@ -179,14 +187,31 @@ public final class VulkanPreviewImage implements AutoCloseable {
         }
     }
 
+    public void beginWrite(VkCommandBuffer command) {
+        if (!input || closed) throw new IllegalStateException("Not a live input image");
+        try (var stack=MemoryStack.stackPush()) { memoryBarrier(command,stack); ownershipBarrier(command,stack,true); }
+    }
+    public void copyFrom(VkCommandBuffer command, long source, int sourceMip, int destinationMip, int x, int y, int width, int height) {
+        try (var stack=MemoryStack.stackPush()) {
+            var region=VkImageCopy.calloc(1,stack);
+            region.srcSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(sourceMip).layerCount(1);
+            region.dstSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(destinationMip).layerCount(1);
+            region.srcOffset().set(x,y,0); region.dstOffset().set(x,y,0); region.extent().set(width,height,1);
+            vkCmdCopyImage(command,source,VK_IMAGE_LAYOUT_GENERAL,image,VK_IMAGE_LAYOUT_GENERAL,region);
+        }
+    }
+    public void endWrite(VkCommandBuffer command) {
+        try (var stack=MemoryStack.stackPush()) { ownershipBarrier(command,stack,false); memoryBarrier(command,stack); }
+    }
+
     private void ownershipBarrier(VkCommandBuffer command, MemoryStack stack, boolean acquire) {
         var barrier = VkImageMemoryBarrier.calloc(1, stack).sType$Default().image(image)
                 .oldLayout(VK_IMAGE_LAYOUT_GENERAL).newLayout(VK_IMAGE_LAYOUT_GENERAL)
                 .srcQueueFamilyIndex(acquire ? VK_QUEUE_FAMILY_EXTERNAL : queueFamily)
                 .dstQueueFamilyIndex(acquire ? queueFamily : VK_QUEUE_FAMILY_EXTERNAL)
-                .srcAccessMask(acquire ? 0 : VK_ACCESS_TRANSFER_READ_BIT)
-                .dstAccessMask(acquire ? VK_ACCESS_TRANSFER_READ_BIT : 0);
-        barrier.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).levelCount(1).layerCount(1);
+                .srcAccessMask(acquire ? 0 : (input ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT))
+                .dstAccessMask(acquire ? (input ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT) : 0);
+        barrier.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).levelCount(mipLevels).layerCount(1);
         vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, null, null, barrier);
     }
 
