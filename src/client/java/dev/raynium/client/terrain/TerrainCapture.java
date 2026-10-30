@@ -1,6 +1,5 @@
 package dev.raynium.client.terrain;
 
-import dev.raynium.bridge.NativeTerrain;
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.state.OptionsRenderState;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
@@ -20,7 +19,8 @@ public final class TerrainCapture {
     private static volatile boolean active;
     public static boolean active() { return ENABLED && active; }
     public static void activate(boolean value) { active=value; if(!value) { snapshot=null; REMOVED.clear(); } }
-    public record Visible(MeshPayload payload, NativeTerrain.Draw draw) {}
+    public record Draw(long id,int x,int y,int z,float visibility,int groupMask) {}
+    public record Visible(MeshPayload payload, Draw draw) {}
     public record Snapshot(long epoch, List<Visible> visible, float[] projection, float[] view,
                            int[] block, float[] fraction, float[] fog, float[] distances, boolean rgss, int anisotropy) {}
     public static long epoch() { return EPOCH.get(); }
@@ -52,7 +52,7 @@ public final class TerrainCapture {
                 if(payload==null || payload.epoch!=epoch) continue;
                 var origin=section.getRenderOrigin();
                 int mask=cull ? payload.visibleGroups(camera.pos.x-origin.getX()+eye.x,camera.pos.y-origin.getY()+eye.y,camera.pos.z-origin.getZ()+eye.z) : 127;
-                visible.add(new Visible(payload,new NativeTerrain.Draw(payload.id,origin.getX(),origin.getY(),origin.getZ(),section.getVisibility(now,fade),mask)));
+                visible.add(new Visible(payload,new Draw(payload.id,origin.getX(),origin.getY(),origin.getZ(),section.getVisibility(now,fade),mask)));
             }
         } finally { dispatcher.unlock(); }
         visible.sort(Comparator.comparingDouble(v -> {

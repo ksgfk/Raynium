@@ -24,7 +24,7 @@ CLIENT_STOPPING 先关闭预览和取消挂接，再依次关闭 runtime、环�
 
 ## 开发预览模块
 
-共享显示位于 `client/preview`、对应 Mixin 和 bridge 预览入口。
+共享显示位于 `client/preview`、对应 Mixin 和 通用 renderer bridge 入口。
 `VulkanFeatureSetsMixin` 为 MC 设备的可选 FeatureSet 增加 Win32 external memory/semaphore 扩展，
 不强制设备支持；`raynium.preview.enabled=false` 时不添加。
 `VulkanCommandEncoderAccessor` 暴露 encoder 所属设备。
@@ -59,7 +59,7 @@ handle 和 name 非空。导入函数检查函数地址和句柄后，通过 LWJ
 ## 逐帧交接
 
 ```text
-runtime: 复用命令槽时等待 n−2 完成 → GPU wait consumed(n−1) → acquire → 绘制 → release → ready(n)
+renderer: 复用帧槽时等待该槽自身 completion → GPU wait consumed(n−1) → acquire → 绘制 → release → ready(n)
 MC:      原版绘制 → wait ready(n) → acquire → copy → release → consumed(n) → 原有 blit/submit/present
 ```
 
@@ -67,12 +67,12 @@ MC:      原版绘制 → wait ready(n) → acquire → copy → release → con
 wait/signal 添加到同一提交构建器，不增加正常帧中途 submit。
 小 RT acquire/release 只改变外部所有权；源和主 RT 在复制时均为 GENERAL。
 复制前后使用 ALL_COMMANDS / MEMORY_READ|WRITE 内存屏障衔接原版绘制和最终读取。
-runtime 的双槽复用与导出对象见 [Native runtime](native-runtime.md#共享预览与-uv-绘制)。
+renderer 的双槽复用与独立完成序号见 [Native runtime](native-runtime.md#上传帧槽与资源退役)。
 
 尺寸改变时，先调用 backend encoder.submit 排出待执行工作，通过原有 MC 提交 fence 确认整次提交完成，再等待最后 consumed 和 ready，
-销毁 Java 导入对象及 native 预览，再以新尺寸创建，序号归零。backend submit 不触发 frontend 的 endFrame。
+销毁 Java 导入对象及 native render target，再以新尺寸创建，输出序号归零；renderer 提交序号继续递增。backend submit 不触发 frontend 的 endFrame。
 最小化或无效尺寸暂停预览。退出执行相同排空顺序，随后关闭 runtime/DLL。
-输出 resize 保留独立的地形会话、图集和几何；地形版本与退役协议见[地形预览](terrain-preview.md)。
+输出 resize 保留 renderer 场景、命令、图集和几何；地形版本与退役协议见[地形预览](terrain-preview.md)。
 
 MC 非 Vulkan、显式关闭、能力不足、创建或导入失败时记录原因，本会话禁用预览并继续原版游戏。
 清理只在完成等待成功后释放资源；超时或 device lost 导致清理失败向上传播，保留活跃所有者，
@@ -81,5 +81,5 @@ MC 非 Vulkan、显式关闭、能力不足、创建或导入失败时记录原�
 ## 当前边界与验证
 
 原版世界、手持物、后处理、GUI 和呈现继续执行。预览仅覆盖指定矩形，默认内容是 native GPU 绘制的 SOLID 地形，UV 可作为诊断模式。
-复用 MC 区块编译、采用和可见性，没有通用资源服务或窗口接管；运行路径不经过 CPU 像素读回。
+复用 MC 区块编译、采用和可见性，native 使用通用场景描述和统一提交，没有窗口接管；运行路径不经过 CPU 像素读回。
 开关、启动命令、实际环境和覆盖限制见[构建与测试](../guide/build-test.md)。

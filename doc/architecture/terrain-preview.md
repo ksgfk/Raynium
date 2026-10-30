@@ -1,6 +1,6 @@
 > - 适用: 修改 SOLID 地形采集、native 光栅、共享图集及其生命周期
 > - 权威: 本文记录地形预览的数据、绘制和输入协议；设备与输出 RT 见 native-runtime，通用加载见 interop
-> - 锚点: `native/include/raynium/terrain.h`, `native/src/terrain.cpp`, `native/shaders/terrain.hlsl`, `src/client/java/dev/raynium/client/terrain/*.java`, `native/include/raynium/bridge.h`
+> - 锚点: `native/src/renderer.cpp`, `native/src/solid_pipeline.cpp`, `native/src/mesh_pass.cpp`, `native/shaders/terrain.hlsl`, `src/client/java/dev/raynium/client/terrain/*.java`, `native/include/raynium/bridge.h`
 
 # SOLID 地形预览
 
@@ -26,19 +26,19 @@ compiled mesh 关闭把 ID 放入回收队列；没有独立积压的编译结�
 
 ## 几何与绘制
 
-顶点驻留 device-local 分页缓冲，普通页约 4 MiB，超大 mesh 单独扩页；按四顶点对齐分配，支持空闲区合并复用。
-页在会话内保留，世界离开或资源重建销毁会话。mesh 退役等待独立输入释放 fence 完成，不能仅按 CPU 帧数回收。
-共用 32 位 quad 索引，更新只复制变化的顶点；同一页的复制集中在 draw 前录制，随后一次转为顶点读取状态。
-两组输出命令槽复用时只等该槽 n−2 完成；对应 staging、instance、indirect 和常量数据也在此后重用。
+`TerrainScene` 把 quad 顶点流和非空面组转换成通用 `Mesh` / `Submesh`，为同一 payload 创建关联 mesh/material 的 primitive。
+quad 索引由 Java 按本 epoch 需要的容量生成并增长，以普通 index ID 上传；材质引用内建 TEXTURED program 和图集/lightmap 的逻辑纹理 0/1。
+可见面组转换为 submesh 可见项，原点/淡入转换为实例；没有特殊 native 地形 frame 或专用绘制入口。
+分页驻留、命令缓存、上传和完成后回收由统一 [mesh pipeline](native-runtime.md#上传帧槽与资源退役) 管理。
 
 CPU 把准确平面、两三角绕序一致的 quad 分成六个轴向组，其余进入 general 组；保留组内顺序及原始顶点精度。
 使用 mesh 实际包围范围和最终投影反算的视点保守剔除面组；不假定模型都位于 16³ section 内，退化/非轴向面不剔除。
 仅复用 MC 可见列表，没有 GPU 可见性、mesh shader、量化或额外异步队列。
-CPU 按 64 格深度桶和几何页组织 indexed indirect；相邻可见面组合并，origin/visibility 走 instance 流。
+Java 将按距离排序的可见 section 每 64 个分为一个深度桶，native 按该桶和几何页组织 indexed indirect；相邻可见面组合并，origin/visibility 走 instance 流。
 硬件 indirect 特性不足或显式 direct 开关走逐 draw 路径；后者消费相同列表。
 
 同一 HLSL 离线编译 DXIL/SPIR-V。shader 包含图集采样修正、RGSS、光照、雾和淡入；sampler 随 MC anisotropy 设置更新。
-SOLID 使用不混合颜色写入、反向 Z（clear=0、GreaterEqual、深度写入）、私有 D32，D3D12 补偿 clip Y，绕序与 MC Vulkan 一致。
+SOLID 使用不混合颜色写入、反向 Z（clear=0、GreaterEqual、深度写入）、RDG 临时 D32，D3D12 补偿 clip Y，绕序与 MC Vulkan 一致。
 小 RT 的宽高各取主 RT 的四分之一整除值，使用 MC 投影；非整除尺寸的宽高比存在取整误差。
 
 ## 多 mip 输入与 fallback
@@ -70,27 +70,20 @@ MC:   wait outputReady(frame) → acquire/copy/release output → outputConsumed
 ```
 
 每条 timeline 只有一个 signal 方。MC wait/signal 划分同一次 submit 中的多个 batch，不在正常帧中途 CPU 等待尚未提交的 MC 工作。
-resize 只重建输出颜色/深度及命令槽，保留地形；图集对象变化先排空再重建输入会话。世界离开关闭地形会话。
+resize 重建输出颜色和交接信息，图内临时深度按新尺寸从池中取得，保留 renderer、帧槽、驻留几何与缓存命令。
+图集对象变化先排空再重建共享输入，native 资源版本使绑定失效；MC 的资源 epoch 变化另使旧 payload 失效。
+世界离开排空输出和输入后关闭 renderer，清除场景；runtime 设备继续保留。
 
-## ABI 7 地形布局
+## 通用 ABI 接入
 
-`rn_create_terrain` / `rn_draw_terrain` / `rn_destroy_terrain` 与原有入口共十二个 C 导出。
-创建描述 24 字节，输入图像沿用 128 字节描述，direct 返回 2 个，split 返回 mip 数加 1 个（lightmap 最后）。
-创建会提交初始化工作；这区别于不提交的 `rn_create_preview`。输入图像的 ready/consumed 分别表示 native 释放与 MC 写入完成。
-
-| 结构 | 布局 |
-| --- | --- |
-| `rn_terrain_mesh`，56 字节 | ID、顶点指针、顶点数、reserved、7 个组的顶点数、尾部对齐 |
-| `rn_terrain_draw`，32 字节 | ID、int3 原点、visibility、7 位 mask、reserved |
-| `rn_terrain_frame`，248 字节 | 前 64 字节为 size/flags、epoch、输入序号、三个数组指针、数量和 anisotropy；projection/view 位于 64/128；camera block/fraction 位于 192/204；fog color/distances 位于 216/232 |
-
-frame flags 的 1/2/4/8 分别为 direct draw、图集变化、RGSS、性能采样。所有输入只借用本次同步调用。
-每 mesh 最多 1,048,576 顶点，要求完整 quad 和组计数一致；每帧至多 65,536 个更新/draw。
-epoch 不倒退；ID 在同一 epoch 中不可代表不同几何。运行时、预览、地形必须由同一初始化线程串行操作。
+地形通过 ABI 8 的 `renderer`、`render_target`、`shared_textures` 与一次 `render_frame` 传递数据。
+完整布局和借用约束归[互操作与加载](interop.md#abi-8-布局)。
+`TerrainPreview` 只负责 MC 输入复制、上传预算、版本暂用、面组可见项、纹理变化和性能采样；绘制能力判断留在 native。
+共享图像依据 export 的 textureIndex/mipLevel/mipCount 导入；图集 direct 导出一张完整 mip 图像，split 导出每级一张，lightmap 另占一个逻辑纹理。
 
 ## 诊断与限制
 
 `terrainProfile=true` 每 120 样本记录 CPU 输入录制/帧调用 p50/p95/p99、上传字节和可见/驻留数。
-支持 timestamp query 的设备同时记录 native GPU 准备/光栅 p50/p95/p99、页大小和退役字节；这是小型计时结果读回，不是像素读回。
-CPU 帧调用包含命令槽等待、FFM 和 native 录制，不包含 worker 编译或之前的可见快照；GPU 准备包含 fallback 的图集复制。
+支持 timestamp query 的设备同时记录 runtime 整图 GPU p50/p95/p99、页大小和命令构建累计数；这是小型计时结果读回，不是像素读回。
+CPU 帧调用包含命令槽等待、FFM 和 native 录制，不包含 worker 编译或之前的可见快照；GPU 图区间包含上传、fallback 图集复制和光栅。
 当前原版仍同时绘制，整机 FPS 不能代表独立地形渲染性能。实际验证、命令和剩余覆盖限制见[构建与测试](../guide/build-test.md)。

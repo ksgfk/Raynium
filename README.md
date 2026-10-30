@@ -4,7 +4,7 @@
 
 当前已接通 native 构建与分发、Java FFM、ABI 检查和 D3D12/Vulkan 设备会话。
 Windows MC Vulkan 可在右上角显示 native 共享小 RT 的 SOLID 地形预览（保留 UV 诊断模式）；原版世界渲染和呈现继续运行。
-CUTOUT、TRANSLUCENT、通用资源服务和窗口接管尚未实现。具体状态与文档索引见[架构地图](doc/architecture/overview.md)。
+RadRay 的 `RadRay::runtime` 静态库提供场景、Mesh Drawing Pipeline、C++ 可编程管线和单队列 RDG；MC native DLL 保持 ABI 8。CUTOUT、TRANSLUCENT 和窗口接管尚未实现。具体状态与文档索引见[架构地图](doc/architecture/overview.md)。
 
 ## 开发入口
 

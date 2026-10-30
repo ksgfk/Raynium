@@ -1,6 +1,6 @@
 package dev.raynium.client.preview;
 
-import dev.raynium.bridge.NativePreview;
+import dev.raynium.bridge.SharedImageInfo;
 import dev.raynium.bridge.NativeRuntime;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -16,7 +16,7 @@ import static org.lwjgl.vulkan.KHRExternalSemaphoreWin32.*;
 public final class VulkanPreviewImage implements AutoCloseable {
     private final VkDevice device;
     private final int queueFamily;
-    private final NativePreview.Info info;
+    private final SharedImageInfo info;
     private final long image, memory, ready, consumed;
     private boolean closed;
     private final int mipLevels;
@@ -44,10 +44,10 @@ public final class VulkanPreviewImage implements AutoCloseable {
         return data;
     }
 
-    public static VulkanPreviewImage create(VkDevice device, int queueFamily, NativePreview.Info info) {
+    public static VulkanPreviewImage create(VkDevice device, int queueFamily, SharedImageInfo info) {
         return create(device,queueFamily,info,1,false);
     }
-    public static VulkanPreviewImage create(VkDevice device, int queueFamily, NativePreview.Info info, int mipLevels, boolean input) {
+    public static VulkanPreviewImage create(VkDevice device, int queueFamily, SharedImageInfo info, int mipLevels, boolean input) {
         if (!device.getCapabilities().VK_KHR_external_memory_win32 || !device.getCapabilities().VK_KHR_external_semaphore_win32)
             throw new IllegalStateException("MC Vulkan external memory/semaphore Win32 extensions are unavailable");
         boolean opaque = info.handleType() == 2;
@@ -133,7 +133,7 @@ public final class VulkanPreviewImage implements AutoCloseable {
         }
     }
 
-    private VulkanPreviewImage(VkDevice device, int queueFamily, NativePreview.Info info,
+    private VulkanPreviewImage(VkDevice device, int queueFamily, SharedImageInfo info,
                                long image, long memory, long ready, long consumed, int mipLevels, boolean input) {
         this.device = device; this.queueFamily = queueFamily; this.info = info;
         this.image = image; this.memory = memory; this.ready = ready; this.consumed = consumed;

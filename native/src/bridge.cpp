@@ -2,8 +2,8 @@
 #include <raynium/build_info.h>
 #include <raynium/runtime.h>
 #include <raynium/environment.h>
-#include <raynium/preview.h>
-#include <raynium/terrain.h>
+#include <raynium/renderer.h>
+#include <exception>
 #include <bit>
 #include <radray/logger.h>
 #include <algorithm>
@@ -37,28 +37,38 @@ static_assert(alignof(rn_runtime_desc) == 4);
 static_assert(offsetof(rn_runtime_desc, luid) == 12);
 static_assert(!std::is_default_constructible_v<raynium::RayniumRuntime>);
 static_assert(!std::is_default_constructible_v<raynium::RayniumEnvironment>);
-static_assert(sizeof(rn_preview_desc) == 16);
-static_assert(sizeof(rn_preview_info) == 128);
-static_assert(offsetof(rn_preview_info, memory_handle) == 16);
-static_assert(offsetof(rn_preview_info, luid) == 56);
-static_assert(offsetof(rn_preview_info, native_format) == 96);
-static_assert(offsetof(rn_preview_info, allocation_offset) == 112);
+static_assert(sizeof(rn_render_target_desc)==16);
+static_assert(sizeof(rn_shared_image_info)==128);
+static_assert(sizeof(rn_shared_image_export)==144);
+static_assert(sizeof(rn_index_update)==24);
+static_assert(sizeof(rn_mesh_update)==48);
+static_assert(sizeof(rn_material_update)==24);
+static_assert(sizeof(rn_primitive_update)==24);
+static_assert(sizeof(rn_visible_item)==24);
+static_assert(sizeof(rn_render_frame_desc)==344);
+static_assert(offsetof(rn_render_frame_desc,projection)==160);
+static_assert(offsetof(rn_render_frame_desc,indices)==32);
+static_assert(offsetof(rn_render_frame_desc,index_count)==112);
+static_assert(offsetof(rn_render_frame_desc,camera_block)==288);
+static_assert(offsetof(rn_render_frame_desc,fog_distances)==328);
+static_assert(sizeof(rn_instance)==16 && sizeof(rn_submesh)==16);
+static_assert(sizeof(rn_shared_textures_desc)==16 && sizeof(rn_texture_desc)==16);
+static_assert(!std::is_default_constructible_v<raynium::Renderer>);
+static_assert(!std::is_default_constructible_v<raynium::RenderTarget>);
+static_assert(!std::is_default_constructible_v<raynium::SharedTextures>);
 
 struct rn_runtime {
     radray::unique_ptr<raynium::RayniumRuntime> runtime;
-    rn_preview* preview{nullptr};
-    rn_terrain* terrain{nullptr};
+    rn_renderer* renderer{};
 };
-
-struct rn_terrain {
+struct rn_renderer {
     rn_runtime* owner;
-    radray::unique_ptr<raynium::Terrain> terrain;
+    radray::unique_ptr<raynium::Renderer> renderer;
+    rn_render_target* target{};
+    rn_shared_textures* textures{};
 };
-
-struct rn_preview {
-    rn_runtime* owner;
-    radray::unique_ptr<raynium::Preview> preview;
-};
+struct rn_render_target { rn_renderer* owner; radray::unique_ptr<raynium::RenderTarget> target; };
+struct rn_shared_textures { rn_renderer* owner; radray::unique_ptr<raynium::SharedTextures> textures; };
 
 namespace {
 
@@ -128,8 +138,8 @@ rn_status rn_init_env(const rn_env_desc* desc, char* error_message, uint32_t err
         return RN_STATUS_FAILED;
     }
     std::string_view failure;
-    if (!raynium::RayniumEnvironment::Create(backend, (desc->flags & RN_ENV_VALIDATION) != 0,
-                                            environment, failure)) {
+    environment=raynium::RayniumEnvironment::Create(backend, (desc->flags & RN_ENV_VALIDATION) != 0, failure, "Raynium").Release();
+    if (!environment) {
         WriteError(error_message, error_capacity, failure);
         return RN_STATUS_FAILED;
     }
@@ -190,7 +200,8 @@ rn_status rn_create_runtime(const rn_runtime_desc* desc, rn_runtime** out_runtim
         std::copy_n(desc->luid, 8, host->Luid.begin());
     }
     std::string_view failure;
-    if (!raynium::RayniumRuntime::Create(*environment, runtime, failure, host)) {
+    runtime=raynium::RayniumRuntime::Create(*environment, failure, host).Release();
+    if (!runtime) {
         WriteError(error_message, error_capacity, failure);
         return RN_STATUS_FAILED;
     }
@@ -206,123 +217,102 @@ rn_status rn_create_runtime(const rn_runtime_desc* desc, rn_runtime** out_runtim
 
 void rn_destroy_runtime(rn_runtime* runtime) noexcept {
     if (!runtime) return;
-    if (runtime != activeRuntime || !environment || !environment->IsOwnerThread() || runtime->preview || runtime->terrain) {
-        RADRAY_ERR_LOG("Cannot destroy runtime: wrong owner/thread or live preview");
+    if (runtime != activeRuntime || !environment || !environment->IsOwnerThread() || runtime->renderer) {
+        RADRAY_ERR_LOG("Cannot destroy runtime: wrong owner/thread or live renderer");
         return;
     }
     delete runtime;
     activeRuntime = nullptr;
 }
 
-rn_status rn_create_preview(rn_runtime* runtime, const rn_preview_desc* desc,
-                          rn_preview** out_preview, rn_preview_info* info, uint32_t info_capacity,
-                          char* error_message, uint32_t error_capacity) noexcept {
-    if (out_preview) *out_preview = nullptr;
-    WriteError(error_message, error_capacity, {});
-    if (!error_message && error_capacity) return RN_STATUS_FAILED;
-    if (!runtime || !desc || !out_preview || !info || info_capacity < sizeof(*info)) {
-        WriteError(error_message, error_capacity, "Invalid preview pointer or info capacity (expected 128 bytes)");
-        return RN_STATUS_FAILED;
-    }
-    if (desc->struct_size != sizeof(*desc) || desc->reserved || runtime->preview) {
-        WriteError(error_message, error_capacity, "Invalid preview descriptor or runtime already has a preview");
-        return RN_STATUS_FAILED;
-    }
-    radray::unique_ptr<raynium::Preview> preview;
-    rn_preview_info result{};
-    radray::string failure;
-    if (!raynium::Preview::Create(*runtime->runtime, desc->width, desc->height, preview, result, failure)) {
-        WriteError(error_message, error_capacity, failure);
-        return RN_STATUS_FAILED;
-    }
-    radray::unique_ptr<rn_preview> owned{new (std::nothrow) rn_preview{runtime, std::move(preview)}};
-    if (!owned) {
-        WriteError(error_message, error_capacity, "Cannot allocate preview handle");
-        return RN_STATUS_FAILED;
-    }
-    *info = result;
-    *out_preview = owned.release();
-    runtime->preview = *out_preview;
-    return RN_STATUS_OK;
+namespace {
+template<class Action> rn_status Invoke(char* error,uint32_t capacity,Action&& action) noexcept {
+    WriteError(error,capacity,{});
+    if(!error && capacity) return RN_STATUS_FAILED;
+    try {
+        radray::string failure;
+        if(action(failure)) return RN_STATUS_OK;
+        WriteError(error,capacity,failure); return RN_STATUS_FAILED;
+    } catch(const std::exception& e) { WriteError(error,capacity,e.what()); }
+      catch(...) { WriteError(error,capacity,"Unexpected renderer failure"); }
+    return RN_STATUS_FAILED;
 }
-
-rn_status rn_draw_preview(rn_preview* preview, uint64_t sequence,
-                        char* error_message, uint32_t error_capacity) noexcept {
-    WriteError(error_message, error_capacity, {});
-    if (!error_message && error_capacity) return RN_STATUS_FAILED;
-    if (!preview) {
-        WriteError(error_message, error_capacity, "Preview is null");
-        return RN_STATUS_FAILED;
+bool Owner(rn_renderer* renderer,radray::string& error) {
+    if(!environment || !environment->IsOwnerThread() || !activeRuntime || !renderer || activeRuntime->renderer!=renderer) {
+        error="Invalid renderer owner or thread"; return false;
     }
-    radray::string failure;
-    if (!preview->preview->Draw(sequence, failure)) {
-        WriteError(error_message, error_capacity, failure);
-        return RN_STATUS_FAILED;
-    }
-    return RN_STATUS_OK;
+    return true;
 }
-
-rn_status rn_destroy_preview(rn_preview* preview, char* error_message, uint32_t error_capacity) noexcept {
-    WriteError(error_message, error_capacity, {});
-    if (!error_message && error_capacity) return RN_STATUS_FAILED;
-    if (!preview) return RN_STATUS_OK;
-    radray::string failure;
-    if (!preview->preview->Finish(failure)) {
-        WriteError(error_message, error_capacity, failure);
-        return RN_STATUS_FAILED;
-    }
-    preview->owner->preview = nullptr;
-    delete preview;
-    return RN_STATUS_OK;
 }
-
-static_assert(sizeof(rn_terrain_desc)==24);
-static_assert(sizeof(rn_terrain_mesh)==56);
-static_assert(sizeof(rn_terrain_draw)==32);
-static_assert(sizeof(rn_terrain_frame)==248);
-static_assert(offsetof(rn_terrain_frame,projection)==64);
-
-rn_status rn_create_terrain(rn_runtime* runtime, const rn_terrain_desc* desc, rn_terrain** output,
-    rn_preview_info* images, uint32_t capacity, char* error, uint32_t error_capacity) noexcept {
+rn_status rn_create_renderer(rn_runtime* runtime,const rn_renderer_desc* desc,rn_renderer** output,char* error,uint32_t capacity) noexcept {
     if(output) *output=nullptr;
-    WriteError(error,error_capacity,{});
-    if(!error && error_capacity) return RN_STATUS_FAILED;
-    if(runtime!=activeRuntime || !runtime || !environment || !environment->IsOwnerThread() || runtime->terrain ||
-       !desc || !output || !images || desc->struct_size!=sizeof(*desc) || desc->reserved || desc->split_mips>1 ||
-       !desc->width || !desc->height || desc->width>16384 || desc->height>16384 || !desc->mip_levels ||
-       desc->mip_levels>uint32_t(std::bit_width(std::max(desc->width,desc->height))) ||
-       capacity<(desc->split_mips ? desc->mip_levels+1 : 2)) {
-        WriteError(error,error_capacity,"Invalid terrain descriptor, owner, or image capacity"); return RN_STATUS_FAILED;
-    }
-    radray::unique_ptr<rn_terrain> owned{new(std::nothrow) rn_terrain{runtime,{}}};
-    if(!owned) { WriteError(error,error_capacity,"Cannot allocate terrain handle"); return RN_STATUS_FAILED; }
-    rn_preview_info result[16]{}; radray::string failure;
-    if(!raynium::Terrain::Create(*runtime->runtime,*desc,owned->terrain,result,failure)) {
-        WriteError(error,error_capacity,failure); return RN_STATUS_FAILED;
-    }
-    std::copy_n(result,desc->split_mips ? desc->mip_levels+1 : 2,images);
-    *output=owned.release(); runtime->terrain=*output; return RN_STATUS_OK;
+    return Invoke(error,capacity,[&](radray::string& failure) {
+        if(!runtime || runtime!=activeRuntime || !environment || !environment->IsOwnerThread() || runtime->renderer ||
+           !desc || desc->struct_size!=sizeof(*desc) || desc->flags || !output) { failure="Invalid renderer descriptor or owner"; return false; }
+        auto owned=radray::unique_ptr<rn_renderer>(new rn_renderer{runtime,{},{},{}});
+        if(!raynium::Renderer::Create(*runtime->runtime,owned->renderer,failure)) return false;
+        runtime->renderer=owned.release(); *output=runtime->renderer; return true;
+    });
 }
-rn_status rn_draw_terrain(rn_preview* preview, rn_terrain* terrain, uint64_t sequence,
-    const rn_terrain_frame* frame, char* error, uint32_t error_capacity) noexcept {
-    WriteError(error,error_capacity,{});
-    if(!error && error_capacity) return RN_STATUS_FAILED;
-    if(!preview || !terrain || !frame || preview->owner!=terrain->owner ||
-       !environment || !environment->IsOwnerThread()) {
-        WriteError(error,error_capacity,"Invalid terrain draw owner or frame"); return RN_STATUS_FAILED;
-    }
-    radray::string failure;
-    if(!preview->preview->DrawTerrain(sequence,*terrain->terrain,*frame,failure)) {
-        WriteError(error,error_capacity,failure); return RN_STATUS_FAILED;
-    }
-    return RN_STATUS_OK;
+rn_status rn_destroy_renderer(rn_renderer* renderer,char* error,uint32_t capacity) noexcept {
+    return Invoke(error,capacity,[&](radray::string& failure) {
+        if(!renderer) return true;
+        if(!Owner(renderer,failure)) return false;
+        if(renderer->target || renderer->textures) { failure="Renderer still has live shared resources"; return false; }
+        if(!renderer->renderer->Finish(failure)) return false;
+        renderer->owner->renderer=nullptr; delete renderer; return true;
+    });
 }
-rn_status rn_destroy_terrain(rn_terrain* terrain, char* error, uint32_t error_capacity) noexcept {
-    WriteError(error,error_capacity,{});
-    if(!error && error_capacity) return RN_STATUS_FAILED;
-    if(!terrain) return RN_STATUS_OK;
-    if(!environment || !environment->IsOwnerThread()) { WriteError(error,error_capacity,"Wrong terrain thread"); return RN_STATUS_FAILED; }
-    radray::string failure;
-    if(!terrain->terrain->Finish(failure)) { WriteError(error,error_capacity,failure); return RN_STATUS_FAILED; }
-    terrain->owner->terrain=nullptr; delete terrain; return RN_STATUS_OK;
+rn_status rn_create_render_target(rn_renderer* renderer,const rn_render_target_desc* desc,rn_render_target** output,
+    rn_shared_image_info* info,uint32_t infoCapacity,char* error,uint32_t capacity) noexcept {
+    if(output) *output=nullptr;
+    return Invoke(error,capacity,[&](radray::string& failure) {
+        if(!Owner(renderer,failure)) return false;
+        if(!desc || !output || !info || infoCapacity<sizeof(*info) || renderer->target) { failure="Invalid output target arguments"; return false; }
+        auto owned=radray::unique_ptr<rn_render_target>(new rn_render_target{renderer,{}});
+        if(!raynium::RenderTarget::Create(renderer->renderer->Runtime(),*desc,owned->target,failure)) return false;
+        *info=owned->target->Info(); renderer->target=owned.release(); *output=renderer->target; return true;
+    });
+}
+rn_status rn_destroy_render_target(rn_render_target* target,char* error,uint32_t capacity) noexcept {
+    return Invoke(error,capacity,[&](radray::string& failure) {
+        if(!target) return true;
+        if(!Owner(target->owner,failure)) return false;
+        if(!target->target->Finish(failure) || !target->owner->renderer->Finish(failure)) return false;
+        target->owner->target=nullptr; delete target; return true;
+    });
+}
+rn_status rn_create_shared_textures(rn_renderer* renderer,const rn_shared_textures_desc* desc,rn_shared_textures** output,
+    rn_shared_image_export* images,uint32_t imageCapacity,char* error,uint32_t capacity) noexcept {
+    if(output) *output=nullptr;
+    return Invoke(error,capacity,[&](radray::string& failure) {
+        if(!Owner(renderer,failure)) return false;
+        if(!desc || desc->struct_size!=sizeof(*desc) || !desc->textures || !desc->texture_count || desc->texture_count>16 ||
+           !output || !images || renderer->textures) { failure="Invalid shared texture arguments"; return false; }
+        uint64_t count=0;
+        for(uint32_t i=0;i<desc->texture_count;++i) count+=desc->textures[i].split_mips ? desc->textures[i].mip_levels : 1;
+        if(count>imageCapacity) { failure="Shared image export capacity is too small"; return false; }
+        if(!renderer->renderer->Finish(failure)) return false;
+        auto owned=radray::unique_ptr<rn_shared_textures>(new rn_shared_textures{renderer,{}});
+        if(!raynium::SharedTextures::Create(renderer->renderer->Runtime(),*desc,owned->textures,failure)) return false;
+        owned->textures->DescribeExports(images);
+        renderer->renderer->AttachTextures(owned->textures.get());
+        renderer->textures=owned.release(); *output=renderer->textures; return true;
+    });
+}
+rn_status rn_destroy_shared_textures(rn_shared_textures* textures,char* error,uint32_t capacity) noexcept {
+    return Invoke(error,capacity,[&](radray::string& failure) {
+        if(!textures) return true;
+        if(!Owner(textures->owner,failure)) return false;
+        if(!textures->textures->Finish(failure) || !textures->owner->renderer->Finish(failure)) return false;
+        textures->owner->renderer->AttachTextures(nullptr);
+        textures->owner->textures=nullptr; delete textures; return true;
+    });
+}
+rn_status rn_render_frame(rn_renderer* renderer,rn_render_target* target,const rn_render_frame_desc* frame,char* error,uint32_t capacity) noexcept {
+    return Invoke(error,capacity,[&](radray::string& failure) {
+        if(!Owner(renderer,failure)) return false;
+        if(!target || target!=renderer->target || !frame) { failure="Invalid frame or output owner"; return false; }
+        return renderer->renderer->Render(*target->target,*frame,failure);
+    });
 }

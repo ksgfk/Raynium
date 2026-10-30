@@ -96,6 +96,10 @@ final class VulkanConsumer implements AutoCloseable {
         copyAndCheckSolid(shared,sequence,width,height,null);
     }
     void copyAndCheckSolid(VulkanPreviewImage shared, long sequence, int width, int height, int[] expected) {
+        copyAndCheckImage(shared,sequence,width,height,(x,y)->expected);
+    }
+    void copyAndCheckImage(VulkanPreviewImage shared,long sequence,int width,int height,
+                           java.util.function.BiFunction<Integer,Integer,int[]> expectation) {
         int fullWidth = width + 35, fullHeight = height + 29, x0 = 17, y0 = 11;
         int byteCount = fullWidth * fullHeight * 4;
         long target = 0, targetMemory = 0, buffer = 0, bufferMemory = 0;
@@ -149,7 +153,8 @@ final class VulkanConsumer implements AutoCloseable {
             check(vkEndCommandBuffer(command), "end test commands");
             var values = VkTimelineSemaphoreSubmitInfo.calloc(stack).sType$Default()
                     .pWaitSemaphoreValues(stack.longs(sequence)).pSignalSemaphoreValues(stack.longs(sequence));
-            var submit = VkSubmitInfo.calloc(1, stack).sType$Default().pNext(values.address())
+            // LWJGL cannot infer this count from the two parallel wait arrays.
+            var submit = VkSubmitInfo.calloc(1, stack).sType$Default().pNext(values.address()).waitSemaphoreCount(1)
                     .pWaitSemaphores(stack.longs(shared.readySemaphore())).pWaitDstStageMask(stack.ints(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT))
                     .pCommandBuffers(stack.pointers(command)).pSignalSemaphores(stack.longs(shared.consumedSemaphore()));
             check(vkQueueSubmit(queue, submit, fence), "submit test copy");
@@ -164,9 +169,12 @@ final class VulkanConsumer implements AutoCloseable {
                     int r = inside ? Math.round((x - x0 + .5f) / width * 255) : 8;
                     int g = inside ? Math.round((1 - (y - y0 + .5f) / height) * 255) : 16;
                     int b = inside ? 0 : 32;
-                    if(inside && expected!=null) { r=expected[0]; g=expected[1]; b=expected[2]; }
+                    int[] expected=inside?expectation.apply(x-x0,y-y0):null;
+                    if(expected!=null) { r=expected[0]; g=expected[1]; b=expected[2]; }
                     int offset = (y * fullWidth + x) * 4;
-                    assertEquals(r, Byte.toUnsignedInt(pixels.get(offset)), 1, "red x=" + x + " y=" + y);
+                    assertEquals(r, Byte.toUnsignedInt(pixels.get(offset)), 1, "red x=" + x + " y=" + y + " RGBA="
+                        + Byte.toUnsignedInt(pixels.get(offset)) + "," + Byte.toUnsignedInt(pixels.get(offset+1)) + ","
+                        + Byte.toUnsignedInt(pixels.get(offset+2)) + "," + Byte.toUnsignedInt(pixels.get(offset+3)));
                     assertEquals(g, Byte.toUnsignedInt(pixels.get(offset + 1)), 1, "green x=" + x + " y=" + y);
                     assertEquals(b, Byte.toUnsignedInt(pixels.get(offset + 2)));
                     assertEquals(255, Byte.toUnsignedInt(pixels.get(offset + 3)));
@@ -226,7 +234,7 @@ final class VulkanConsumer implements AutoCloseable {
             for(var image:images) image.endWrite(command);
             check(vkEndCommandBuffer(command),"end producer commands");
             var values=VkTimelineSemaphoreSubmitInfo.calloc(stack).sType$Default().pWaitSemaphoreValues(stack.longs(sequence)).pSignalSemaphoreValues(stack.longs(sequence));
-            var submit=VkSubmitInfo.calloc(1,stack).sType$Default().pNext(values.address()).pCommandBuffers(stack.pointers(command))
+            var submit=VkSubmitInfo.calloc(1,stack).sType$Default().pNext(values.address()).waitSemaphoreCount(1).pCommandBuffers(stack.pointers(command))
                 .pWaitSemaphores(stack.longs(images.getFirst().readySemaphore())).pWaitDstStageMask(stack.ints(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT))
                 .pSignalSemaphores(stack.longs(images.getFirst().consumedSemaphore()));
             check(vkQueueSubmit(queue,submit,fence),"submit terrain inputs"); check(vkWaitForFences(device,fence,true,5_000_000_000L),"wait terrain input copies");

@@ -71,3 +71,6 @@ tasks.register('nativeTest', Test) {
     outputs.upToDateWhen { false }
     outputs.cacheIf { false }
 }
+
+// Packaging can share the selected Release tree with the staged-DLL tests.
+configureRelease.configure { mustRunAfter tasks.named('nativeTest') }

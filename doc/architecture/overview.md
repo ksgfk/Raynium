@@ -5,13 +5,13 @@
 # Raynium 架构地图
 
 Raynium 是面向 Minecraft 26.3 的 Fabric 客户端模组，当前 native 产物为 Windows x86_64 DLL。
-Java 25 通过 FFM 和 C ABI 加载 DLL，native runtime 通过 RadRay RHI 创建设备及 Direct 队列。
+Java 25 通过 FFM 和 C ABI 加载 DLL；DLL 消费上游 `RadRay::runtime` 静态库，再由该库使用 RadRay RHI。
 
 ## 当前实现与边界
 
-构建与分发、payload 定位和内容缓存、ABI 7 检查、设备创建/销毁及客户端生命周期已实现。
+构建与分发、payload 定位和内容缓存、ABI 8 检查、设备创建/销毁及客户端生命周期已实现。
 Windows MC Vulkan 通过 Mixin 在帧末复制 native 共享 SOLID 地形小 RT 到右上角，原版世界绘制和呈现继续运行。
-预览含 GPU shader 绘制、跨设备 timeline 交接和同步重建；没有通用资源服务或窗口接管。
+UV 与 SOLID 共用独立 runtime 的场景、Mesh Drawing Pipeline 和单队列 RDG。C++ 管线可声明 raster/compute/copy；生产管线仍为 SOLID 共享小 RT，没有窗口接管。
 构建与运行验证的日期、环境、证据及限制见[构建与测试](../guide/build-test.md#当前验证范围)。
 
 ## 职责与源码地图
@@ -21,22 +21,24 @@ Windows MC Vulkan 通过 Mixin 在帧末复制 native 共享 SOLID 地形小 RT 
 | 客户端入口 | 注册 CLIENT_STARTED/CLIENT_STOPPING，选择 payload 和后端，处理启动失败 | `src/client/java/dev/raynium/client/RayniumClient.java` |
 | Java bridge | payload 定位、内容缓存、FFM 布局和绑定、DLL/环境/runtime 所有权 | `src/client/java/dev/raynium/bridge/` |
 | C bridge | ABI 查询、参数校验、诊断字符串和不透明 runtime 句柄 | `native/include/raynium/bridge.h`、`native/src/bridge.cpp` |
-| native 环境 | 持有单例 factory/instance 和诊断配置，不创建设备 | `native/include/raynium/environment.h`、`native/src/environment.cpp` |
-| native runtime | 创建 RHI 设备及 Direct 队列，关闭时等待队列并释放设备 | `native/include/raynium/runtime.h`、`native/src/runtime.cpp` |
-| native 预览 | 共享小 RT、UV shader、两组命令槽和两条 timeline | `native/src/preview.cpp`、`native/shaders/uv.hlsl` |
-| SOLID 地形 | 采用的网格、分页几何、面组剔除、CPU indirect、多 mip 输入 | `native/src/terrain.cpp`、`src/client/java/dev/raynium/client/terrain/` |
+| MC native 管线 | ABI 转换、SolidPassProcessor、SolidRenderPipeline、shader 与共享协议 | `native/src/renderer.cpp`、`native/src/solid_pipeline.cpp`、`native/src/mesh_pass.cpp` |
+| 共享资源 | DLL 共享输入/输出协议，驻留与完成回收使用 RadRay runtime | `native/src/render_resources.cpp` |
+| MC 场景适配 | SOLID 网格/面组与 UV 转换为通用场景描述，上传预算、纹理变化 | `src/client/java/dev/raynium/client/terrain/`、`src/client/java/dev/raynium/client/preview/UvScene.java` |
 | MC 预览适配 | 导入原始 Vulkan 对象、帧末复制、resize/退出排空 | `src/client/java/dev/raynium/client/preview/`、`src/client/java/dev/raynium/client/mixin/` |
-| RadRay 依赖 | 锁定源码版本；当前链接 render/core，由设备创建消费 D3D12/Vulkan 后端 | `native/radray.lock.json`、`native/CMakeLists.txt` |
+| RadRay runtime | 上游持有环境/设备、持久场景、Mesh Drawing Pipeline、RDG、资源池与提交；DLL 链接 `RadRay::runtime` | `native/radray.lock.json`、`native/CMakeLists.txt` |
 | 工程工具 | 显式依赖准备、CMake 构建、stage、分发和验证 | `tools/`、`gradle/native.gradle` |
 
 ```mermaid
 flowchart LR
     Lifecycle[Fabric 客户端生命周期] --> Java[NativeEnvironment / NativeRuntime]
     Java --> FFM[NativeBindings / FFM]
-    FFM --> ABI[C ABI 7]
+    FFM --> ABI[C ABI 8]
     ABI --> Env[RayniumEnvironment 单例环境]
     Env --> Runtime[RayniumRuntime 设备会话]
-    Runtime --> RHI[RadRay Device / Direct Queue]
+    Runtime --> Adapter[MC SolidRenderPipeline]
+    Adapter --> Renderer[runtime Scene / PreparedMeshPass / Renderer]
+    Renderer --> RDG[GraphBuilder / CompiledGraph / ResourceStore]
+    RDG --> RHI[RadRay Device / Direct Queue]
     RHI --> RT[共享 SOLID 地形小 RT]
     RT --> Copy[MC Vulkan 帧末复制]
     MC[原版渲染] --> Copy
@@ -63,5 +65,6 @@ flowchart LR
 | 日期 | 记录内容 |
 | --- | --- |
 | 2026-10-26 | [渲染方向与实现方案思考记录](../history/2026-10-26-rendering-design-notes.md)：窗口接管到原版保留的方向变化，runtime/互操作/MC 接入草案及 RT 显示候选 |
+| 2026-10-30 | [可编程渲染 Runtime](../history/2026-10-30-programmable-runtime.md)：确认的独立静态库、最小 RDG、SOLID 管线与程序化验收范围 |
 
 历史记录保存当时的目标和推演，不构成当前实现或接口契约。

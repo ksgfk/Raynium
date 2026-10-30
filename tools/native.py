@@ -70,6 +70,14 @@ def msvc_environment():
 
 
 def checked_dependencies(dll, environment):
+    exports = run(['dumpbin', '/nologo', '/exports', str(dll)], dll.parent, environment, True).stdout
+    actual = set(re.findall(r'\b(rn_\w+)\b', exports))
+    expected = {'rn_get_abi_version', 'rn_query_abi', 'rn_init_env', 'rn_destroy_env',
+                'rn_create_runtime', 'rn_destroy_runtime', 'rn_create_renderer', 'rn_destroy_renderer',
+                'rn_create_render_target', 'rn_destroy_render_target', 'rn_create_shared_textures',
+                'rn_destroy_shared_textures', 'rn_render_frame'}
+    if actual != expected:
+        raise RuntimeError(f'ABI 8 export mismatch: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}')
     text = run(['dumpbin', '/nologo', '/dependents', str(dll)], dll.parent, environment, True).stdout
     names = sorted(set(re.findall(r'^\s*([\w.-]+\.dll)\s*$', text, re.MULTILINE | re.IGNORECASE)))
     if not names:
@@ -120,7 +128,7 @@ def collect_licenses(radray, destination):
 
 def check_manifest(manifest):
     if (manifest.get('schemaVersion') != 1 or manifest.get('platform') != 'windows-x86_64'
-            or manifest.get('abiVersion') != 7 or manifest.get('abiInfoSize') != 240
+            or manifest.get('abiVersion') != 8 or manifest.get('abiInfoSize') != 240
             or manifest.get('crt') != 'MT' or manifest.get('configuration') not in ('Debug', 'Release')
             or not isinstance(manifest.get('radrayDirty'), bool)):
         raise RuntimeError('Unsupported native manifest.')

@@ -7,11 +7,12 @@
 #else
 #define RAYNIUM_API __declspec(dllimport)
 #endif
-#define RN_ABI_VERSION 7u
+#define RN_ABI_VERSION 8u
 
 struct rn_runtime;
-struct rn_preview;
-struct rn_terrain;
+struct rn_renderer;
+struct rn_render_target;
+struct rn_shared_textures;
 
 // Fixed-width unscoped enums preserve the Java FFM integer layout.
 enum rn_status : uint32_t {
@@ -50,39 +51,6 @@ struct rn_abi_info {
     char toolchain[64];
 };
 
-struct rn_terrain_desc {
-    uint32_t struct_size, width, height, mip_levels;
-    uint32_t split_mips, reserved;
-};
-
-// All pointers are borrowed for one draw call. IDs are monotonic within an epoch.
-struct rn_terrain_mesh {
-    uint64_t id;
-    const void* vertices;
-    uint32_t vertex_count, reserved;
-    uint32_t group_vertices[7];
-};
-
-struct rn_terrain_draw {
-    uint64_t id;
-    int32_t origin[3];
-    float visibility;
-    uint32_t group_mask, reserved;
-};
-
-struct rn_terrain_frame {
-    uint32_t struct_size, flags; // bit 0: direct draws; bit 1: atlas changed; bit 2: RGSS; bit 3: profile
-    uint64_t epoch, input_sequence;
-    const rn_terrain_mesh* updates;
-    const rn_terrain_draw* draws;
-    const uint64_t* removed;
-    uint32_t update_count, draw_count, removed_count, anisotropy;
-    float projection[16], view[16];
-    int32_t camera_block[3];
-    float camera_fraction[3];
-    float fog_color[4], fog_distances[4];
-};
-
 struct rn_env_desc {
     uint32_t struct_size;
     rn_backend backend;
@@ -96,16 +64,7 @@ struct rn_runtime_desc {
     uint8_t luid[8];
 };
 
-struct rn_preview_desc {
-    uint32_t struct_size;
-    uint32_t width;
-    uint32_t height;
-    uint32_t reserved;
-};
-
-// NT handles are borrowed from the preview until its destruction. All fields are
-// fixed-width; native_* describe the exporting API, not the importing API.
-struct rn_preview_info {
+struct rn_shared_image_info {
     uint32_t struct_size;
     rn_shared_handle_type handle_type;
     uint32_t width;
@@ -128,7 +87,51 @@ struct rn_preview_info {
     uint32_t reserved;
 };
 
-// This header requires C++; exported functions use C linkage for Java FFM.
+enum rn_shader_program : uint32_t { RN_PROGRAM_UV = 1, RN_PROGRAM_TEXTURED = 2 };
+enum rn_vertex_layout : uint32_t { RN_LAYOUT_PROCEDURAL = 0, RN_LAYOUT_POSITION_COLOR_UV_LIGHT = 1 };
+enum rn_frame_flags : uint32_t { RN_FRAME_DIRECT = 1, RN_FRAME_RGSS = 4, RN_FRAME_PROFILE = 8 };
+struct rn_renderer_desc { uint32_t struct_size, flags; };
+struct rn_render_target_desc { uint32_t struct_size, width, height, reserved; };
+struct rn_texture_desc { uint32_t width, height, mip_levels, split_mips; };
+struct rn_shared_textures_desc { uint32_t struct_size, texture_count; const rn_texture_desc* textures; };
+// Handles are borrowed from their owner; texture_index/mip_level map physical exports to logical textures.
+struct rn_shared_image_export { rn_shared_image_info image; uint32_t texture_index, mip_level, mip_count, reserved; };
+// IDs are nonzero and scoped to the frame epoch. Input pointers are borrowed for one call.
+struct rn_index_update { uint64_t id; const uint32_t* indices; uint32_t count, reserved; };
+struct rn_submesh { uint32_t first, count; int32_t base_vertex; uint32_t reserved; };
+struct rn_mesh_update {
+    uint64_t id;
+    const void* vertices;
+    uint64_t index_buffer;
+    const rn_submesh* submeshes;
+    uint32_t vertex_count, vertex_stride, layout, submesh_count;
+};
+// Texture indices address logical textures in the attached shared_textures set.
+struct rn_material_update { uint64_t id; uint32_t program, albedo_texture, light_texture, anisotropy; };
+struct rn_primitive_update { uint64_t id, mesh, material; };
+struct rn_instance { int32_t origin[3]; float visibility; };
+struct rn_visible_item { uint64_t primitive; uint32_t submesh, depth_key, first_instance, instance_count; };
+struct rn_render_frame_desc {
+    uint32_t struct_size, flags;
+    uint64_t epoch, output_sequence, input_sequence;
+    const rn_index_update* indices;
+    const rn_mesh_update* meshes;
+    const rn_material_update* materials;
+    const rn_primitive_update* primitives;
+    const uint64_t* removed_meshes;
+    const uint64_t* removed_primitives;
+    const uint64_t* removed_materials;
+    const uint64_t* removed_indices;
+    const rn_visible_item* visible;
+    const rn_instance* instances;
+    uint32_t index_count, mesh_count, material_count, primitive_count;
+    uint32_t removed_mesh_count, removed_primitive_count, removed_material_count, removed_index_count;
+    uint32_t visible_count, instance_count, changed_textures, reserved;
+    float projection[16], view[16];
+    int32_t camera_block[3];
+    float camera_fraction[3], fog_color[4], fog_distances[4];
+};
+
 extern "C" {
 
 RAYNIUM_API uint32_t rn_get_abi_version(void) noexcept;
@@ -160,38 +163,20 @@ RAYNIUM_API rn_status rn_create_runtime(const rn_runtime_desc* desc, rn_runtime*
                                      char* error_message, uint32_t error_capacity) noexcept;
 
 // NULL is a no-op. A live pointer must be destroyed exactly once, before DLL unload.
-// All previews must already have been successfully destroyed.
+// All renderers must already have been successfully destroyed.
 RAYNIUM_API void rn_destroy_runtime(rn_runtime* runtime) noexcept;
 
-// One preview per runtime. Success returns complete resources; failure clears a
-// valid output handle and leaves info unchanged. Runtime must outlive preview.
-RAYNIUM_API rn_status rn_create_preview(rn_runtime* runtime, const rn_preview_desc* desc,
-                                     rn_preview** out_preview, rn_preview_info* info, uint32_t info_capacity,
-                                     char* error_message, uint32_t error_capacity) noexcept;
 
-// sequence starts at 1 and increases by one. Consumer must submit release and
-// signal consumed(sequence) after every successful draw before requesting another.
-// Failure submits nothing. All calls run on the runtime's creating thread.
-RAYNIUM_API rn_status rn_draw_preview(rn_preview* preview, uint64_t sequence,
-                                   char* error_message, uint32_t error_capacity) noexcept;
-
-// Caller first finishes all consumer GPU use and destroys imported objects.
-// Failure (GPU timeout) leaves the preview live; never unload its DLL on failure.
-// NULL succeeds. Success destroys the preview; its pointer must not be reused.
-RAYNIUM_API rn_status rn_destroy_preview(rn_preview* preview,
-                                      char* error_message, uint32_t error_capacity) noexcept;
-
-// Two images for direct sharing; mip_levels + 1 for split-mip fallback (lightmap last).
-// ready is signaled by native, starting at 1 after initialization/release; consumed
-// is signaled by the host after writing. Each successful frame consumes input(n),
-// then releases all input images and signals ready(n+1). No CPU pixel transfer.
-RAYNIUM_API rn_status rn_create_terrain(rn_runtime* runtime, const rn_terrain_desc* desc,
-    rn_terrain** output, rn_preview_info* images, uint32_t image_capacity,
-    char* error_message, uint32_t error_capacity) noexcept;
-RAYNIUM_API rn_status rn_draw_terrain(rn_preview* preview, rn_terrain* terrain, uint64_t sequence,
-    const rn_terrain_frame* frame, char* error_message, uint32_t error_capacity) noexcept;
-RAYNIUM_API rn_status rn_destroy_terrain(rn_terrain* terrain, char* error_message, uint32_t error_capacity) noexcept;
-
-}  // extern "C"
-
-#undef RAYNIUM_API
+// Calls are serialized on the runtime owner thread. Failed creation clears the output handle.
+RAYNIUM_API rn_status rn_create_renderer(rn_runtime*, const rn_renderer_desc*, rn_renderer**, char*, uint32_t) noexcept;
+RAYNIUM_API rn_status rn_destroy_renderer(rn_renderer*, char*, uint32_t) noexcept;
+RAYNIUM_API rn_status rn_create_render_target(rn_renderer*, const rn_render_target_desc*, rn_render_target**,
+    rn_shared_image_info*, uint32_t info_capacity, char*, uint32_t) noexcept;
+RAYNIUM_API rn_status rn_destroy_render_target(rn_render_target*, char*, uint32_t) noexcept;
+// export_capacity counts records, not bytes. Creation releases shared inputs at sequence 1.
+RAYNIUM_API rn_status rn_create_shared_textures(rn_renderer*, const rn_shared_textures_desc*, rn_shared_textures**,
+    rn_shared_image_export*, uint32_t export_capacity, char*, uint32_t) noexcept;
+RAYNIUM_API rn_status rn_destroy_shared_textures(rn_shared_textures*, char*, uint32_t) noexcept;
+// Successful submissions alone advance sequences and publish scene updates. Failed waits preserve live owners.
+RAYNIUM_API rn_status rn_render_frame(rn_renderer*, rn_render_target*, const rn_render_frame_desc*, char*, uint32_t) noexcept;
+}
