@@ -25,9 +25,11 @@
     {
       "name": "win-x64-debug",
       "inherits": "windows-x64-msvc-staticcrt",
-      "binaryDir": "${sourceDir}/../build/native/windows-x64-msvc-staticcrt/Debug",
+      "binaryDir": "${sourceDir}/../build/native/windows-x64-msvc-mtd/Debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDebug",
+        "RADRAY_DEPENDENCY_TRIPLET": "",
         "CMAKE_INSTALL_PREFIX": "${sourceDir}/../build/native/install/windows-x86_64/Debug"
       }
     },

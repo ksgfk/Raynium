@@ -17,8 +17,7 @@ public final class NativeRuntime implements AutoCloseable {
     private final NativeBindings bindings;
     private MemorySegment handle = MemorySegment.NULL;
     private boolean closed;
-    private NativePreview preview;
-    private NativeTerrain terrain;
+    private NativeRenderer renderer;
 
     NativeRuntime(NativeEnvironment environment, NativeBindings bindings, Logger logger, HostGpu host) {
         this.environment = environment;
@@ -33,32 +32,19 @@ public final class NativeRuntime implements AutoCloseable {
         }
     }
 
-    public NativePreview createPreview(int width, int height) {
+    public NativeRenderer createRenderer() {
         checkOpen();
-        if (preview != null) throw new IllegalStateException("Runtime already has a preview");
-        var created = bindings.createPreview(handle, width, height);
-        preview = new NativePreview(this, bindings, created.handle(), created.info());
-        return preview;
+        if(renderer!=null) throw new IllegalStateException("Runtime already has a renderer");
+        renderer=NativeRenderer.create(this,bindings,handle);
+        return renderer;
     }
-
-    public NativeTerrain createTerrain(int width, int height, int mipLevels, boolean splitMips) {
-        checkOpen();
-        if (terrain != null) throw new IllegalStateException("Runtime already has terrain");
-        terrain = NativeTerrain.create(this,bindings,handle,width,height,mipLevels,splitMips);
-        return terrain;
-    }
-    void releasedTerrain(NativeTerrain value) {
-        if (terrain != value) throw new IllegalStateException("Terrain owner mismatch");
-        terrain=null;
+    void releasedRenderer(NativeRenderer value) {
+        if(renderer!=value) throw new IllegalStateException("Renderer owner mismatch");
+        renderer=null;
     }
     void checkOpen() {
         environment.checkOpen();
         if (closed) throw new IllegalStateException("Runtime is closed");
-    }
-
-    void releasedPreview(NativePreview value) {
-        if (preview != value) throw new IllegalStateException("Preview owner mismatch");
-        preview = null;
     }
 
     void checkThread() {
@@ -69,7 +55,7 @@ public final class NativeRuntime implements AutoCloseable {
     public void close() {
         checkThread();
         if (closed) return;
-        if (preview != null || terrain != null) throw new IllegalStateException("Close the preview and terrain after consumer completion before closing runtime");
+        if (renderer != null) throw new IllegalStateException("Close the renderer before closing runtime");
         if (!handle.equals(MemorySegment.NULL)) {
             bindings.destroyRuntime(handle);
             handle = MemorySegment.NULL;

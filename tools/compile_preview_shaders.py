@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicitly regenerate the embedded UV shader bytecode (requires the pinned DXC SDK)."""
+"""Explicitly regenerate the embedded SOLID terrain bytecode (requires the pinned DXC SDK)."""
 import argparse
 from pathlib import Path
 import struct
@@ -10,9 +10,8 @@ def main():
     root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dxc', type=Path, default=root / 'external/RadRay/SDKs/radray_dxc/extracted/bin/dxc.exe')
-    parser.add_argument('--shader', choices=['uv', 'terrain'], default='uv')
     args = parser.parse_args()
-    shader = args.shader
+    shader = 'terrain'
     prefix = shader.capitalize()
     output = root / 'build/preview-shaders'
     output.mkdir(parents=True, exist_ok=True)
@@ -33,7 +32,7 @@ def main():
                 lines.append('        ' + ', '.join(f'0x{x:08x}u' for x in words[i:i+8]) + ',')
             lines += ['    };', '    return std::as_bytes(std::span{data});', '}']
     lines += ['}', '']
-    (root / f'native/include/raynium/{shader}_bytecode.h').write_text('\n'.join(lines), encoding='utf-8')
+    (root / f'native/include/raynium/{shader}_bytecode.h').write_text('\n'.join(lines), encoding='utf-8', newline='\n')
 
 
 if __name__ == '__main__':

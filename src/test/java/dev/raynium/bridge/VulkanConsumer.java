@@ -29,7 +29,12 @@ final class VulkanConsumer implements AutoCloseable {
         return VK_FALSE;
     });
 
-    VulkanConsumer() {
+    private final String captureName;
+    VulkanConsumer() { this(""); }
+    VulkanConsumer(String backend) {
+        captureName = backend.isEmpty() ? "" : backend + "-" + StackWalker.getInstance().walk(frames -> frames
+                .filter(f -> f.getClassName().endsWith("NativeTerrainTest"))
+                .map(StackWalker.StackFrame::getMethodName).findFirst().orElse("terrain"));
         try (MemoryStack stack = MemoryStack.stackPush()) {
             var app = VkApplicationInfo.calloc(stack).sType$Default().apiVersion(VK_API_VERSION_1_2);
             var debug = VkDebugUtilsMessengerCreateInfoEXT.calloc(stack).sType$Default().pfnUserCallback(callback)
@@ -92,10 +97,11 @@ final class VulkanConsumer implements AutoCloseable {
         throw new IllegalStateException("Test memory type unavailable");
     }
 
-    void copyAndCheck(VulkanPreviewImage shared, long sequence, int width, int height) {
-        copyAndCheckSolid(shared,sequence,width,height,null);
-    }
     void copyAndCheckSolid(VulkanPreviewImage shared, long sequence, int width, int height, int[] expected) {
+        copyAndCheckImage(shared,sequence,width,height,(x,y)->expected);
+    }
+    void copyAndCheckImage(VulkanPreviewImage shared,long sequence,int width,int height,
+                           java.util.function.BiFunction<Integer,Integer,int[]> expectation) {
         int fullWidth = width + 35, fullHeight = height + 29, x0 = 17, y0 = 11;
         int byteCount = fullWidth * fullHeight * 4;
         long target = 0, targetMemory = 0, buffer = 0, bufferMemory = 0;
@@ -149,7 +155,8 @@ final class VulkanConsumer implements AutoCloseable {
             check(vkEndCommandBuffer(command), "end test commands");
             var values = VkTimelineSemaphoreSubmitInfo.calloc(stack).sType$Default()
                     .pWaitSemaphoreValues(stack.longs(sequence)).pSignalSemaphoreValues(stack.longs(sequence));
-            var submit = VkSubmitInfo.calloc(1, stack).sType$Default().pNext(values.address())
+            // LWJGL cannot infer this count from the two parallel wait arrays.
+            var submit = VkSubmitInfo.calloc(1, stack).sType$Default().pNext(values.address()).waitSemaphoreCount(1)
                     .pWaitSemaphores(stack.longs(shared.readySemaphore())).pWaitDstStageMask(stack.ints(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT))
                     .pCommandBuffers(stack.pointers(command)).pSignalSemaphores(stack.longs(shared.consumedSemaphore()));
             check(vkQueueSubmit(queue, submit, fence), "submit test copy");
@@ -159,14 +166,15 @@ final class VulkanConsumer implements AutoCloseable {
             check(vkMapMemory(device, bufferMemory, 0, byteCount, 0, pointer), "map test result");
             try {
                 ByteBuffer pixels = MemoryUtil.memByteBuffer(pointer.get(0), byteCount);
+                compareAndSave(pixels, fullWidth, fullHeight, width + "x" + height + "-" + sequence);
                 for (int y = 0; y < fullHeight; y++) for (int x = 0; x < fullWidth; x++) {
                     boolean inside = x >= x0 && y >= y0 && x < x0 + width && y < y0 + height;
-                    int r = inside ? Math.round((x - x0 + .5f) / width * 255) : 8;
-                    int g = inside ? Math.round((1 - (y - y0 + .5f) / height) * 255) : 16;
-                    int b = inside ? 0 : 32;
-                    if(inside && expected!=null) { r=expected[0]; g=expected[1]; b=expected[2]; }
+                    int[] expected=inside?expectation.apply(x-x0,y-y0):new int[]{8,16,32};
+                    int r=expected[0],g=expected[1],b=expected[2];
                     int offset = (y * fullWidth + x) * 4;
-                    assertEquals(r, Byte.toUnsignedInt(pixels.get(offset)), 1, "red x=" + x + " y=" + y);
+                    assertEquals(r, Byte.toUnsignedInt(pixels.get(offset)), 1, "red x=" + x + " y=" + y + " RGBA="
+                        + Byte.toUnsignedInt(pixels.get(offset)) + "," + Byte.toUnsignedInt(pixels.get(offset+1)) + ","
+                        + Byte.toUnsignedInt(pixels.get(offset+2)) + "," + Byte.toUnsignedInt(pixels.get(offset+3)));
                     assertEquals(g, Byte.toUnsignedInt(pixels.get(offset + 1)), 1, "green x=" + x + " y=" + y);
                     assertEquals(b, Byte.toUnsignedInt(pixels.get(offset + 2)));
                     assertEquals(255, Byte.toUnsignedInt(pixels.get(offset + 3)));
@@ -181,10 +189,39 @@ final class VulkanConsumer implements AutoCloseable {
         assertTrue(errors.isEmpty(), String.join("\n", errors));
     }
 
+    private void compareAndSave(ByteBuffer pixels, int width, int height, String suffix) {
+        if (captureName.isEmpty()) return;
+        String output = System.getProperty("raynium.test.images", "");
+        String baseline = System.getProperty("raynium.test.baseline", "");
+        if (output.isEmpty() && baseline.isEmpty()) return;
+        String name = captureName + "-" + suffix + ".png";
+        var image = new java.awt.image.BufferedImage(width, height, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
+            int p = (y * width + x) * 4;
+            image.setRGB(x, y, (pixels.get(p+3) & 255) << 24 | (pixels.get(p) & 255) << 16
+                    | (pixels.get(p+1) & 255) << 8 | (pixels.get(p+2) & 255));
+        }
+        try {
+            if (!output.isEmpty()) {
+                var directory = java.nio.file.Path.of(output);
+                java.nio.file.Files.createDirectories(directory);
+                javax.imageio.ImageIO.write(image, "png", directory.resolve(name).toFile());
+            }
+            if (!baseline.isEmpty()) {
+                var reference = javax.imageio.ImageIO.read(java.nio.file.Path.of(baseline, name).toFile());
+                assertEquals(width, reference.getWidth()); assertEquals(height, reference.getHeight());
+                assertArrayEquals(reference.getRGB(0,0,width,height,null,0,width), image.getRGB(0,0,width,height,null,0,width), name);
+            }
+        } catch (java.io.IOException failure) { throw new java.io.UncheckedIOException(failure); }
+    }
+
     void writeTerrainInputs(java.util.List<VulkanPreviewImage> images, boolean split, int width, int height, int mips, long sequence) {
         writeTerrainInputs(images,split,width,height,mips,sequence,false);
     }
     void writeTerrainInputs(java.util.List<VulkanPreviewImage> images, boolean split, int width, int height, int mips, long sequence, boolean flat) {
+        writeTerrainInputs(images,split,width,height,mips,sequence,flat,3);
+    }
+    void writeTerrainInputs(java.util.List<VulkanPreviewImage> images, boolean split, int width, int height, int mips, long sequence, boolean flat, int changed) {
         long texture=0, memory=0;
         try(var stack=MemoryStack.stackPush()) {
             var handle=stack.mallocLong(1);
@@ -213,7 +250,7 @@ final class VulkanConsumer implements AutoCloseable {
                 vkCmdClearColorImage(command,texture,VK_IMAGE_LAYOUT_GENERAL,color,range);
             }
             for(var image:images) image.beginWrite(command);
-            for(int mip=0;mip<mips;mip++) images.get(split?mip:0).copyFrom(command,texture,mip,split?0:mip,0,0,Math.max(1,width>>mip),Math.max(1,height>>mip));
+            if((changed&1)!=0) for(int mip=0;mip<mips;mip++) images.get(split?mip:0).copyFrom(command,texture,mip,split?0:mip,0,0,Math.max(1,width>>mip),Math.max(1,height>>mip));
             // Reuse source level zero for a white lightmap, after all atlas reads finish.
             var memoryBarrier=VkMemoryBarrier.calloc(1,stack).sType$Default().srcAccessMask(VK_ACCESS_TRANSFER_READ_BIT).dstAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
             vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,memoryBarrier,null,null);
@@ -222,11 +259,11 @@ final class VulkanConsumer implements AutoCloseable {
             vkCmdClearColorImage(command,texture,VK_IMAGE_LAYOUT_GENERAL,white,base);
             memoryBarrier.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT).dstAccessMask(VK_ACCESS_TRANSFER_READ_BIT);
             vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,memoryBarrier,null,null);
-            images.getLast().copyFrom(command,texture,0,0,0,0,16,16);
+            if((changed&2)!=0) images.getLast().copyFrom(command,texture,0,0,0,0,16,16);
             for(var image:images) image.endWrite(command);
             check(vkEndCommandBuffer(command),"end producer commands");
             var values=VkTimelineSemaphoreSubmitInfo.calloc(stack).sType$Default().pWaitSemaphoreValues(stack.longs(sequence)).pSignalSemaphoreValues(stack.longs(sequence));
-            var submit=VkSubmitInfo.calloc(1,stack).sType$Default().pNext(values.address()).pCommandBuffers(stack.pointers(command))
+            var submit=VkSubmitInfo.calloc(1,stack).sType$Default().pNext(values.address()).waitSemaphoreCount(1).pCommandBuffers(stack.pointers(command))
                 .pWaitSemaphores(stack.longs(images.getFirst().readySemaphore())).pWaitDstStageMask(stack.ints(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT))
                 .pSignalSemaphores(stack.longs(images.getFirst().consumedSemaphore()));
             check(vkQueueSubmit(queue,submit,fence),"submit terrain inputs"); check(vkWaitForFences(device,fence,true,5_000_000_000L),"wait terrain input copies");

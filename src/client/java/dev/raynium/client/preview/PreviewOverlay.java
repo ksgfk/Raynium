@@ -5,7 +5,8 @@ import com.mojang.renderpearl.backend.vulkan.VulkanCommandEncoder;
 import com.mojang.renderpearl.backend.vulkan.VulkanDevice;
 import com.mojang.renderpearl.backend.vulkan.VulkanGpuTexture;
 import com.mojang.renderpearl.frontend.FrontendCommandEncoder;
-import dev.raynium.bridge.NativePreview;
+import dev.raynium.bridge.NativeRenderer;
+import dev.raynium.bridge.NativeRenderTarget;
 import dev.raynium.bridge.NativeRuntime;
 import dev.raynium.client.mixin.VulkanCommandEncoderAccessor;
 import net.minecraft.client.Minecraft;
@@ -28,10 +29,11 @@ public final class PreviewOverlay implements AutoCloseable {
     private final Logger logger;
     private final VulkanCommandEncoder encoder;
     private final VulkanDevice device;
-    private NativePreview preview;
+    private NativeRenderTarget preview;
+    private NativeRenderer renderer;
     private VulkanPreviewImage imported;
     private int width, height;
-    private long drawn, copied;
+    private long drawn;
     private boolean disabled;
     private dev.raynium.client.terrain.TerrainPreview terrain;
 
@@ -61,16 +63,22 @@ public final class PreviewOverlay implements AutoCloseable {
         if (disabled) logger.info("Raynium preview disabled: {}", encoder == null ? "Minecraft is not using Vulkan" : "raynium.preview.enabled=false");
     }
 
+    private NativeRenderer renderer() {
+        if(renderer==null) renderer=runtime.createRenderer();
+        return renderer;
+    }
+
     public void prepareTerrain(Minecraft client) {
         if(disabled || !dev.raynium.client.terrain.TerrainCapture.ENABLED || client.getWindow().isIconified()) return;
         try {
-            if(terrain==null) terrain=new dev.raynium.client.terrain.TerrainPreview(runtime,device,encoder,logger);
+            if(terrain==null) terrain=new dev.raynium.client.terrain.TerrainPreview(renderer(),device,encoder,logger);
             terrain.prepare(client);
         } catch(RuntimeException failure) { disable(failure); }
     }
     private void disable(RuntimeException failure) {
         closeOutput();
         if(terrain!=null) { terrain.close(); terrain=null; }
+        closeRenderer();
         disabled=true;
         dev.raynium.client.terrain.TerrainCapture.activate(false);
         logger.warn("Raynium preview disabled for this session; vanilla rendering continues",failure);
@@ -78,26 +86,24 @@ public final class PreviewOverlay implements AutoCloseable {
 
     public void render(Minecraft client) {
         if (disabled || client.getWindow().isIconified()) return;
-        if(dev.raynium.client.terrain.TerrainCapture.ENABLED && client.level==null && terrain!=null) {
-            terrain.close(); terrain=null; return;
+        if(client.level==null && terrain!=null) {
+            closeOutput(); terrain.close(); terrain=null; closeRenderer(); return;
         }
-        if(dev.raynium.client.terrain.TerrainCapture.ENABLED && (terrain==null || !terrain.pending())) return;
+        if(terrain==null || !terrain.pending()) return;
         var target = client.gameRenderer.mainRenderTarget();
         if (target.width <= 0 || target.height <= 0) return;
         try {
             var region = Region.of(target.width, target.height);
             if (preview == null || width != region.width() || height != region.height()) {
                 closeOutput();
-                preview = runtime.createPreview(region.width(), region.height());
+                preview = renderer().createTarget(region.width(), region.height());
                 imported = VulkanPreviewImage.create(device.vkDevice(), device.graphicsQueue().queueFamilyIndex(), preview.info());
                 width = region.width(); height = region.height();
                 logger.info("Raynium shared preview ready: {}x{} handleType={}", width, height, preview.info().handleType());
             }
             if (!(target.getColorTexture() instanceof VulkanGpuTexture color))
                 throw new IllegalStateException("Main target is not a Vulkan texture");
-            if(dev.raynium.client.terrain.TerrainCapture.ENABLED) {
-                if(!terrain.draw(preview,drawn+1)) throw new IllegalStateException("Terrain input prepared without a matching world frame");
-            } else preview.draw(drawn + 1);
+            if(!terrain.draw(preview,drawn+1)) throw new IllegalStateException("Terrain input prepared without a matching world frame");
             drawn++;
             encoder.waitSemaphore(imported.readySemaphore(), drawn, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
             var command = encoder.allocateAndBeginTransientCommandBuffer();
@@ -105,7 +111,6 @@ public final class PreviewOverlay implements AutoCloseable {
             VulkanPreviewImage.check(vkEndCommandBuffer(command), "end preview copy command buffer");
             encoder.execute(command);
             encoder.signalSemaphore(imported.consumedSemaphore(), drawn, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
-            copied = drawn;
         } catch (RuntimeException failure) {
             // Cleanup may itself fail on a GPU timeout; then propagate and retain live owners.
             disable(failure);
@@ -121,19 +126,23 @@ public final class PreviewOverlay implements AutoCloseable {
                 if (!completion.awaitCompletion(5_000_000_000L))
                     throw new IllegalStateException("MC preview submission timed out; resources remain live");
             }
-            imported.awaitConsumed(copied);
+            imported.awaitConsumed(drawn);
             imported.awaitReady(drawn);
             imported.close();
             imported = null;
         }
         preview.close();
         preview = null;
-        drawn = copied = 0;
+        drawn = 0;
     }
 
+    private void closeRenderer() {
+        if(renderer!=null) { renderer.close(); renderer=null; }
+    }
     @Override public void close() {
         closeOutput();
         if(terrain!=null) { terrain.close(); terrain=null; }
+        closeRenderer();
         disabled = true;
         dev.raynium.client.terrain.TerrainCapture.activate(false);
     }

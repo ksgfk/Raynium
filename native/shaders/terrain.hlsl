@@ -1,4 +1,4 @@
-[[vk::binding(0, 0)]] cbuffer Frame : register(b0) {
+[[vk::binding(0, 0)]] cbuffer Frame : register(b0, space0) {
     float4x4 Projection;
     float4x4 View;
     int4 CameraBlock;
@@ -6,10 +6,10 @@
     float4 FogColor;
     float4 FogDistances;
 };
-[[vk::binding(1, 0)]] Texture2D<float4> Atlas : register(t0);
-[[vk::binding(2, 0)]] Texture2D<float4> Lightmap : register(t1);
-[[vk::binding(3, 0)]] SamplerState AtlasSampler : register(s0);
-[[vk::binding(4, 0)]] SamplerState LightSampler : register(s1);
+[[vk::binding(1, 1)]] Texture2D<float4> Atlas : register(t0, space1);
+[[vk::binding(2, 1)]] Texture2D<float4> Lightmap : register(t1, space1);
+[[vk::binding(3, 1)]] SamplerState AtlasSampler : register(s0, space1);
+[[vk::binding(4, 1)]] SamplerState LightSampler : register(s1, space1);
 struct Vertex {
     float3 position : POSITION;
     float4 color : COLOR;

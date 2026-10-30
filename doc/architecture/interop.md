@@ -1,77 +1,80 @@
 > - 适用: 修改 C ABI、FFM、native payload 和加载寿命
-> - 权威: 本文维护已实现的跨语言、内存所有权与加载契约；操作步骤见构建指南
+> - 权威: 本文维护跨语言、内存所有权与加载契约；操作步骤见构建指南
 > - 锚点: `native/include/raynium/bridge.h`, `native/src/bridge.cpp`, `src/client/java/dev/raynium/bridge/*.java`, `src/client/java/dev/raynium/client/RayniumClient.java`, `tools/native.py`
 
 # 互操作与加载
 
-当前 Java 25 通过 FFM 加载 `rayniumruntime.dll`，C ABI 为 7。接口包含版本/构建身份查询、环境初始化/销毁、设备会话和共享预览与 SOLID 地形帧；没有通用资源或像素读回入口。
-运行命令与验证范围见[构建与测试](../guide/build-test.md)，C++ 设备所有权见[Native runtime](native-runtime.md)。
+Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 9。
+当前只提交 SOLID 地形场景帧，不保留旧 ABI 兼容层。
+设备、场景及完成序号见 [Native runtime](native-runtime.md)，操作与验证见[构建与测试](../guide/build-test.md)。
 
 ## 当前 C ABI
 
 | 导出 | 契约 |
-|---|---|
-| `rn_get_abi_version()` | ABI 版本 `7` |
-| `rn_query_abi(info, capacity, error_message, error_capacity)` | 填充调用方的 240 字节结构；失败不改动 info，原因写入诊断字符串 |
-| `rn_init_env(desc, error_message, error_capacity)` | 创建 DLL 单例环境，不返回句柄；重复初始化失败且保留原环境；不创建 GPU 设备 |
-| `rn_destroy_env(error_message, error_capacity)` | 无环境时成功；存在 runtime 或从其他线程调用时失败并保留环境；成功后释放 factory/instance |
-| `rn_create_runtime(desc, out_runtime, error_message, error_capacity)` | 在已有环境中通过 RayniumRuntime::Create 创建唯一设备会话；失败清理局部资源并清零输出槽，保留环境 |
-| `rn_destroy_runtime(runtime)` | 预览与地形会话全部销毁后，等待 Direct 队列并销毁对象，NULL 无操作；非空对象只能销毁一次 |
-| `rn_create_preview(runtime, desc, out_preview, info, capacity, error, error_capacity)` | 每 runtime 一个预览；返回不透明句柄和 128 字节导入描述；失败清空输出句柄且保持 info 不变；创建不提交 GPU 工作 |
-| `rn_draw_preview(preview, sequence, error, error_capacity)` | 序号从 1 严格递增，提交 UV 绘制；下一次调用前宿主必须提交消费及 consumed signal |
-| `rn_destroy_preview(preview, error, error_capacity)` | 宿主先完成消费并释放导入对象；等待 native 完成后销毁，NULL 成功；超时保留活跃对象 |
-| `rn_create_terrain` | 创建独立地形会话与共享图集/lightmap；初始化并释放输入所有权；布局与输入方向见[地形预览](terrain-preview.md#abi-7-地形布局) |
-| `rn_draw_terrain` | 批量增量网格、可见 draw、相机及雾写入已有预览；输入只在调用期间借用 |
-| `rn_destroy_terrain` | 宿主先完成输入复制并关闭导入对象；等待 native 完成，超时保留对象 |
+| --- | --- |
+| `rn_get_abi_version` | 返回 9 |
+| `rn_query_abi` | 240 字节身份与布局；失败不改 info |
+| `rn_init_env` / `rn_destroy_env` | DLL 单例环境；重复初始化或有活跃 runtime 时销毁失败并保留所有者 |
+| `rn_create_runtime` / `rn_destroy_runtime` | 唯一设备会话；销毁前必须先关闭 renderer |
+| `rn_create_renderer` / `rn_destroy_renderer` | 唯一 renderer；持有场景、帧上下文与完成 fence；有共享子对象时拒绝关闭 |
+| `rn_create_render_target` / `rn_destroy_render_target` | 每 renderer 一个输出；返回句柄及 128 字节图像信息；创建不提交 GPU 工作 |
+| `rn_create_shared_textures` / `rn_destroy_shared_textures` | 按描述创建逻辑输入纹理与物理导出；创建提交初始 release，序号为 1 |
+| `rn_render_frame` | 一次提交资源/场景增量、删除项、可见项、实例、视图与输入输出序号；就地应用增量，成功提交才推进序号 |
 
+三类子 owner 的 destroy 返回状态，NULL 成功；超时保留 owner。runtime destroy 保持 void 契约，NULL 无操作。
+所有状态入口仅返回 `RN_STATUS_OK=0` / `RN_STATUS_FAILED=1`，具体原因写入调用方 UTF-8 字符串缓冲区。
+诊断容量大于零时截断并 NUL 终止；NULL 指针要求零容量。参数缓冲区不得重叠，调用方负责真实容量。
+创建失败清空有效输出句柄槽；信息输出在创建成功前不改写。
 
-全部状态入口只返回 OK/FAILED；具体原因写入 UTF-8 诊断字符串，不从返回码区分参数、容量或设备失败。NULL 诊断指针必须配零容量；所有参数缓冲区互不重叠。
+`bridge.h` 使用 C++ 固定宽度非作用域枚举与 `extern "C"` / `noexcept` 导出，不提供纯 C 编译分支。
+新渲染入口通过统一异常转换层报告 FAILED；进入 RadRay 帧回调后的失败及底层 RHI 的不可恢复终止不转换为可恢复错误。
+没有 upcall、全局 last-error、跨语言共享队列或 GC/Cleaner 回收。
 
-`bridge.h` 由 C++ 编译器使用，导出函数显式采用 `extern "C"` 和 `noexcept`，不提供纯 C 编译兼容分支。
-状态、后端、runtime/env 标志和共享句柄类型使用非作用域 `enum : uint32_t`；
-状态函数返回 `rn_status`，相关描述字段直接使用对应枚举类型。
-原有枚举底层类型、数值和预览结构布局不变，新增地形入口使版本升为 ABI 7，Java FFM 继续以 32 位整数读写。
-`RN_ABI_VERSION` 保留为版本宏，DLL 导入/导出修饰由 `RAYNIUM_API` 宏选择。
+## ABI 9 布局
 
-`rn_env_desc` 为 12 字节、4 字节对齐：struct_size/backend/flags。
-backend 为 1（D3D12）或 2（Vulkan）；flags 位值 1（`RN_ENV_VALIDATION`）请求 driver validation。
-`rn_runtime_desc` 为 20 字节、4 字节对齐：struct_size/flags/node_mask 后跟 8 字节 LUID；
-flags 位值 1（`RN_RUNTIME_MATCH_GPU`）请求匹配宿主 GPU，匹配时 node_mask 必须为 1。
-后端和校验配置只从环境取得。D3D12 validation 环境初始化必须早于宿主图形初始化。
-`rn_preview_desc` 为 16 字节的 struct_size/width/height/reserved，reserved 必须为 0。
-参数仅在调用期间借用。诊断容量大于零时截断并 NUL 终止；native 对象只能由同一 DLL 的 destroy 释放。
+所有指针仅在本次同步调用期间借用；保留的 submesh、材质、primitive 描述被复制，顶点和索引写入 native staging 后上传到 GPU。
+索引不保留 CPU 值副本；资源增删改按当帧增量数组直接应用，失败后不恢复场景，调用方关闭 renderer。
+ID 非零，属于 frame epoch；同 ID 更新替换资源，epoch 非零且不能倒退。
+顶点固定为 28 字节的 position/color/UV/light 布局；所有网格使用 uint32 索引。
+材质中的纹理编号指向当前共享集合的逻辑纹理；共享 quad 索引也通过普通索引 ID 上传。
 
-ABI 结构布局以 `bridge.h` 为准；查询结构包含四个 uint32 和固定容量 UTF-8 字符串。Java 检查尺寸、指针宽度、flags、build ID、RadRay revision、配置、平台和工具链与 manifest 一致。结构和临时内存由 Java arena 管理，不跨边界 free/delete。`NativeBindings` 使用普通 FFM downcall，不使用 critical 调用。
+| 结构 | 字节数及关键布局 |
+| --- | --- |
+| `rn_env_desc` | 12，size/backend/flags；backend=1 D3D12 或 2 Vulkan，flags=1 driver validation |
+| `rn_runtime_desc` | 20，size/flags/node_mask/luid[8]，LUID 偏移 12；flags=1 匹配宿主 GPU |
+| `rn_renderer_desc` | 8，size/flags；flags 当前必须为 0 |
+| `rn_render_target_desc` | 16，size/width/height/reserved |
+| `rn_texture_desc` | 16，width/height/mip_levels/split_mips |
+| `rn_shared_textures_desc` | 16，size/count/textures 指针；最多 16 个逻辑纹理 |
+| `rn_shared_image_export` | 144，前 128 字节图像信息，随后 texture_index/mip_level/mip_count/reserved；capacity 按记录数 |
+| `rn_index_update` | 24，ID/indices 指针/count/reserved |
+| `rn_submesh` | 16，first/count/base_vertex/reserved |
+| `rn_mesh_update` | 40，ID/vertices 指针/index ID/submeshes 指针，随后偏移 32/36 的 vertex_count/submesh_count |
+| `rn_material_update` | 24，ID/albedo_texture/light_texture/anisotropy/reserved；纹理字段偏移 8/12，reserved 为 0 |
+| `rn_primitive_update` | 24，ID/mesh ID/material ID |
+| `rn_instance` | 16，int3 origin/float visibility |
+| `rn_visible_item` | 24，primitive ID/submesh/sort_key/first_instance/instance_count |
+| `rn_render_frame_desc` | 344，布局见下表 |
 
-ABI 7 的状态仍仅为 `RN_STATUS_OK=0` 和 `RN_STATUS_FAILED=1`，240 字节查询结构保持不变。
-Java 在调用 query 前核对版本，manifest 也只接受 ABI 7；旧 payload 必须重新构建/stage。
-stage 和 JAR 只收集 `rayniumruntime.dll`，不自动删除旧构建目录或内容缓存。
+| frame 字段组 | 字节偏移 |
+| --- | --- |
+| struct_size / flags / epoch / output_sequence / input_sequence | 0 / 4 / 8 / 16 / 24 |
+| indices / meshes / materials / primitives 指针 | 32 / 40 / 48 / 56 |
+| removed_meshes / removed_primitives / removed_materials / removed_indices 指针 | 64 / 72 / 80 / 88 |
+| visible / instances 指针 | 96 / 104 |
+| 上述十个数组的 count | 112..148，每项 4 字节 |
+| changed_textures / reserved | 152 / 156 |
+| projection[16] / view[16] | 160 / 224 |
+| camera_block[3] / camera_fraction[3] | 288 / 300 |
+| fog_color[4] / fog_distances[4] | 312 / 328 |
 
-## 接口边界
+frame flags 位值 1/2 为 RGSS/profile，其他位必须为 0；changed_textures 的第 i 位表示第 i 个逻辑纹理已更新。
+首次输入使用须初始化全部纹理。每帧资源更新各最多 65,536 项，可见项与实例各最多 1,048,576 项。
+mesh 最多 1,048,576 顶点，submesh 最多 65,536 项；索引资源最多 16,777,216 个 uint32。
+Java 调用方保证 submesh/索引的几何范围有效、删除后资源引用完整，同类增量 ID 不重复且更新与删除集合不相交；
+native 不做逐索引检查或驻留资源引用全表扫描。可见项检查 primitive 存在，instance_count 非零且范围落在当帧实例数组中。
 
-当前调用链是 `RayniumClient → NativeEnvironment/NativeRuntime → NativeBindings/FFM → C ABI → RayniumEnvironment/RayniumRuntime → RadRay RHI`。
-`bridge.h/.cpp` 承担跨语言入口，DLL 导出两个查询、环境 init/destroy、runtime create/destroy 、三个预览函数和三个地形函数。新增三个地形入口，批量传入网格更新、可见 draw 和相机/雾参数。
-
-`NativeBindings` 用 `FunctionDescriptor` 描述签名，在库加载时查找符号并缓存 MethodHandle，通过 `invokeExact` 调用；全部使用普通 downcall，没有 critical 选项或 upcall。
-
-| 当前 C ABI 数据 | Java 表达 | 用途 |
-| --- | --- | --- |
-| `uint32_t`、底层为 `uint32_t` 的枚举 | `ValueLayout.JAVA_INT` / `int` | 状态、版本、尺寸、容量、flags 和后端枚举 |
-| `rn_runtime*` 及指针参数 | `ValueLayout.ADDRESS` / `MemorySegment` | 不透明 runtime、结构与诊断缓冲区地址 |
-| `rn_preview*` | `ValueLayout.ADDRESS` / `MemorySegment` | 不透明预览对象 |
-| `uint64_t` | `ValueLayout.JAVA_LONG` / `long` | Win32 句柄值、分配大小/偏移和交接序号 |
-| 固定容量 `char[]` | `JAVA_BYTE` sequence | 查询结构中的 UTF-8、NUL 结尾字符串 |
-
-JDK linker 依据平台 ABI 和调用方提供的 `FunctionDescriptor` 建立调用，不从符号名称推导参数类型。
-当前 C 入口不暴露 C++ 对象布局、容器、引用或 Java 对象。见 [JDK 25 Linker](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/foreign/Linker.html)。
-
-## 布局与版本
-
-`NativeBindings` 手写查询/runtime 的 `StructLayout`，环境描述按固定字段偏移写入。
-native 侧用 `static_assert` 检查五种枚举底层类型均为 `uint32_t`，以及查询结构 240 字节、环境描述 12 字节与 runtime 描述 20 字节（均为 4 字节对齐）、预览描述 16 字节、导入描述 128 字节及关键偏移。
-Java `NativePreview.Info.read` 显式读取导入描述，实际 GPU 共享测试覆盖两种后端的字段传递。
-
-| rn_preview_info 字段组 | 字节偏移 |
+| `rn_shared_image_info` 字段组（共 128 字节） | 字节偏移 |
 | --- | --- |
 | struct_size、handle_type、width、height | 0、4、8、12 |
 | memory_handle、ready_handle、consumed_handle、allocation_size | 16、24、32、40 |
@@ -80,72 +83,52 @@ Java `NativePreview.Info.read` 显式读取导入描述，实际 GPU 共享测�
 | native_format、native_usage、native_flags、native_tiling | 96、100、104、108 |
 | allocation_offset、dedicated、reserved | 112、120、124 |
 
-handle_type 为 1 时表示 D3D12Resource/D3D12Fence，为 2 时表示 OpaqueWin32。
-opaque 路径必须使用导出端的完整 Vulkan 元数据；D3D12 路径由导入设备查询内存类型。
-地形帧布局见[地形预览](terrain-preview.md#abi-7-地形布局)；没有 schema 协商或自动绑定生成器。
+handle_type=1 表示 D3D12Resource/D3D12Fence，2 表示 OpaqueWin32。输入图像的 ready/consumed 分别表示 native 释放与 MC 写入完成。
+输出信息 capacity 按字节；输入导出 capacity 按 144 字节记录数量。native 静态断言校验尺寸和关键偏移，Java `SharedImageInfo.read` 显式读取。
+查询结构仍为 240 字节；Java、构建 manifest、stage 和分发校验都只接受 ABI 9，旧 payload 须重建。
 
-`rn_query_abi` 返回布局、ABI 和构建身份。Java 在调用 query 前先检查版本，再将查询内容与 manifest 对照；不兼容版本会被拒绝。
-JDK `MemoryLayout.structLayout` 不自动插入 C 编译器 padding。见 [JDK 25 MemoryLayout](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/foreign/MemoryLayout.html)。
+## Java 包装与所有权
 
-## 内存所有权与借用
+调用链为 `MC adapter → NativeRenderer → NativeBindings/FFM → C ABI → MC native 适配 → RadRay runtime 静态库 → RadRay RHI`。
+`NativeRenderer.Frame` 携带通用增量与视图数据，序列化进 confined arena；Java 检查数组长度，native 检查资源引用及绘制范围。
+`NativeBindings` 加载符号并缓存 MethodHandle，查询/环境/runtime 使用 invokeExact，新渲染入口通过统一 invokeWithArguments 状态处理；均无 critical 选项。
+FFM 使用 ADDRESS 表示不透明指针、JAVA_LONG 表示 ID/句柄/序号、JAVA_INT 表示 uint32/枚举，数组按固定偏移编排。
 
-| 当前数据 | 所有者 | 寿命 |
+| 所有者 | 直接持有 | 关闭顺序/条件 |
 | --- | --- | --- |
-| 创建参数、输出指针槽、查询结构和诊断缓冲区 | Java confined scratch arena | 本次同步调用期间；native 不保留输入地址 |
-| 单例环境、DXGI factory/Vulkan instance | DLL 环境槽位 | init 成功至 destroy_env 成功；必须覆盖全部 runtime 寿命 |
-| `rn_runtime*` 指向的对象 | DLL | 成功创建后存活至对应 destroy |
-| `rn_preview*`、导出 Win32 句柄、共享纹理/fence | native preview | 宿主完成消费、销毁导入对象且 native 工作完成后销毁 |
-| 导入 VkImage/VkDeviceMemory/semaphore | Java VulkanPreviewImage | 显式排空后关闭；不拥有导出 Win32 句柄 |
-| RHI 设备与队列引用 | native runtime/设备 | 由 runtime 的创建和关闭路径管理 |
-| DLL 符号及绑定 | `NativeLibrary` | library arena 关闭前有效 |
+| `NativeEnvironment` | `NativeLibrary`、唯一 runtime | runtime 成功关闭后销毁环境，再关闭 library arena |
+| `NativeRuntime` | 唯一 renderer | renderer 成功关闭后销毁设备会话 |
+| `NativeRenderer` | 场景、唯一 target 与 shared textures 的 Java owner | 子 owner 关闭后等待自身提交完成 |
+| `NativeRenderTarget` | 输出共享颜色、导出与输出 timeline（深度归 native 帧槽 arena） | 宿主完成消费并关闭导入后销毁 |
+| `NativeSharedTextures` | 输入纹理、物理导出映射和输入 timeline | 宿主完成写入并关闭导入后销毁 |
+| `VulkanPreviewImage` | VkImage/VkDeviceMemory/semaphore | 显式排空后关闭；不拥有导出 Win32 句柄 |
+| 调用 scratch arena | 描述、数组、返回槽、诊断缓冲区 | 同步调用结束关闭，不释放返回槽中指向的 native owner |
 
-输出槽的 arena 关闭不释放槽中返回地址指向的 runtime。Java 不解引用该对象地址；native 对象由同一 DLL 的 destroy 释放，Java arena 内存由 Java 关闭。
-`MemorySegment` 的 Java 边界检查不约束 C++ 裸指针访问；`reinterpret` 也不验证地址真实容量或转移所有权。见 [JDK 25 MemorySegment](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/foreign/MemorySegment.html)。
+所有生命周期和渲染调用都在环境初始化线程串行执行，Java 与 native 均检查 owner/thread。
+父 owner 拒绝在子 owner 存活时关闭；子对象解析失败尝试清理，清理失败保留在父对象中，禁止继续卸载 DLL。
+资源等待失败保留句柄和所有者，不把超时当完成。library 的 shared arena 不使 RHI 自动线程安全。
 
-## 线程与调用粒度
-
-生命周期和逐帧调用来自 MC 渲染线程。`NativeEnvironment` 保存初始化线程，环境、runtime、预览操作沿用该线程检查。
-native 创建 runtime 和销毁环境同样检查环境所属线程；所有调用由调用方串行执行，ABI 查询不依赖环境。
-library 使用 shared arena，参数和返回缓冲区使用 confined scratch arena；shared arena 不使 native runtime 自动线程安全。
-每帧通过一次 draw downcall 提交预览；地形更新与 draw 同批传入；没有 native 工作线程或跨语言共享命令队列。
-
-## 错误与回调
-
-状态返回入口只返回 `RN_STATUS_OK` 或 `RN_STATUS_FAILED`，原因写入调用方提供的诊断缓冲区；没有全局 last-error 或 Java 日志回调。
-Java 将失败状态转换为 `IllegalStateException`；预览创建/导入失败由 MC 适配层降级，等待失败保留资源。
-当前 C ABI 函数声明为 `noexcept`，bridge 没有异常捕获/转换层；异常逃逸不等于返回 FAILED。
-底层 RHI 日志直接输出，当前没有 upcall stub。
-
-## 会话和库的寿命
-
-`SymbolLookup.libraryLookup(Path, Arena)` 将库加载寿命关联到 arena。库不能先于其对象、函数指针或回调关闭。见 [JDK 25 SymbolLookup](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/foreign/SymbolLookup.html)。
-
-`NativeEnvironment implements AutoCloseable` 拥有成功初始化的单例环境和 `NativeLibrary`，
-后者保存绑定和 DLL arena。环境通过 `createRuntime(hostGpu)` 创建至多一个 `NativeRuntime`，
-runtime 持有父环境引用、设备句柄、至多一个 `NativePreview` 和一个 `NativeTerrain`，关闭 runtime 不卸载 DLL。
-
-游戏在客户端初始化入口加载 DLL 并初始化所选后端的环境；CLIENT_STARTED 再创建设备和预览。
-初始化失败只关闭本次加载的 library；重复初始化失败不销毁原有环境。
-设备创建失败保留环境，客户端启动失败处理按预览 → runtime → 环境 → DLL 顺序清理。
-
-Java close 幂等，有活跃预览或地形会话时拒绝关闭 runtime，有活跃 runtime 时拒绝关闭环境。
-预览关闭成功后才排空 Direct 队列并销毁 runtime；环境销毁成功后才关闭 library arena。
-预览创建成功但 Java 无法解析返回描述时，立即销毁尚未提交的 native 预览。
-清理失败保留未关闭的 Java 所有者与 DLL，不继续向上释放；没有引用计数或隐式级联销毁。
-
-`NativeLibrary` 的 shared arena 不代表 RHI 支持并发；当前全部生命周期操作在 MC 渲染线程串行执行。创建描述、输出指针槽与诊断缓冲区使用 confined scratch arena，输出槽关闭不释放其指向的 runtime。Java 不解引用或 reinterpret 该对象地址；只有 DLL 的 destroy 负责释放。Library、runtime、调用 scratch 是不同寿命，不使用 GC/Cleaner 作为正常 GPU 资源回收机制。
-
-Fabric 当前使用 unnamed module，游戏 JVM 继续显式设置 `--enable-native-access=ALL-UNNAMED`。不能把该参数只写入 Gradle daemon，也不能依靠普通 mod JAR 的 manifest 给宿主 JVM 授权；官方 manifest 入口针对可执行 JAR。见 [JDK 25 Restricted Methods](https://docs.oracle.com/en/java/javase/25/core/restricted-methods.html)。
+`MemorySegment` 的边界检查不能验证 C++ 裸指针容量。所有 native 对象只能由同一 DLL 的 destroy 释放。
+JDK linker 按 FunctionDescriptor 建立调用，不推断 C++ 类型；MemoryLayout 不自动插入 C padding。
+参见 [JDK 25 Linker](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/foreign/Linker.html) 和
+[MemoryLayout](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/foreign/MemoryLayout.html)。
+Fabric 使用 unnamed module，游戏 JVM 显式设置 `--enable-native-access=ALL-UNNAMED`；只设置 Gradle daemon 不生效。
 
 ## 构建身份与 payload
 
-`native/CMakeLists.txt` 用独立 binary 目录将锁定 RadRay 作为源码子工程引入，静态链接 `RadRay::render/core`，只导出 bridge 的十二个 C 入口。
-当前只生成一个 Windows x86_64 DLL，Debug/Release 均使用 `/MT` 和静态 mimalloc，Debug 保留调试宏而不启用 `/MTd`；bridge 不再包含重复的 new/delete 替换头。
+`native/CMakeLists.txt` 用独立 binary 目录将锁定 RadRay 作为源码子工程引入，DLL 链接上游 `RadRay::runtime` 静态库，由该库传递依赖 render/core，只导出 bridge 的十三个 C 入口。
+Windows x86_64 的 Debug 固定 `/MTd`，Release 固定 `/MT`，bridge、RadRay 和所有链接的依赖必须匹配对应配置的 CRT。
+Debug 使用 Raynium 显式准备的独立依赖前缀，Release 使用 RadRay 的 `windows-x64-msvc-staticcrt` 三元组；锁定的 RadRay 源码未修改。
+CMake 拒绝不匹配的 CRT/依赖配置，bridge 编译期拒绝动态 CRT并断言 Debug/Release 的 STL iterator 等级分别为 2/0。
+两配置都通过 whole-archive 链接静态 mimalloc，payload 只有 `rayniumruntime.dll`。Debug 的 mimalloc 使用 `MI_OVERRIDE=OFF`，
+保留显式 `mi_*` 分配，普通 CRT/new/delete 使用 Debug CRT；Release 保留 `MI_OVERRIDE=ON` 静态覆盖。
+bridge 不包含重复的 new/delete 替换头。
 配置阶段不恢复依赖，发布要求锁定提交的干净 Release 源码。当前未实现 RadRay 安装包消费模式。
 
-stage 使用 `dumpbin /dependents` 检查直接依赖，收集上游许可证，并先验证完整快照再发布 `current.json`。
-manifest 包含平台、ABI/布局、构建配置、CRT、工具链、build ID、RadRay commit/dirty、DLL/许可证大小与 SHA-256、系统依赖分类。
-build ID 来自 native/RadRay 源码及配置/工具链指纹；DLL SHA-256 标识实际二进制，manifest SHA-256 标识内容快照，三者用途不同。
+stage 使用 `dumpbin /exports` 核对十三个 ABI 9 入口，再用 `/dependents` 拒绝动态 CRT 和未分类的私有 DLL，收集上游许可证，并先验证完整快照再发布 `current.json`。
+schema 1 manifest 包含平台、ABI/布局、构建配置、CRT、工具链、build ID、RadRay commit/dirty、DLL/许可证大小与 SHA-256、系统依赖分类。
+ABI 9 的身份 flags 中 bit 1（static CRT）和 bit 2（mimalloc）均为 1，布局不变。loader 只接受 Debug/MTd 或 Release/MT 的单 DLL 清单，拒绝错配和 MD 的 schema 2 payload。
+build ID 来自 native/RadRay（含 `modules/runtime/`）源码及配置/工具链指纹；DLL SHA-256 标识实际二进制，manifest SHA-256 标识内容快照，三者用途不同。
 哈希用于一致性检查，不等于来源认证。
 
 ```text
@@ -170,12 +153,12 @@ loader 的选择顺序为：显式开发目录 `-Draynium.native.dir=...`，否�
 1. 读取 manifest，确认 JVM 架构、ABI 和配置。
 2. 将实际 payload 发布到游戏目录下 `.raynium/natives/windows-x86_64/<content-hash>/`。
 3. 检查已有完整副本，或写入独立 staging 目录，校验后再发布；多进程使用文件锁协调解包。
-4. 检查游戏 JVM native access 权限，以绝对路径调用 `SymbolLookup.libraryLookup`。
-5. 先调用版本入口核对 ABI 7，再用带诊断缓冲区的 `rn_query_abi` 检查布局与构建身份。
-6. 客户端初始化入口调用 `rn_init_env` 创建环境；CLIENT_STARTED 再通过 `rn_create_runtime` 创建 RHI 设备/Direct 队列。
+4. 客户端初始化入口检查游戏 JVM native access 权限，以绝对路径调用 `SymbolLookup.libraryLookup` 加载 bridge。
+5. 先调用版本入口核对 ABI 9，再用带诊断缓冲区的 `rn_query_abi` 检查布局与构建身份。
+6. 随后调用 `rn_init_env` 创建环境；CLIENT_STARTED 再通过 `rn_create_runtime` 创建 RHI 设备/Direct 队列。
    早期准备失败由 Fabric 初始化失败路径报告，设备创建失败清理并输出 MC 崩溃报告，仍不接管 MC 绘制。
 
-所有内容路径落在 loader 自己的根目录内，当前仅接受固定 DLL 文件名。已有损坏缓存直接报错，不覆盖、不删除；暂未实现旧缓存自动清理。
+所有内容路径落在 loader 自己的根目录内，只接受固定 DLL 文件名并验证大小和哈希。已有损坏缓存直接报错，不覆盖、不删除；暂未实现旧缓存自动清理。
 
 开发也加载内容副本，而不是直接加载 linker 输出目录中的 DLL。Windows 占用已加载 DLL 时，这样仍能重编译新的 bridge；重启客户端后加载新 build。Java 热更新不能替代 native ABI 或 DLL 的重新加载。
 
@@ -183,7 +166,8 @@ loader 的选择顺序为：显式开发目录 `-Draynium.native.dir=...`，否�
 
 主 DLL 使用绝对路径，并不保证其间接依赖会自动从同目录找到。Windows 对依赖 DLL 的搜索和进程已加载模块仍有独立规则。[Windows DLL 搜索顺序](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order)
 
-当前静态链接 RadRay、CRT 与第三方实现，保留 Windows/驱动系统依赖。stage 通过 `dumpbin /dependents` 拒绝动态 CRT 和未分类的私有 DLL。当前没有私有 DLL 依赖预加载列表或 `LoadLibraryExW` bootstrap。
+当前静态链接 RadRay、CRT 与 mimalloc，保留 Windows/驱动系统依赖；无需为 Raynium 额外安装动态 VC++ CRT。
+没有 mimalloc/redirect DLL、Fabric preLaunch 分配器加载器或进程级 CRT 重定向。静态分配器随 bridge 加载与卸载；所有 native owner 必须先关闭。
 
 不通过修改进程全局 PATH 或 SetDllDirectory 来影响其他 Minecraft 模组。当前没有为不同模组的同名 DLL 提供版本隔离机制。
 
@@ -191,4 +175,4 @@ loader 的选择顺序为：显式开发目录 `-Draynium.native.dir=...`，否�
 
 ## 讨论记录
 
-通用资源句柄、批量数据、FramePacket 和读回接口的讨论保存在[思考历史](../history/2026-10-26-rendering-design-notes.md#当时的跨语言草案)，不属于当前 ABI。
+早期接口草案保存在[思考历史](../history/2026-10-26-rendering-design-notes.md#当时的跨语言草案)；该记录不是 ABI 9 契约，当前接口以本文与 bridge.h 为准。

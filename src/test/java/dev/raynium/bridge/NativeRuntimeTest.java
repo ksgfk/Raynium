@@ -92,7 +92,8 @@ class NativeRuntimeTest {
                 assertTrue(failure.getMessage().contains("already initialized"));
             }
             try (var runtime = environment.createRuntime(null);
-                 var preview = runtime.createPreview(1, 1)) {
+                 var renderer = runtime.createRenderer();
+                     var preview = renderer.createTarget(1, 1)) {
                 assertEquals(1, preview.info().width());
             }
         }
@@ -104,11 +105,12 @@ class NativeRuntimeTest {
              var consumer = new VulkanConsumer()) {
             for (int iteration = 0; iteration < 2; iteration++) {
                 try (var runtime = environment.createRuntime(VulkanPreviewImage.hostGpu(consumer.device.getPhysicalDevice()));
-                     var preview = runtime.createPreview(17, 9);
+                     var renderer = runtime.createRenderer();
+                     var preview = renderer.createTarget(17, 9);
                      var image = VulkanPreviewImage.create(consumer.device, consumer.family, preview.info())) {
                     for (long frame = 1; frame <= 2; frame++) {
-                        preview.draw(frame);
-                        consumer.copyAndCheck(image, frame, 17, 9);
+                        renderer.render(preview,NativeTestSupport.solidFrame(frame));
+                        consumer.copyAndCheckSolid(image, frame, 17, 9,NativeTestSupport.SOLID_COLOR);
                     }
                 }
             }

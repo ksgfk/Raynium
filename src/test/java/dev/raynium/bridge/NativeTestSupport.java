@@ -16,6 +16,13 @@ import org.slf4j.Logger;
 
 /** Owns raw C ABI handles so assertion failures cannot unload a DLL with live runtimes. */
 final class NativeTestSupport implements AutoCloseable {
+    static final int[] SOLID_COLOR={64,128,191};
+    static NativeRenderer.Frame solidFrame(long sequence) {
+        var frame=new NativeRenderer.Frame(); frame.outputSequence=sequence;
+        frame.fogColor=new float[]{.25f,.5f,.75f,1};
+        frame.flags=Boolean.getBoolean("raynium.terrain.profile")?NativeRenderer.PROFILE:0;
+        return frame;
+    }
     private final Arena arena = Arena.ofConfined();
     private final List<MemorySegment> runtimes = new ArrayList<>();
     private final MethodHandle create;

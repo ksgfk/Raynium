@@ -1,6 +1,6 @@
 > - 适用: 恢复依赖、构建、测试、启动与分发 Raynium
 > - 权威: 本文维护可执行命令和当前验证范围；ABI、内容缓存和加载契约归互操作文档
-> - 锚点: `build.gradle`, `gradle/native.gradle`, `gradle.properties`, `native/CMakeLists.txt`, `native/CMakePresets.json`, `native/radray.lock.json`, `tools/fetch_radray.py`, `tools/native.py`, `src/test/java/dev/raynium/bridge/*.java`
+> - 锚点: `build.gradle`, `gradle/native.gradle`, `gradle.properties`, `native/CMakeLists.txt`, `native/CMakePresets.json`, `native/radray.lock.json`, `tools/fetch_radray.py`, `tools/build_debug_dependencies.py`, `tools/native.py`, `src/test/java/dev/raynium/bridge/*.java`
 
 # 构建与测试
 
@@ -9,6 +9,286 @@
 payload、ABI、缓存和关闭顺序见[互操作与加载](../architecture/interop.md)。
 
 ## 当前验证范围
+
+### 2026-11-04：FrameSlot 资源退役接口升级
+
+更新锁定 RadRay，并适配返回 void 的 Extract/Record/RunFrame 及 FrameSlot::RetireResource。
+资源转交与失败后的保活边界见 [Native runtime](../architecture/native-runtime.md#上传帧槽与资源退役)。
+环境为 Windows x64、MSVC 19.51.36260.0、RTX 4080 / NVIDIA 621.01，Release `/MT`，启用 Tracy 0.14.1。
+
+- `gradlew.bat nativeTest -PnativeConfig=Release -PnativeProfiler=true -PrhiValidation=true -PterrainProfile=true --console=plain --no-parallel`：65 项现有 native/GPU 用例通过。
+- 随后同配置运行 `nativeTest --tests '*.NativeTerrainTest.failedPreparationRetainsResourcesForPendingFrame'`：新增 4 项双后端/direct-split 用例通过；更新中途失败后不重试，完成在途帧像素检查并正常关闭。
+- 连接采集器的短测保存了 0.607 秒、81 个 CPU zones 的 Tracy；采集器及测试 JVM 均正常退出。
+
+两轮测试均无失败、错误或跳过，日志无 D3D12 校验错误、Vulkan VUID 或同步错误。
+Tracy 重复初始化时仍出现 Windows SymInitialize 诊断，已插桩 zones 可采集；未验证调用栈符号解析。
+自动测试、短采集及 stage 清单位于本机忽略目录 `build/verification/tracy-session-20261104-231831/`。
+
+随后用户以 Release、native D3D12 / MC Vulkan 进入开发世界并操作，RHI wrapper、native 驱动与 MC Vulkan 校验关闭，开启 terrain timestamp 统计。
+实机日志确认 ABI 9、2048×2048 五级 mip 图集直接共享和 213×120 预览 RT；游戏正常退出后保存 74.8 秒、25,324 个帧标记、544,251 个 CPU zones 的 Tracy，约 3.84 MiB。
+同目录 `session.tracy` 已由 CSV 工具读回，runtime、环境和 DLL 按顺序正常关闭，采集器退出。
+本轮未验证 Debug 或打包；两次实机操作场景未对齐，不作为同视点的版本性能比较。
+
+### 2026-11-04：Tracy 瓶颈增量更新优化
+
+移除每帧 Scene/TerrainState 备份与回滚、驻留资源引用全表校验和逐索引 CPU 扫描，驻留字典改为哈希表；
+共享 quad 索引首次至少准备 65,536 顶点容量。增量更新与资源寿命契约见 [Native runtime](../architecture/native-runtime.md#适配层职责)。
+环境为 Windows x64、MSVC 19.51.36260.0、RTX 3060 / NVIDIA 591.44，使用锁文件对应的干净 RadRay 源码。
+
+| 实际检查 | 结果 |
+| --- | --- |
+| `gradlew.bat build nativeTest -PrhiValidation=true -PterrainProfile=true --console=plain --no-parallel` | 19 项纯 Java、65 项 Debug native/GPU 测试通过，无失败、错误或跳过 |
+| `gradlew.bat nativeTest packageNativeMod verifyNativePackage -PnativeConfig=Release -PrhiValidation=true -PterrainProfile=true --console=plain --no-parallel` | 65 项 Release native/GPU 测试通过，无失败、错误或跳过；Mod JAR 生成并通过结构、哈希与许可证检查 |
+| 两配置 DLL 与 stage | ABI 9、十三个 C 导出，Debug/MTd、Release/MT，无动态 CRT 导入；本轮未启用 native Tracy 客户端 |
+| `python tools/check_docs.py`、`git diff --check` | 通过 |
+
+双后端及 direct/split 路径启用 native 驱动诊断，Vulkan 消费者启用校验及同步验证；Debug 另启用 RHI wrapper 检查。
+新增四组像素回归覆盖在途帧期间批量新增 96 组资源、哈希表增长后旧 batch 保持有效、纯材质更新、
+primitive 替换同帧删除旧材质与几何、批量删除、零更新帧与 epoch 切换。
+既有测试继续覆盖双槽参数/资源隔离、多 submesh、索引与网格同 ID 替换、输入/输出重建及消费者超时保活；
+已移除依赖中途失败后继续重试场景的断言。日志无 RHI/驱动校验错误、Vulkan VUID 或同步错误。
+Release 上游 D3D12/Vulkan 源码各有一处 C4702 警告，未导致失败。
+
+产物为 `build/libs/raynium-0.1.0-SNAPSHOT-windows-x86_64.jar`。
+证据保存在本机忽略目录 `build/verification/tracy-optimization-20261104/`，包含两配置日志、JUnit XML/报告、构建与 stage 清单及结果摘要。
+本轮未启动真实游戏、重采 Tracy 性能或注入 device lost/GPU 分配失败；此前采集的耗时不代表优化后实测。
+
+### 2026-11-04：ABI 9 与持久 Scene 命令缓存
+
+环境为 Windows x64、Temurin 25.0.4.1、MSVC 19.51.36260.0、RTX 3060 / NVIDIA 591.44、Vulkan SDK 1.4.357.0。
+锁文件升级到上游 2026-11-04 的“帧概念”版本，显式 restore 干净受管源码，并通过
+`python tools/build_debug_dependencies.py --clean` 重建 Debug `/MTd` 依赖。
+`python tools/compile_preview_shaders.py` 重新生成地形 DXIL/SPIR-V，绑定拆分为 Pass Group 0 与 Material Group 1。
+
+| 实际检查 | 结果 |
+| --- | --- |
+| `gradlew.bat build nativeTest -PrhiValidation=true -PterrainProfile=true --console=plain --no-parallel` | 19 项纯 Java、61 项 Debug native/GPU 测试通过，无失败、错误或跳过 |
+| `gradlew.bat nativeTest packageNativeMod verifyNativePackage -PnativeConfig=Release -PrhiValidation=true -PterrainProfile=true --console=plain --no-parallel` | 61 项 Release native/GPU 测试通过，无失败、错误或跳过；分发包生成并通过结构、哈希与许可证检查 |
+| 两配置 DLL 与 stage | ABI 9、十三个 C 导出、RadRay 干净；Debug 为 MTd，Release 为 MT，均无动态 CRT 导入 |
+| `python tools/check_docs.py`、`git diff --check` | 通过 |
+
+双后端测试启用 native 驱动诊断，独立 Vulkan 消费者启用校验及同步验证；Debug 另启用 RadRay RHI wrapper 检查。
+新增双槽像素回归覆盖同一 mesh 的多个 submesh、不同材质、单材质更新、索引扩容替换、网格替换、显式删除及 epoch 切换；
+两个 native 槽均在宿主发出输入 signal 前提交。既有回归继续覆盖多实例与 FirstInstance、各 mip、两种纹理传输、
+反向深度、大坐标、输入/输出重建、失败更新和消费者超时保活。共享清屏回归使用固定雾色，并检查复制区域外像素。
+日志没有 RHI/驱动校验错误或 Vulkan VUID。Release 上游 D3D12/Vulkan 源码各有一处 C4702 警告，未导致失败；
+DXIL 编译忽略 HLSL 的 Vulkan binding 属性，SPIR-V 编译使用这些属性。
+
+产物为 `build/libs/raynium-0.1.0-SNAPSHOT-windows-x86_64.jar`。
+证据位于本机忽略目录 `build/verification/runtime-rewrite-20261104/`，包含两配置日志、JUnit XML/报告、manifest 与 dumpbin 输出。
+本轮未启动真实游戏、重采性能或注入 device lost/GPU 分配失败；自动测试不替代这些验证。
+以下较早日期记录反映当时实现与配置。
+
+### 2026-11-04：Release Tracy 缓存路径采集
+
+在同日 ABI 9 重写后的源码上补充分阶段 Tracy zones 与缓存/驻留 plots。Release `/MT`、静态 Tracy 0.14.1，
+native D3D12、MC Vulkan；RHI wrapper、native 驱动与 MC Vulkan 校验关闭，开启 terrain timestamp 统计。
+本配置的 `nativeTest` 61 项通过，无失败或跳过；客户端由用户按上述配置自行启动并操作，采集器先行等待连接。
+游戏日志确认 ABI 9、Release/MT、2048×2048 五级 mip 图集直接共享及 213×120 输出 RT。
+
+客户端正常退出后，采集器自动保存 63.3 秒、5,658 个帧标记、207,284 个 CPU zones 的记录，约 1.34 MiB；
+Tracy CSV 工具成功读回，游戏日志确认 runtime、环境及 bridge DLL 依次正常关闭。
+其中 5,655 次 native Render 调用，包含区块加载和场景增长，全段平均 3.92 ms、p95 10.86 ms。
+
+选择 trace 时间 49.306–51.831 秒的连续 240 次调用：驻留 mesh/primitive 均为 3,155，可见命令 3,361，
+缓存命令 17,345；mesh 更新与脏 batch 数均为 0，期间没有 BuildBatch zone。
+该区间由资源/可见数量固定条件选择，未记录相机是否固定。
+
+| 项目 | 平均 ms | p95 ms |
+| --- | --- | --- |
+| native Render | 6.849 | 8.619 |
+| Scene Prepare | 1.514 | 2.109 |
+| Scene 备份 | 1.381 | 1.835 |
+| Scene 增量应用 | 1.293 | 1.912 |
+| draw 命令录制 | 0.950 | 1.553 |
+| 可见命令排序 | 0.076 | 0.094 |
+| 帧槽复用等待 | 0.0011 | 0.0015 |
+| 已完成 native GPU timestamp 区间 | 0.458 | 0.550 |
+
+CPU zones 为包含子 zone 的墙钟耗时，不能相加；GPU 样本在回收帧槽时发布，不对应发布时这帧的即时 GPU 耗时。
+本轮没有采集 JFR 或 MC 全帧 GPU 数据，场景与此前采样不同，不作为同视点的版本性能对比。
+证据位于本机忽略目录 `build/verification/tracy-session-20261104/`：`session.tracy`、游戏/构建测试日志、
+manifest、测试 XML、CSV、采集设置及分析脚本/JSON。文档与 diff 检查通过。
+
+### 2026-11-03：Release Tracy 客户端采集
+
+环境为 Windows x64、Temurin 25.0.4.1、MSVC 19.51、RTX 3060 / NVIDIA 591.44；MC 使用 Vulkan，native 使用 D3D12。
+显式准备 Release `/MT` 依赖并启用 Tracy 0.14.1，RHI wrapper、native 驱动与 MC Vulkan 校验关闭；开启 terrain timestamp 统计。
+客户端由用户操作，Tracy 保存约 90 秒、1,962 个帧标记、37,247 个 CPU zones；其中 1,959 次 native Render 调用。
+存档末段采集时间 82–89 秒的 530 帧均有 3,436 条 draw、没有网格更新：
+
+| 项目 | 平均 ms | p95 ms |
+| --- | --- | --- |
+| native Render CPU | 9.58 | 11.03 |
+| Scene Prepare（包含排序与 batch 构造） | 6.72 | 7.75 |
+| 可见项排序 | 5.12 | 5.94 |
+| Frame Prepare | 1.10 | 1.41 |
+| draw 命令录制 | 0.57 | 0.71 |
+| native GPU timestamp 区间（回收时发布的 529 个样本） | 0.63 | 0.70 |
+
+这些 CPU zones 有父子嵌套关系，不能逐行相加。帧槽复用等待平均约 0.0014 ms。
+JFR 最初没有随继承的 Loom 配置进入 JVM，随后手工启用；退出卡住后用户强制结束，最终 JFR 文件为空。
+从临时仓库保留了一个约 46 秒的完整尺寸 chunk：在独立副本中仅将偏移 64 的未完成状态改为完成状态后，JDK 工具可读取其中事件。
+该恢复副本不能作为完整启动/正常退出记录。12:17:27–12:17:33 的 455 个世界帧平均 13.02 ms、p95 15.25 ms；该区间 GC pause 合计 14.69 ms。
+
+随后修正客户端 JVM 参数继承，并用 Gradle 实际启动参数检查确认包含 JFR 开关；Tracy 改为专用 manual-lifetime SDK，
+在 DLL 卸载前显式结束采样线程。Release 采样配置的 `NativeRuntimeTest` 和 `NativeRendererTest` 共 16 项通过，无失败或跳过，测试 JVM 正常退出。
+另在采集器连接状态下运行 `NativeRendererTest.failedConsumerWaitRetainsOwners` 的两个后端用例，均通过；采集器完成 5.57 秒 trace 保存，测试 JVM 正常退出。
+该修复未重新采集用户游戏全过程。证据位于本机忽略目录 `build/verification/tracy-session-20261103/`，包含原始 Tracy、CSV、JFR 原块/恢复副本、统计与测试日志。
+
+### 2026-11-02：固定 MT 构建
+
+本节记录当时两配置均为 MT 的验证；当前 Debug 已改为 MTd，操作步骤见下文。
+
+保留更新后的 RadRay 锁定源码，将 mod 的 Debug/Release 固定为 `/MT`，静态链接 mimalloc。
+按 `windows-x64-msvc-staticcrt` 显式 `--clean` 重建所需的 16 个依赖包，再构建 bridge 和 stage；
+移除 Fabric preLaunch 分配器加载器，恢复 schema 1 的 MT 单 DLL payload。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| `gradlew.bat build nativeTest -PrhiValidation=true -PterrainProfile=true`，附图片/基线目录 | 18 个纯 Java、61 个 Debug native/GPU 用例通过，无失败或跳过 |
+| `nativeTest packageNativeMod -PnativeConfig=Release -PrhiValidation=true -PterrainProfile=true`，附图片/基线目录 | 61 个 Release native/GPU 用例通过；分发 JAR 生成并通过结构/哈希检查 |
+| 固定 GPU 场景图像 | 两配置各 48 张 PNG 与 FramePipeline 迁移基线逐像素及哈希一致 |
+| 固定 CRT 约束 | CMake 拒绝 `/MD`、`/MTd` 和 MD SDK 三元组；stage 拒绝旧 MD DLL 的动态 CRT 导入 |
+| 最终 JAR | 仅有 `rayniumruntime.dll`；manifest 为 MT/schema 1，无 mimalloc/redirect DLL、preLaunch 入口或加载器 class |
+
+两配置链接命令使用 whole-archive 静态 mimalloc，DLL 导入仅含已分类的 Windows/图形依赖，无动态 CRT。
+GPU 回归日志无 RHI/驱动校验错误或 Vulkan VUID；本轮未重新启动游戏或测量 FPS。
+证据保存在本机忽略目录 `build/verification/mt-runtime-20261102/`，包含依赖重建、约束拒绝、两配置构建测试日志、JUnit XML 和 PNG。
+
+### 2026-11-02：动态 CRT 与 mimalloc DLL
+
+本节记录当时实际执行的 MD 验证；该构建路线现已由固定 MT 路线替换，当前操作步骤见下文。
+
+使用更新后的锁文件和干净受管 RadRay 源码，按 `windows-x64-msvc` 三元组显式 `--clean` 重建当前所需的 16 个依赖包（含 GTest），
+分别生成 Debug `/MDd` 与 Release `/MD` SDK；core/render/runtime 和 bridge 使用新的独立 CMake 目录重新构建。
+环境为 Windows x64、Temurin 25.0.5.8、MSVC 19.51.36260.0、RTX 4080 / NVIDIA 621.01。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| `gradlew.bat build nativeTest -PrhiValidation=true -PterrainProfile=true`，附图片/基线目录 | 17 个纯 Java、64 个 Debug native/GPU 用例通过，无失败或跳过 |
+| `nativeTest packageNativeMod -PnativeConfig=Release -PrhiValidation=true -PterrainProfile=true`，附图片/基线目录 | 64 个 Release native/GPU 用例通过；三 DLL 分发 JAR 生成并通过结构/哈希检查 |
+| 两配置固定 GPU 场景图像 | 各 48 张 PNG 与此前 FramePipeline 迁移基线逐像素相同，PNG 哈希相同 |
+| 分配器探针 | 两配置 `mi_malloc` 分配属于 mimalloc；CRT `malloc` 不属于 mimalloc，`mi_is_redirected() == false`；bridge 关闭后分配器仍有效 |
+| 缓存与配置拒绝 | 旧 schema、MT/MD 配置不符、缺失文件、非法路径/哈希、损坏 allocator 缓存及同进程切换 allocator 身份均被拒绝 |
+| Release `runClientNative`，关闭 RHI/MC Vulkan 校验和 terrain profile | 标题画面显示并通过“退出游戏”正常结束；日志确认 runtime → environment → bridge 关闭 |
+
+真实客户端 23:39:32 在 Fabric `preLaunch` 加载 mimalloc/redirect，23:39:39 加载 bridge，随后创建 MC Vulkan 和 native D3D12 设备。
+实际状态仍为 `redirected=false`：redirect 诊断表明 JVM 的 CRT 已先初始化。这是进程级重定向未生效，不能据此声称全部 CRT/C++ 分配已切换到 mimalloc。
+没有修改 Java 可执行文件或安装 JVM 启动前注入。DLL 搜索和寿命契约见[互操作与加载](../architecture/interop.md#dll-的依赖搜索)。
+本轮没有进入世界或测量 FPS；地形回归来自自动 GPU 图像用例。GPU 回归日志无 RHI/驱动校验错误或 Vulkan VUID；redirect 自身的未接管诊断保留。
+证据保存在本机忽略目录 `build/verification/md-runtime-20261102/`，包含两配置日志、JUnit XML、PNG 和 `game-release.log`。
+
+### 2026-11-02：FrameScheduler 与 Raynium 专用 FramePipeline
+
+环境为 Windows x64、Temurin 25.0.5.8、MSVC 19.51.36260.0、RTX 4080 / NVIDIA 621.01、Vulkan SDK 1.4.363.0。
+先恢复迁移前锁文件对应的 RadRay 源码并重建基线，再更新锁文件、显式 restore 新版；最终使用受管 `external/RadRay`，没有本地源码覆盖。
+Debug/Release 的受影响 core/render/runtime 静态库、bridge DLL 与 stage 均重新编译/生成；两份元数据均匹配当前锁文件、`radrayDirty=false`、C++20、`/MT`、ABI 8。
+本轮没有修改 RadRay 源码。通用 RenderSystem、SceneRenderer、View/Pass 与 Render Graph 未接入。
+
+以下 Gradle 命令均附 `--console=plain --no-parallel`；图片目录参数使用本机绝对路径。
+
+| 命令/检查 | 实际结果 |
+| --- | --- |
+| 迁移前 `gradlew.bat nativeTest -PrhiValidation=true -PterrainProfile=true` | 57 个 native/GPU 用例通过，无跳过 |
+| 迁移前 `nativeTest --tests '*.NativeTerrainTest' -PrhiValidation=true -PtestImages=<baseline-pixels>` | 保存 48 张固定场景 PNG，完整/split 共享路径使用同一逐像素预期 |
+| `gradlew.bat build nativeTest -PrhiValidation=true -PterrainProfile=true` | Java 构建、8 个纯 Java 用例与 61 个 Debug native/GPU 用例通过 |
+| 最终 `nativeTest -PrhiValidation=true -PterrainProfile=true -PtestImages=<final-debug-pixels> -PtestBaseline=<baseline-pixels>` | 61 个 Debug 用例通过，0 失败、0 跳过；48 张 PNG 与基线逐像素一致，PNG 文件哈希也一致 |
+| `nativeTest packageNativeMod -PnativeConfig=Release -PrhiValidation=true -PterrainProfile=true -PtestImages=<final-release-pixels> -PtestBaseline=<baseline-pixels>` | 61 个 Release 用例通过，无跳过；48 张 PNG 与基线一致；生成正式 native JAR |
+| `gradlew.bat verifyNativePackage` | 包结构、manifest、ABI 和哈希检查通过 |
+| 锁定 RadRay standalone Debug `/MT` 构建 `test_radray_runtime`；`ctest -R 'FrameLoop\|MeshDrawing\|Material'` | 35 项通过，无跳过；FrameLoop 实际运行 D3D12/Vulkan，包括失败恢复、部分提交、arena 回收与退出顺序 |
+
+新增双槽测试先提交两帧，再提供宿主输入 signal，确保两槽同时在途。连续 8 对帧替换同 ID 网格、索引和材质，
+交替相机小数偏移、顶点颜色、direct/indirect 和纹理变化掩码；同一可见项展开两个不同原点的实例。
+逐像素验证无参数串帧、无旧版本提前释放；非法索引更新在输入 signal 尚不存在时立即拒绝，随后相同序号可继续。
+最后验证移除全部场景资源、缺失引用拒绝、epoch 切换和正常 owner 关闭。既有回归继续覆盖 mip、反向深度、大坐标、混合 UV/SOLID、resize、输入重建与消费者超时保活。
+两配置日志未发现 RHI/驱动校验错误或 Vulkan VUID。Release 上游 D3D12/Vulkan 各有一处 C4702 不可达代码警告，未导致失败。
+GPU validation 未开启；未主动注入 device lost 或 GPU 分配失败。
+
+迁移前实际运行了 D3D12 native / MC Vulkan：进入已有“新的世界”，观察 SOLID 预览，保存截图后返回标题并正常退出，日志确认 runtime、环境和 DLL 顺序关闭。
+基线为 854×480 主画面、213×120 小 RT、FOV 配置 0、renderDistance=16、mipmapLevels=4、gamma=0.5、窗口模式，使用 `/time set noon` 固定光照时段。
+截图、设置和退出后的世界副本均保存在本机忽略目录，可用同一世界存档中的玩家视点复现。
+迁移后的开发客户端已启动并创建设备，但用户按 Escape 停止 computer-use，因此没有继续进入世界、截图比较或交互退出。
+这次固定 GPU 场景像素相同不等于最终游戏画面已确认相同，也没有本轮实机性能结论。
+
+本机证据目录为 `build/verification/frame-runtime-20261102/`：`baseline-game.png`、`baseline-options.txt`、`baseline-world/`、
+三组像素目录、`final-debug-junit/`、`final-release-junit/`、`runtime-tests.xml` 和相应日志。standalone 的实际 configure/build 脚本也保存在该忽略目录。
+未新增开发历史，既有 history 保持原样。
+
+### 2026-10-30：runtime 迁入 RadRay
+
+从远端恢复锁文件指定的 RadRay 提交，使用干净的 `external/RadRay` 默认依赖路径验证；没有使用本地源码覆盖。
+环境为 Windows x64、MSVC 19.51.36260.0、RTX 3060 / NVIDIA 591.44、Vulkan SDK 1.4.357.0。
+Debug/Release native 均为 C++20、`/MT`、ABI 8，构建元数据中的 `radrayDirty=false`。
+
+| 命令/检查 | 实际结果 |
+| --- | --- |
+| `python tools/fetch_radray.py restore` | 拉取并切换到锁定提交，受管 checkout 干净 |
+| `gradlew.bat nativeTest -PrhiValidation=true -PterrainProfile=true` | 57 个 Debug native/GPU 用例通过，无跳过 |
+| `gradlew.bat build nativeTest packageNativeMod -PnativeConfig=Release -PrhiValidation=true -PterrainProfile=true` | Java 构建、57 个 Release native/GPU 用例及正式 JAR 打包通过；普通 Java 测试复用 up-to-date 结果 |
+| RadRay `test_radray_runtime` / `ctest -R 'Runtime(Scene\|Graph\|Gpu)'` | 同一提交的通用代码在 standalone Debug/Release 各 16 项通过，必测 D3D12/Vulkan，无跳过；standalone 使用动态 CRT preset |
+| 独立安装消费 | 锁定源码以 Release `/MT` 安装；外部 C++ 项目使用 `find_package(RadRay CONFIG REQUIRED COMPONENTS runtime)`、`RadRay::runtime` 和 `radray::GraphBuilder` 完成编译、链接及图编译运行 |
+| `gradlew.bat verifyNativePackage` | 最终 Release JAR 的结构、ABI 8 manifest、哈希与许可证检查通过 |
+| 两仓库 `python tools/check_docs.py`、`git diff --check` | 当前文档引用和差异空白检查通过；未改动已有 history |
+
+native GPU 回归使用独立 Vulkan 消费者覆盖 SOLID/UV、双后端、完整/split mip、direct/indirect、深度、大坐标、纹理变化、resize、epoch 和超时保活。
+两配置 native 日志未发现 RHI/驱动校验错误或 Vulkan VUID。未启动游戏、未使用 computer-use，不代表真实游戏交互验证。
+本机日志位于忽略目录 `build/verification/runtime-pinned-*.log`，两配置 JUnit XML 分别保存在 `runtime-pinned-debug-junit/` 与 `runtime-pinned-release-junit/`。
+通用 runtime 契约与测试由 RadRay 维护，本仓库不再包含 `nativeCoreTest` 或通用 runtime 源码副本。
+
+### 2026-10-30：迁移前的可编程 runtime 与 RDG
+
+在 Windows x64、Temurin 25.0.4.1、MSVC 19.51.36260.0、RTX 3060 / NVIDIA 591.44、Vulkan SDK 1.4.357.0 上执行。
+RadRay 保持锁文件对应的干净源码；Debug/Release 都使用 C++20 和 `/MT`。以下 Gradle 命令均附 `--console=plain --no-parallel`。
+
+| 命令 | 实际结果 |
+| --- | --- |
+| `gradlew.bat build nativeTest -PrhiValidation=true -PterrainProfile=true` | 构建通过，4 个 Debug CTest、57 个 native/GPU JUnit 用例通过，无跳过 |
+| `gradlew.bat nativeTest packageNativeMod -PnativeConfig=Release -PrhiValidation=true -PterrainProfile=true` | 4 个 Release CTest、57 个 native/GPU JUnit 用例通过，无跳过；Release DLL/stage/JAR 生成成功 |
+| `gradlew.bat verifyNativePackage` | 分发结构、ABI 8 manifest、payload 哈希和许可证检查通过 |
+| `gradlew.bat test --rerun-tasks` | 8 个纯 Java 用例重新执行通过 |
+| `python tools/check_docs.py`、`git diff --check` | 文档引用与差异空白检查通过 |
+
+当时三个 C++ 测试程序直接链接 `raynium_runtime`，不包含 MC bridge；其中 GPU 程序分别运行 D3D12 和 Vulkan。
+覆盖持久命令缓存/失效/严格合批、失败更新不发布、RAW/WAR/WAW、剔除/副作用、非法句柄/访问/attachment、UAV 屏障、临时资源池、完成前禁止复用、extraction 和重复导入 owner 保活。
+GPU 读回验证 raster→采样和 copy→compute→compute→copy；只替换测试管线即可增加中间纹理与 pass，执行器不变。
+注入构图、编译、录制和资源解析失败，确认不提交、不发布场景。连续帧检查缓存复用、资源退役及尺寸变化。
+
+SOLID 使用独立 Vulkan 输入生产者/输出消费者，覆盖双后端、完整/split mip、direct/indirect、所有 mip、反向深度、大坐标、可见范围、纹理更新、几何替换/卸载、输入输出重建、epoch、关闭及超时保活。
+本轮修正测试消费者的 `VkSubmitInfo.waitSemaphoreCount`：LWJGL 3.4.3 的等待数组 setter 不自动填写此字段，原测试存在未真正等待共享 timeline 的竞态。最终异步提交没有额外 CPU completion 等待。
+两配置最终日志未发现 RHI/驱动校验错误或 Vulkan VUID；driver/synchronization validation 已开启，GPU validation 未开启。
+
+本轮没有启动游戏，没有使用 computer-use 或手动操作；这些结果不代表真实 MC 游戏交互验收，也不构成性能对比结论。
+日志位于本机忽略目录 `build/verification/final-debug.log`、`final-release.log`、`final-java.log`、`final-package-verify.log`；JUnit 报告入口见本文测试章节。
+设计快照已按用户授权保存到 history，当前实现见 [Native runtime](../architecture/native-runtime.md)。下方为此前实施阶段的验证记录。
+
+### 2026-10-30：统一 mesh draw pipeline 与 ABI 8
+
+本轮使用 Windows x64、Temurin 25.0.4.1、MSVC 19.51.36260.0、RTX 3060 / NVIDIA 591.44、Vulkan SDK 1.4.357.0。
+RadRay 为锁定的干净源码；本轮未修改 RHI。以下 Gradle 命令均附 `--console=plain --no-parallel`。
+
+| 命令 | 实际结果 |
+| --- | --- |
+| `gradlew.bat build nativeTest -PrhiValidation=true -PterrainProfile=true` | Java 构建、8 个纯 Java、57 个 Debug native/GPU 用例通过；核心 CTest 通过 |
+| `gradlew.bat nativeTest packageNativeMod -PnativeConfig=Release -PrhiValidation=true -PterrainProfile=true` | 57 个 Release native/GPU 用例、核心 CTest、Release DLL/stage/JAR 构建通过 |
+| `gradlew.bat verifyNativePackage` | 包结构、ABI 8 manifest 与哈希检查通过 |
+| `python tools/check_docs.py`、`git diff --check` | 文档引用与差异空白检查通过 |
+
+核心测试覆盖缓存复用、视图/实例不重建、几何/材质/index/纹理版本失效、UV 不受无关纹理重建影响、准备失败不发布、epoch 清除、连续范围合并、严格实例化和 direct/indirect 参数一致。
+GPU 测试覆盖 D3D12/Vulkan、完整与分 mip 传输、所有 mip 像素、反向深度、大坐标、连续帧及 epoch。
+新增用例在同一帧混合 UV 与 textured program，分别检查 direct/indirect 的完整像素；输入与输出同时重建后，不重新上传场景即可继续绘制。
+无输入 signal 时先提交非法可见引用会立即失败；修正后同一序号可正常提交。消费者未 signal 导致输出关闭超时后，target、renderer、runtime、环境仍保持所有权，完成消费后可继续绘制并关闭。
+旧 preview/terrain 导出已删除；两配置 stage 的 `/exports` 检查确认十三个 ABI 8 入口。
+最终两配置日志未发现 RHI/驱动校验错误或 Vulkan VUID；GPU validation 未开启。硬件覆盖仍仅限本机 GPU/驱动。
+
+本轮启动过 D3D12 native / MC Vulkan 开发客户端，日志确认 ABI 8、早期环境初始化与设备创建。
+按用户要求停止 computer-use 后只读取日志：客户端随后进入本地世界，创建 213×120 地形输出，记录连续帧与几何上传统计，最后正常关闭 runtime、环境和 DLL。
+日志未出现 RHI/驱动校验错误；启动期间有 OSHI/Perflib 与开发账户 Realms 鉴权错误。未观察游戏画面，移动、区块更新、resize、资源重载、UV 切换及禁用预览的完整交互验收仍未完成。
+该客户端启动早于最后的 pass 文件拆分与关闭路径收尾，不能代表最终代码的实机验证。
+CPU/GPU 耗时与上传统计保留。上述运行中，约 60 个可见网格的稳定窗口显示 command_builds 保持 82、geometry_upload_bytes 为 0，CPU 帧调用 p50 约 1.8–2.1 ms，GPU 光栅 p50 约 0.026 ms。
+这些样本不是固定场景基准，且采自收尾前版本；本轮未完成同场景同配置的迁移前后性能对比，不据此推断帧率变化。
+因此本轮自动验证已通过，完整的实机和性能验收尚未完成；旧日期记录不是本轮重测结果。
+日志与两配置 XML 位于本机忽略目录 `build/verification/mesh-pipeline-20261030/`，没有新增 history。
 
 ### 2026-10-29：SOLID 地形与 ABI 7
 
@@ -164,24 +444,31 @@ $env:HTTPS_PROXY = 'http://127.0.0.1:10808'
 $env:ALL_PROXY = 'http://127.0.0.1:10808'
 $env:NO_PROXY = ''
 python external/RadRay/tools/fetch_third_party.py restore
-python external/RadRay/tools/build_third_party.py build --triplet windows-x64-msvc-staticcrt --config Debug --parallel 8
+python tools/build_debug_dependencies.py --parallel 8
 python external/RadRay/tools/build_third_party.py build --triplet windows-x64-msvc-staticcrt --config Release --parallel 8
 ```
 
 Debug 用于默认开发启动，Release 用于分发；只运行相应步骤也可以。构建本身离线，缺包则停止。
 普通构建使用已嵌入的 shader 字节码，关闭 RadRay shader compiler/tools，不要求 DXC SDK。
-不要复用旧 `windows-x64-msvc` 动态 CRT 包。若手动缩小依赖集合，stage 所需许可证来自 core/render 使用的第三方源码目录，需保留这些源码。
+Debug 使用 `/MTd`、Debug CRT 和默认 STL iterator 检查；Release 使用 `/MT`。两配置均静态链接 mimalloc，不复用 MD 包。
+锁定 RadRay 的 `staticcrt` 三元组在 Debug 也固定 MT，因此 Debug 使用 Raynium 的显式离线脚本，
+按上游依赖 catalog 准备当前所需的 16 个包；构建和 SDK 位于 `build/native-dependencies/windows-x64-msvc-mtd/`。
+该脚本自动获取 x64 MSVC 环境，普通终端也可执行；源码仍由 fetch 阶段准备，缺失即失败。
+Debug 的 mimalloc 关闭 CRT 覆盖并保留显式 `mi_*` 分配，Release 保留静态覆盖；详见[构建身份与 payload](../architecture/interop.md#构建身份与-payload)。
+依赖源码或配方升级后显式加 `--clean` 重建；两种脚本只清理各自的输出目录。
+Release 如只准备当前 core/render/runtime 所需集合及测试库，可向上游 build 命令添加
+`--only fmt,magic_enum,eigen,sigslot,stdexec,spdlog,xxHash,yyjson,pugixml,mimalloc,Vulkan-Headers,volk,VulkanMemoryAllocator,DirectX-Headers,D3D12MemoryAllocator,googletest`。
+stage 所需许可证来自这些第三方源码目录，需保留源码。
 
-修改 `native/shaders/uv.hlsl` 或 `terrain.hlsl` 后显式准备锁定 DXC 并重新生成头文件，再运行 native 构建：
+修改 `native/shaders/terrain.hlsl` 后显式准备锁定 DXC 并重新生成头文件，再运行 native 构建：
 
 ```powershell
 python external/RadRay/tools/fetch_sdks.py restore --only radray_dxc
 python tools/compile_preview_shaders.py
-python tools/compile_preview_shaders.py --shader terrain
 ```
 
 脚本默认使用 `external/RadRay/SDKs/radray_dxc/extracted/bin/dxc.exe`，也可通过 `--dxc` 指定路径。
-同一 HLSL 编译为 DXIL/SPIR-V，分别输出到 `native/include/raynium/uv_bytecode.h` 和 `terrain_bytecode.h`；运行时不打包编译器。
+地形 HLSL 编译为 DXIL/SPIR-V，输出到 `native/include/raynium/terrain_bytecode.h`；运行时不打包编译器。
 
 ## 开发启动与 IDEA
 
@@ -210,11 +497,11 @@ python tools/compile_preview_shaders.py --shader terrain
 正式启动器用 `-Draynium.rhi.backend=vulkan` 选择 Vulkan；不自动切换后端。
 MC 自身须在视频设置中选择 Vulkan 并重启，runtime 后端参数不替 MC 切换图形 API。
 预览默认开启，`previewEnabled=false` 对应 `-Draynium.preview.enabled=false`。
-默认内容是 SOLID 地形；`-PpreviewContent=uv` 恢复 UV 诊断。`-PterrainTextureTransfer=auto|direct|split`
+内容为 SOLID 地形。`-PterrainTextureTransfer=auto|direct|split`
 选择自动降级、强制多 mip 共享或强制逐 mip fallback（JVM 属性 `raynium.terrain.textureTransfer`）。
-`-PterrainDirectDraw=true` 和 `-PterrainDisableFaceCull=true` 提供对照路径。
+`-PterrainDisableFaceCull=true` 关闭 Java 面组剔除以进行对照。
 `-PterrainProfile=true` 记录 CPU/GPU 分阶段 p50/p95/p99、上传字节和驻留统计；GPU 需支持 timestamp query。
-对应 JVM 属性为 `raynium.terrain.directDraw`、`raynium.terrain.disableFaceCull`、`raynium.terrain.profile`。
+对应 JVM 属性为 `raynium.terrain.disableFaceCull`、`raynium.terrain.profile`。
 Debug RHI/driver validation 会增加 CPU 开销，性能对比应记录配置且固定视点、RT 尺寸和场景。
 
 Debug 默认启用 RadRay RHI 检查。`rhiValidation=true`（JVM 属性 `raynium.rhi.validation`）
@@ -224,15 +511,54 @@ D3D12 在此创建 factory 并启用调试层，早于 MC 图形初始化；CLIE
 `vulkanValidation=true` 给 MC 添加 `--vulkanValidation` 参数，检查 MC Vulkan 命令流。
 两者含义不同；native Vulkan 开关同时启用同步验证。GPU validation 未开启。
 
-`radraySourceDir` 用于联调本地 checkout，仍要求其静态 CRT SDK 已准备；默认不使用旁边的 RadRay。构建会记录实际 RadRay commit 和 dirty 状态。发布只接受锁定提交的干净 Release 构建。
+`radraySourceDir` 用于联调本地 checkout；Debug 先用 `tools/build_debug_dependencies.py --radray-source <路径>` 准备 MTd 依赖，Release 准备该 checkout 的静态 CRT SDK。
+默认不使用旁边的 RadRay。构建会记录实际 RadRay commit 和 dirty 状态。发布只接受锁定提交的干净 Release 构建。
 
 普通 `runClient` 和 Java `build` 不触发 native 构建。Java 开发 classpath 没有内置 payload 且未指定开发目录时，客户端记录提示并继续原版渲染。`runClientNative` 设置 `raynium.native.required=true` 和开发 stage 目录，缺失/错误 payload 会使初始化失败，不回退到另一份旧 DLL。
 
 Loom 的两个客户端运行配置都给 Minecraft JVM 添加 `--enable-native-access=ALL-UNNAMED`。这是游戏 JVM 参数，不是 Gradle daemon 参数；正式启动器也需添加它。loader 检查实际模块的 native access，权限未启用时报告启动参数要求。
 
 加载成功应记录 DLL 来源与实际路径，以及 ABI/build ID/RadRay revision/dirty/config/CRT/toolchain。
-当前要求 ABI `7` 和十二个导出。`Raynium runtime created` 表示设备与队列完成；
+日志的 CRT 在 Debug 为 `MTd`、Release 为 `MT`；没有 allocator DLL 的预加载或 redirected 状态。静态分配器随 bridge 加载与卸载。
+当前要求 ABI `9` 和十三个导出。`Raynium runtime created` 表示设备与队列完成；
 `Raynium shared preview ready` 表示输出资源已创建和导入；`Raynium SOLID terrain inputs ready` 记录输入模式及 mip 数。实际显示仍须检查游戏画面。
+
+## Tracy 与整段客户端采样
+
+`-PnativeProfiler=true` 启用 native Tracy 标记，默认关闭；对应 `tools/native.py configure --profiler`
+和 CMake `RAYNIUM_ENABLE_PROFILER`。开关计入构建身份，清单记录 `profilerEnabled`，开启时 stage 包含 Tracy 许可证。
+先用 `python external/RadRay/tools/fetch_third_party.py restore --only tracy` 准备源码，再运行
+`python tools/build_profiler_dependencies.py --config Release`（Debug 使用 `--config Debug`）。
+脚本显式离线构建当前配置的静态 CRT Tracy SDK，位于 `build/native-dependencies/tracy/<配置>/sdk/`；native 构建不隐式准备该 SDK。
+当前锁定依赖使用 Tracy 0.14.1，客户端为静态、on-demand、仅 localhost，关闭广播和 crash handler。
+专用 SDK 开启 delayed init/manual lifetime：合法环境创建前启动，创建失败时清理，环境销毁后、FFM 卸载 DLL 前停止并回收线程。
+它不使用上游默认 SDK 的静态析构退出方式，避免在 Windows loader lock 内等待 Tracy 工作线程。
+
+先启动同版本 `tracy-capture`，再启动游戏；下例中的工具路径和输出目录由调用方准备：
+
+```powershell
+tracy-capture.exe -a 127.0.0.1 -o C:/captures/session.tracy
+# 另一个终端：
+.\gradlew.bat runClientNative -PnativeConfig=Release -PnativeProfiler=true -PrhiValidation=false -PvulkanValidation=false -PterrainProfile=true '-PjfrFile=C:/captures/session.jfr'
+```
+
+Release 默认关闭 RadRay RHI wrapper 检查；上面的两个 validation 参数分别关闭 native 驱动诊断和 MC Vulkan 校验。
+ABI 参数检查及资源寿命保护仍然执行。`terrainProfile=true` 开启已有 GPU timestamp 与阶段统计，并将已完成帧的 GPU 毫秒数写入 Tracy plot。
+该数值覆盖 native 命令的 timestamp 区间，在回收槽时发布，不是 MC 全帧 GPU 耗时，也不是发布时那一帧的即时耗时。
+
+Tracy zones 区分环境/设备创建与销毁、`Scene.Prepare`、按增量删除的 `Scene.UpdateResources`、`Scene.StageGeometry`、
+`Scene.MaterialBindings`、`Scene.Apply`、`Scene.VisibleBatches` 与 `Frame.PrepareResources`。
+`Scene.RetireEpoch` 只在切换已有 epoch 时记录，`Scene.RefreshBatches` 只在已有 mesh/index 被覆盖后扫描存活 primitive 时记录。
+管线另记录帧槽等待、可见命令收集/排序、常量上传、几何上传录制、纹理 acquire/release、draw 录制和 queue submit；以上 zone 名省略 `Raynium.` 前缀。
+`Raynium.Cache.BuildBatch` 只在 Processor 实际重建脏 batch 时记录；`Raynium.RunFrame` 包含上游缓存同步与槽回收，其他阶段用子 zone 区分。
+plots 包含可见项、网格更新、draw 数量、已发布场景的驻留数量、RunFrame 前的脏 batch 数、同步后的缓存命令数及 GPU 毫秒数。
+Tracy frame mark 在一次 native Render 调用结束时发出；间隔包含两次调用之间的宿主工作，不等同于 native CPU 用时。
+客户端是 on-demand，因此 native 库加载前、采集器连接前的工作不在 Tracy 中；它也不提供 Java 调用栈。
+
+`-PjfrFile=<路径>` 在游戏 JVM 启动时启用 `profile` JFR，正常退出时保存，磁盘缓冲上限 1 GiB；超出上限会淘汰较早数据。
+JFR 包含 JVM 执行采样、GC 等事件；`dev.raynium.ClientFrame` 记录每次正常返回的 `Minecraft.renderFrame` 耗时及是否加载世界。
+未启用 JFR 事件时不创建逐帧 event。异常退出的未完成帧不会提交该 event；强制结束进程也不保证完成最终文件保存。
+完整游戏的 Java 与 native 分析分别读取 JFR 和 Tracy，不能将采样次数直接当作精确函数耗时。
 
 ## 发布 mod JAR
 
@@ -247,13 +573,14 @@ Loom 的两个客户端运行配置都给 Minecraft JVM 添加 `--enable-native-
 打包拒绝脏 RadRay、非锁定提交、非 Release payload、重复/保留路径和已签名输入 JAR；检查 `fabric.mod.json`、payload 哈希与许可证后才发布最终文件。
 包内容、许可证位置和调试文件边界见[构建身份与 payload](../architecture/interop.md#构建身份与-payload)。
 
-单独检查已经生成的包，不触发构建：
+单独检查已经生成的包，不触发构建；与 `packageNativeMod` 联合执行时，校验排在打包之后：
 
 ```powershell
 .\gradlew.bat verifyNativePackage
 ```
 
 将最终的 `-windows-x86_64.jar` 放入客户端 mods 目录，并给启动器的游戏 JVM 设置 native access 参数。无开发目录参数时，loader 自动解包并加载内置 DLL。Raynium 自身分发许可证仍未选择；当前收集的是 RadRay 与 native 依赖许可证。
+Raynium 自身无需动态 VC++ CRT 或额外 mimalloc DLL；系统与显卡驱动依赖仍由运行环境提供。
 
 ## Java 与 RHI 测试
 
@@ -272,22 +599,38 @@ Loom 的两个客户端运行配置都给 Minecraft JVM 添加 `--enable-native-
 | 测试类 | 内容 | 任务 |
 | --- | --- | --- |
 | `NativeRuntimeBackendTest` | 后端配置解析和非法值 | `test` |
+| `NativeManifestTest` | Debug/MTd 与 Release/MT 单 DLL 清单；CRT/配置错配、MD/MDd、schema 2、缺失/多余项、非法路径和哈希拒绝 | `test` |
 | `PreviewRegionTest` | 显示矩形、MC Y 翻转后的复制位置和小窗口边界 | `test` |
 | `NativeAbiTest` | 参数校验、输出清空、诊断截断和空句柄销毁 | `nativeTest` |
 | `NativeRuntimeTest` | 双后端环境/设备创建、重建、线程限制、幂等关闭、单例保护及早期 factory 共享绘制 | `nativeTest` |
 | `MeshPayloadTest` / `TextureTransferTest` | 保守面组、越界模型、顶点拥有权和失败降级 | `test` |
-| `NativeTerrainTest` | 双后端/两传输模式的 mip 像素、连续帧、深度、大坐标、epoch 和导入失败恢复 | `nativeTest` |
-| `NativePreviewTest` | 双后端共享到独立 Vulkan 消费者，逐像素 UV/区域外验证、连续交接、等待、重建和导入失败清理 | `nativeTest` |
+| `NativeTerrainTest` | 双后端/两传输模式的 mip、深度、大坐标、epoch、重建、双槽在途参数/资源隔离、驻留字典增长、多材质/多 submesh 缓存、索引扩容与局部增删改 | `nativeTest` |
+| `NativeRendererTest` | 双后端雾色清屏/区域外像素、连续交接、输出重建保留场景、错误线程、超时保留 owner 和导入失败清理 | `nativeTest` |
 
 `test` 排除 `native` 标签，随标准 `check/build` 运行，不加载 DLL、不构建 native。`nativeTest` 是标准 Gradle `Test` 任务，只包含 `native` 标签；它复用 `testClasses`，依赖 `nativeStage`，在构建/stage 完成后启动测试 JVM。依赖仍须显式准备，执行需要 Windows x64 和 D3D12/Vulkan 驱动；缺少设备或 DLL 时明确失败，不跳过。
 
-native 测试 JVM 使用 Java 25、`--enable-native-access=ALL-UNNAMED` 与指定配置的 stage 路径。仅一个 worker，禁用 JUnit 并行；每个 runtime 的创建和销毁在同一线程，错误线程用例仅从额外线程调用预期被拒绝的 close。GPU/驱动状态不属于普通 Gradle 输入，因此 `nativeTest` 每次显式执行，不使用 up-to-date 或构建缓存结果。
+通用 runtime 测试已迁入 RadRay 的 `modules/runtime/tests/`，由 `test_radray_runtime` / GTest 注册，
+直接链接 `RadRay::runtime`，不包含 MC bridge。在已准备依赖并完成 configure 的 RadRay checkout 执行：
+
+```powershell
+cmake --build --preset win-x64-debug --target test_radray_runtime --parallel 8
+ctest --preset win-x64-debug -R 'FrameLoop|MeshDrawingPipeline|Material' --output-on-failure
+```
+
+RadRay standalone 的测试依赖需在该 checkout 显式准备，包括 GTest；当前 runtime 用例不需要编译 shader fixture。
+`nativeTest` 只运行 Raynium 的适配/共享交接回归；不再隐式构建上游 GTest。
+
+native 测试 JVM 使用 Java 25、`--enable-native-access=ALL-UNNAMED` 与指定配置的 stage 路径。仅一个 worker，禁用 JUnit 并行；每个 runtime 的创建和销毁在同一线程，错误线程用例从额外线程调用预期被拒绝的创建、渲染或关闭。GPU/驱动状态不属于普通 Gradle 输入，因此 `nativeTest` 每次显式执行，不使用 up-to-date 或构建缓存结果。
 
 JUnit `@TempDir` 管理每个用例的 DLL 缓存目录。测试 fixture 和 try-with-resources 保证断言失败时也先释放 native runtime 和环境，再卸载 DLL，最后清理临时目录。用例无顺序依赖，测试观测与句柄跟踪仅存在于测试源码，不加入生产对象。
 
 预览测试在三种尺寸上各交接 8 帧，使用测试专属读回 buffer 校验每个像素；生产路径无读回。
 消费者启用 Khronos validation 和同步验证，依赖本机安装的 Vulkan SDK/layer；缺失时测试失败。
 原生后端诊断日志与 JUnit 结果一起检查，游戏内生命周期仍须单独运行。
+
+`-PtestImages=<绝对目录>` 可保存 NativeTerrainTest 已有固定像素场景的 PNG；`-PtestBaseline=<绝对目录>` 对对应图片逐像素比较，缺失基线也视为失败。
+文件名包含 backend、测试名、尺寸与序号；direct/split 输入路径预期相同，因此共用基线。新双槽隔离用例使用独立的逐像素预期，不依赖这些基线文件。
+这些选项只影响测试 fixture，不进入生产渲染路径或分发包。
 
 报告分别位于 `build/reports/tests/test/index.html`、`build/reports/tests/nativeTest/index.html`，XML 位于 `build/test-results/<任务名>/`。IDEA 导入 Gradle 后会识别标准测试源码；native 用例通过 Gradle 的 `nativeTest` 任务运行，以获得构建依赖和 JVM 参数。测试类不打入普通或 native mod JAR。JUnit 任务不启动游戏，不能替代真实 MC 生命周期或绘制验证。
 
@@ -298,15 +641,16 @@ x64 开发终端中也可从 `native/` 执行：
 ```powershell
 cmake --preset win-x64-debug
 cmake --build --preset win-x64-debug --parallel 8
-cmake --install ../build/native/windows-x64-msvc-staticcrt/Debug --component runtime
+cmake --install ../build/native/windows-x64-msvc-mtd/Debug --component runtime
 ```
 
 install 只复制 bridge 和构建元数据，不生成 stage 或 mod JAR。完成直接构建后，可在项目根运行 `python tools/native.py stage --config Debug`。使用本地源码覆盖时 configure 与 stage 传递相同的源码目录；Gradle 的 `-PradraySourceDir` 向两步统一传递该目录。所有下载仍通过显式 fetch 操作和配置的代理进行。
 
 ## 任务与产物边界
 
-`gradle/native.gradle` 只调度显式 configure/build/stage，增量编译交给 CMake/Ninja；配置缓存不代表跳过 native 构建。
-Debug/Release 的 CMake 目录分别位于 `build/native/windows-x64-msvc-staticcrt/<Config>/`，DLL 与构建元数据在其 `bin/`。
+`gradle/native.gradle` 只调度显式 configure/build/stage，增量编译交给 CMake/Ninja；配置缓存不代表跳过 native 构建。联合运行测试与 Release 打包时，打包配置链等待 nativeTest，避免同一 Ninja 目录被并发写入。
+Debug 的 CMake 目录为 `build/native/windows-x64-msvc-mtd/Debug/`，Release 为 `build/native/windows-x64-msvc-staticcrt/Release/`；
+DLL 与构建元数据在各自 `bin/`，上游 `radrayruntime.lib` 位于该配置的 `radray/_build/<Config>/` 子目录。
 不要同时向同一配置目录执行 configure/build/stage；构建完成后再执行测试，不并行运行构建与测试。
 Debug 和 Release 的 `nativeTest` 共用默认报告目录，连续验收时在切换配置前将报告复制到不同的本机验证目录。
 stage 内容布局、库依赖限制与加载缓存见[构建身份与 payload](../architecture/interop.md#构建身份与-payload)。

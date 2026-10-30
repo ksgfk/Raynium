@@ -29,10 +29,8 @@ final class NativeBindings {
     private final MethodHandle destroyEnvironment;
     private final MethodHandle create;
     private final MethodHandle destroy;
-    private final MethodHandle createPreview;
-    private final MethodHandle drawPreview;
-    private final MethodHandle destroyPreview;
-    final MethodHandle createTerrain, drawTerrain, destroyTerrain;
+    final MethodHandle createRenderer, destroyRenderer, createRenderTarget, destroyRenderTarget,
+            createSharedTextures, destroySharedTextures, renderFrame;
 
     NativeBindings(SymbolLookup library) {
         Linker linker = Linker.nativeLinker();
@@ -47,19 +45,15 @@ final class NativeBindings {
         create = bind(linker, library, "rn_create_runtime", FunctionDescriptor.of(ValueLayout.JAVA_INT,
                 ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
         destroy = bind(linker, library, "rn_destroy_runtime", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
-        createPreview = bind(linker, library, "rn_create_preview", FunctionDescriptor.of(ValueLayout.JAVA_INT,
-                ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
-                ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
-        drawPreview = bind(linker, library, "rn_draw_preview", FunctionDescriptor.of(ValueLayout.JAVA_INT,
-                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
-        destroyPreview = bind(linker, library, "rn_destroy_preview", FunctionDescriptor.of(ValueLayout.JAVA_INT,
-                ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
-        createTerrain=bind(linker,library,"rn_create_terrain",FunctionDescriptor.of(ValueLayout.JAVA_INT,
+        createRenderer = bind(linker,library,"rn_create_renderer", signature(3));
+        destroyRenderer = bind(linker,library,"rn_destroy_renderer", signature(1));
+        createRenderTarget = bind(linker,library,"rn_create_render_target", FunctionDescriptor.of(ValueLayout.JAVA_INT,
             ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
-        drawTerrain=bind(linker,library,"rn_draw_terrain",FunctionDescriptor.of(ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_LONG,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
-        destroyTerrain=bind(linker,library,"rn_destroy_terrain",FunctionDescriptor.of(ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
+        destroyRenderTarget = bind(linker,library,"rn_destroy_render_target", signature(1));
+        createSharedTextures = bind(linker,library,"rn_create_shared_textures", FunctionDescriptor.of(ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
+        destroySharedTextures = bind(linker,library,"rn_destroy_shared_textures", signature(1));
+        renderFrame = bind(linker,library,"rn_render_frame", signature(3));
     }
 
     int inspect(NativeManifest expected) {
@@ -159,57 +153,20 @@ final class NativeBindings {
         }
     }
 
-    record CreatedPreview(MemorySegment handle, NativePreview.Info info) {}
-
-    CreatedPreview createPreview(MemorySegment runtime, int width, int height) {
-        try (Arena scratch = Arena.ofConfined()) {
-            MemorySegment desc = scratch.allocate(16, 4);
-            desc.set(ValueLayout.JAVA_INT, 0, 16);
-            desc.set(ValueLayout.JAVA_INT, 4, width);
-            desc.set(ValueLayout.JAVA_INT, 8, height);
-            MemorySegment output = scratch.allocate(ValueLayout.ADDRESS);
-            MemorySegment info = scratch.allocate(128, 8);
-            MemorySegment error = scratch.allocate(1024);
-            int status = (int) createPreview.invokeExact(runtime, desc, output, info, 128, error, 1024);
-            if (status != 0) throw new IllegalStateException("rn_create_preview: " + error.getString(0));
-            MemorySegment handle = output.get(ValueLayout.ADDRESS, 0);
-            if (handle.equals(MemorySegment.NULL)) throw new IllegalStateException("Null preview on success");
-            try {
-                return new CreatedPreview(handle, NativePreview.Info.read(info));
-            } catch (RuntimeException | Error failure) {
-                // Creation has not submitted GPU work, so an unreadable descriptor is safe to release.
-                try { destroyPreview(handle); } catch (RuntimeException cleanup) { failure.addSuppressed(cleanup); }
-                throw failure;
-            }
-        } catch (RuntimeException | Error failure) {
-            throw failure;
-        } catch (Throwable failure) {
-            throw new IllegalStateException("Cannot create preview", failure);
-        }
+    private static FunctionDescriptor signature(int pointers) {
+        var layouts=new java.lang.foreign.MemoryLayout[pointers+2];
+        java.util.Arrays.fill(layouts,ValueLayout.ADDRESS); layouts[pointers+1]=ValueLayout.JAVA_INT;
+        return FunctionDescriptor.of(ValueLayout.JAVA_INT,layouts);
     }
-
-    void drawPreview(MemorySegment preview, long sequence) {
-        try (Arena scratch = Arena.ofConfined()) {
-            MemorySegment error = scratch.allocate(1024);
-            int status = (int) drawPreview.invokeExact(preview, sequence, error, 1024);
-            if (status != 0) throw new IllegalStateException("rn_draw_preview: " + error.getString(0));
-        } catch (RuntimeException | Error failure) {
-            throw failure;
-        } catch (Throwable failure) {
-            throw new IllegalStateException("Cannot draw preview", failure);
-        }
-    }
-
-    void destroyPreview(MemorySegment preview) {
-        try (Arena scratch = Arena.ofConfined()) {
-            MemorySegment error = scratch.allocate(1024);
-            int status = (int) destroyPreview.invokeExact(preview, error, 1024);
-            if (status != 0) throw new IllegalStateException("rn_destroy_preview: " + error.getString(0));
-        } catch (RuntimeException | Error failure) {
-            throw failure;
-        } catch (Throwable failure) {
-            throw new IllegalStateException("Cannot destroy preview", failure);
-        }
+    static void call(MethodHandle method, String operation, Object... arguments) {
+        try(var arena=Arena.ofConfined()) {
+            var error=arena.allocate(1024);
+            var args=new java.util.ArrayList<Object>(java.util.Arrays.asList(arguments));
+            args.add(error); args.add(1024);
+            int status=(int)method.invokeWithArguments(args);
+            if(status!=0) throw new IllegalStateException(operation+": "+error.getString(0));
+        } catch(RuntimeException | Error failure) { throw failure; }
+        catch(Throwable failure) { throw new IllegalStateException(operation,failure); }
     }
 
     private MethodHandle bind(Linker linker, SymbolLookup library, String name, FunctionDescriptor descriptor) {

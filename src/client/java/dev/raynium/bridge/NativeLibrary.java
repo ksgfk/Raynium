@@ -20,9 +20,9 @@ final class NativeLibrary implements AutoCloseable {
             int abiVersion = bindings.inspect(payload.manifest());
             NativeManifest manifest = payload.manifest();
             logger.info("Raynium native loaded from {}: {}", payload.source(), payload.libraryPath());
-            logger.info("Native ABI={} build={} RadRay={} dirty={} config={} CRT=MT toolchain={}",
+            logger.info("Native ABI={} build={} RadRay={} dirty={} config={} CRT={} toolchain={}",
                     abiVersion, manifest.buildId(), manifest.radrayCommit(), manifest.radrayDirty(),
-                    manifest.configuration(), manifest.toolchain());
+                    manifest.configuration(), manifest.crt(), manifest.toolchain());
         } catch (RuntimeException | Error failure) {
             arena.close();
             throw failure;

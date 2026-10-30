@@ -3,8 +3,8 @@
 基于 Fabric 的 Minecraft 客户端模组，包含 Java FFM/C ABI 桥接与使用 RadRay RHI 的 native 设备会话。
 
 当前已接通 native 构建与分发、Java FFM、ABI 检查和 D3D12/Vulkan 设备会话。
-Windows MC Vulkan 可在右上角显示 native 共享小 RT 的 SOLID 地形预览（保留 UV 诊断模式）；原版世界渲染和呈现继续运行。
-CUTOUT、TRANSLUCENT、通用资源服务和窗口接管尚未实现。具体状态与文档索引见[架构地图](doc/architecture/overview.md)。
+Windows MC Vulkan 可在右上角显示 native 共享小 RT 的 SOLID 地形预览；原版世界渲染和呈现继续运行。
+RadRay 的 `RadRay::runtime` 静态库提供场景、Mesh Drawing Pipeline 和 FrameScheduler；Raynium 专用 FramePipeline 固定录制当前地形流程，MC native DLL 使用 ABI 9。CUTOUT、TRANSLUCENT 和窗口接管尚未实现。具体状态与文档索引见[架构地图](doc/architecture/overview.md)。
 
 ## 开发入口
 
@@ -16,6 +16,6 @@ CUTOUT、TRANSLUCENT、通用资源服务和窗口接管尚未实现。具体状
 | 仓库约束与文档工作流程 | [AGENTS](AGENTS.md)、[文档维护](doc/guide/documentation.md) |
 
 使用仓库 Gradle Wrapper；native 依赖需要显式准备，普通 Java build 不触发 native 构建。
-分发包包含 Release DLL 与上游许可证，产物路径和已验证范围见构建指南。
+分发包包含固定 `/MT` 的 Release DLL（内含静态 mimalloc）与上游许可证，产物路径和已验证范围见构建指南。
 
 Raynium 自身尚未选择分发许可证；收集的上游许可证不替代项目自身授权。

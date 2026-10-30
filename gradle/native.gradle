@@ -16,6 +16,9 @@ def registerNative = { String name, String command, String configuration ->
         if (radraySource != null) {
             args '--radray-source', radraySource
         }
+        if (providers.gradleProperty('nativeProfiler').getOrElse('false').toBoolean()) {
+            args '--profiler'
+        }
         // Let CMake/Ninja decide what is stale, including transitive RadRay sources.
     }
 }
@@ -48,6 +51,7 @@ tasks.register('packageNativeMod', Exec) {
 tasks.register('verifyNativePackage', Exec) {
     group = 'verification'
     description = 'Check the existing native mod JAR without configuring or compiling native code'
+    mustRunAfter tasks.named('packageNativeMod')
     workingDir layout.projectDirectory.asFile
     commandLine nativePython, nativeScript, 'verify', '--input-jar', nativeJar.get().asFile.absolutePath
 }
@@ -66,8 +70,13 @@ tasks.register('nativeTest', Test) {
     systemProperty 'junit.jupiter.execution.parallel.enabled', 'false'
     systemProperty 'raynium.terrain.profile', providers.gradleProperty('terrainProfile').getOrElse('false')
     systemProperty 'raynium.rhi.validation', providers.gradleProperty('rhiValidation').getOrElse('false')
+    systemProperty 'raynium.test.images', providers.gradleProperty('testImages').getOrElse('')
+    systemProperty 'raynium.test.baseline', providers.gradleProperty('testBaseline').getOrElse('')
     systemProperty 'raynium.native.dir', layout.buildDirectory.dir("native/stage/windows-x86_64/${nativeConfig}").get().asFile.absolutePath
     // GPU/driver state is external to Gradle's inputs; explicit invocations always run.
     outputs.upToDateWhen { false }
     outputs.cacheIf { false }
 }
+
+// Packaging can share the selected Release tree with the staged-DLL tests.
+configureRelease.configure { mustRunAfter tasks.named('nativeTest') }

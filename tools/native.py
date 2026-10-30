@@ -70,6 +70,14 @@ def msvc_environment():
 
 
 def checked_dependencies(dll, environment):
+    exports = run(['dumpbin', '/nologo', '/exports', str(dll)], dll.parent, environment, True).stdout
+    actual = set(re.findall(r'\b(rn_\w+)\b', exports))
+    expected = {'rn_get_abi_version', 'rn_query_abi', 'rn_init_env', 'rn_destroy_env',
+                'rn_create_runtime', 'rn_destroy_runtime', 'rn_create_renderer', 'rn_destroy_renderer',
+                'rn_create_render_target', 'rn_destroy_render_target', 'rn_create_shared_textures',
+                'rn_destroy_shared_textures', 'rn_render_frame'}
+    if actual != expected:
+        raise RuntimeError(f'ABI 9 export mismatch: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}')
     text = run(['dumpbin', '/nologo', '/dependents', str(dll)], dll.parent, environment, True).stdout
     names = sorted(set(re.findall(r'^\s*([\w.-]+\.dll)\s*$', text, re.MULTILINE | re.IGNORECASE)))
     if not names:
@@ -82,7 +90,7 @@ def checked_dependencies(dll, environment):
     for name in names:
         lower = name.lower()
         if lower.startswith(('vcruntime', 'msvcp', 'ucrtbase', 'api-ms-win-crt-')):
-            raise RuntimeError(f'{name} is a dynamic CRT dependency; rebuild bridge and dependencies with /MT.')
+            raise RuntimeError(f'{name} is a dynamic CRT dependency; rebuild with /MTd (Debug) or /MT (Release).')
         if lower not in system and not lower.startswith(('api-ms-win-', 'ext-ms-win-')):
             raise RuntimeError(f'Unclassified DLL dependency {name}. Add an explicit packaging rule before distribution.')
     return names
@@ -92,11 +100,13 @@ def file_entry(root, path):
     return {'path': path.relative_to(root).as_posix(), 'size': path.stat().st_size, 'sha256': digest(path)}
 
 
-def collect_licenses(radray, destination):
+def collect_licenses(radray, destination, profiler=False):
     names = ('fmt', 'magic_enum', 'eigen', 'sigslot', 'stdexec', 'spdlog', 'xxHash', 'yyjson',
              'pugixml', 'mimalloc', 'Vulkan-Headers', 'volk', 'VulkanMemoryAllocator',
              'DirectX-Headers', 'D3D12MemoryAllocator')
     roots = [('RadRay', radray), *[(name, radray / 'third_party' / name) for name in names]]
+    if profiler:
+        roots.append(('tracy', radray / 'third_party/tracy'))
     files = []
     for name, source in roots:
         if not source.is_dir():
@@ -120,8 +130,9 @@ def collect_licenses(radray, destination):
 
 def check_manifest(manifest):
     if (manifest.get('schemaVersion') != 1 or manifest.get('platform') != 'windows-x86_64'
-            or manifest.get('abiVersion') != 7 or manifest.get('abiInfoSize') != 240
-            or manifest.get('crt') != 'MT' or manifest.get('configuration') not in ('Debug', 'Release')
+            or manifest.get('abiVersion') != 9 or manifest.get('abiInfoSize') != 240
+            or manifest.get('configuration') not in ('Debug', 'Release')
+            or manifest.get('crt') != ('MTd' if manifest.get('configuration') == 'Debug' else 'MT')
             or not isinstance(manifest.get('radrayDirty'), bool)):
         raise RuntimeError('Unsupported native manifest.')
     for key, length in (('buildId', 64), ('radrayCommit', 40)):
@@ -179,7 +190,7 @@ def stage_native(root, binary, radray, config, environment):
         temporary = Path(directory)
         shutil.copyfile(dll, temporary / dll.name)
         metadata['files'] = [file_entry(temporary, temporary / dll.name)]
-        metadata['licenses'] = collect_licenses(radray, temporary)
+        metadata['licenses'] = collect_licenses(radray, temporary, metadata.get('profilerEnabled', False))
         metadata['systemDependencies'] = dependencies
         write_json(temporary / 'native-manifest.json', metadata)
         verify_snapshot(temporary)
@@ -259,12 +270,13 @@ def main():
     parser.add_argument('--config', choices=('Debug', 'Release'), default='Debug')
     parser.add_argument('--parallel', type=int, default=8)
     parser.add_argument('--radray-source', type=Path)
+    parser.add_argument('--profiler', action='store_true')
     parser.add_argument('--input-jar', type=Path)
     parser.add_argument('--output-jar', type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     radray = (args.radray_source or root / 'external/RadRay').resolve()
-    binary = root / 'build/native/windows-x64-msvc-staticcrt' / args.config
+    binary = root / 'build/native' / ('windows-x64-msvc-mtd' if args.config == 'Debug' else 'windows-x64-msvc-staticcrt') / args.config
     if args.parallel < 1:
         parser.error('--parallel must be positive')
     if args.command == 'package':
@@ -278,7 +290,8 @@ def main():
     else:
         environment = msvc_environment()
         if args.command == 'configure':
-            run(['cmake', '--preset', 'win-x64-' + args.config.lower(), '-DRADRAY_SOURCE_DIR=' + str(radray)], root / 'native', environment)
+            run(['cmake', '--preset', 'win-x64-' + args.config.lower(), '-DRADRAY_SOURCE_DIR=' + str(radray),
+                 '-DRAYNIUM_ENABLE_PROFILER=' + ('ON' if args.profiler else 'OFF')], root / 'native', environment)
         elif args.command == 'build':
             run(['cmake', '--build', str(binary), '--target', 'rayniumruntime', '--parallel', str(args.parallel)], root, environment)
         else:
