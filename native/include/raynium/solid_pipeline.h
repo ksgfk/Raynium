@@ -24,26 +24,38 @@ public:
         _pending=&frame; _processor.BeginSync(bindings);
     }
     void EndFrame() noexcept { _pending=nullptr; _processor.EndSync(); }
-    bool ReadyForFrame(radray::string&);
+    // Waits for the next slot, then prepares the attachments owned by that slot.
+    bool ReadyForFrame(const RenderTarget&,radray::string&);
     bool Finish(radray::string&);
+    // Mapped buffers of the slot addressed by the next frame; only valid until that frame is recorded.
+    SlotUploads NextUploads() noexcept;
     std::span<const radray::MeshPassRegistration> GetMeshPassRegistrations() noexcept override { return _registrations; }
     void Extract(const radray::Scene&,radray::FrameSlot&) noexcept override;
     void Record(radray::FrameSlot&) noexcept override;
     void Wait(radray::FrameSlot&) noexcept override;
 private:
+    // GPU objects reused by the slot's frames; written only after that slot's previous GPU work completed.
     struct SlotResources {
         RenderBuffer passConstants;
         radray::unique_ptr<radray::render::ShaderParameterSet> passParameterSet;
+        radray::unique_ptr<MappedUploadBuffer> staging,instances;
+        radray::unique_ptr<radray::render::QueryPool> timestamps; // Empty when the device has no timestamp queries.
+        RenderBuffer timing;
+        radray::unique_ptr<radray::render::Texture> depth;
+        radray::unique_ptr<radray::render::TextureView> depthView; // Declared after depth; dies first.
+        uint32_t depthWidth{},depthHeight{};
+        bool depthInitialized{};
     };
     struct FrameData {
         explicit FrameData(TerrainFrame&& input) noexcept :input(std::move(input)) {}
         TerrainFrame input;
         uint64_t completion{};
     };
-    SolidFramePipeline(radray::unique_ptr<MeshPassResources> resources,std::array<SlotResources,2>&& slots,
-        radray::unique_ptr<radray::render::Fence> completion)
-        :_resources(std::move(resources)),_slots(std::move(slots)),_completion(std::move(completion)),
+    SolidFramePipeline(radray::render::Device* device,radray::unique_ptr<MeshPassResources> resources,
+        std::array<SlotResources,2>&& slots,radray::unique_ptr<radray::render::Fence> completion)
+        :_device(device),_resources(std::move(resources)),_slots(std::move(slots)),_completion(std::move(completion)),
          _processor(_defaultContext,*_resources),_registrations{{{{0},&_processor}}} {}
+    radray::render::Device* _device;
     radray::unique_ptr<MeshPassResources> _resources;
     std::array<SlotResources,2> _slots;
     radray::unique_ptr<radray::render::Fence> _completion;

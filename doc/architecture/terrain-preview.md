@@ -30,7 +30,7 @@ compiled mesh 关闭把 ID 放入回收队列；没有独立积压的编译结�
 quad 索引由 Java 在本 epoch 首次需要时至少按 65,536 顶点容量生成（98,304 个 uint32 索引，384 KiB），
 超出后按 2 的幂增长，以普通 index ID 上传；材质引用图集/lightmap 的逻辑纹理 0/1。
 可见面组转换为 submesh 可见项，原点/淡入转换为实例；没有特殊 native 地形 frame 或专用绘制入口。
-独立几何缓冲和场景增量由 Raynium `TerrainScene` 管理；命令通过持久 RadRay Scene 仅在 batch 标脏后重建，上传与完成后回收见[帧槽与资源退役](native-runtime.md#上传帧槽与资源退役)。
+几何 arena 区间和场景增量由 Raynium `TerrainScene` 管理；命令通过持久 RadRay Scene 仅在 batch 标脏后重建，上传与完成后回收见[帧槽与资源退役](native-runtime.md#上传帧槽与资源退役)。
 
 CPU 把准确平面、两三角绕序一致的 quad 分成六个轴向组，其余进入 general 组；保留组内顺序及原始顶点精度。
 使用 mesh 实际包围范围和最终投影反算的视点保守剔除面组；不假定模型都位于 16³ section 内，退化/非轴向面不剔除。
@@ -41,7 +41,7 @@ native 通过 GatherVisibleMeshDrawCommands 选择缓存的 submesh 命令，以
 FirstInstance/InstanceCount 来自可见项覆盖值，不在 CPU 上逐实例展开。没有相邻范围合并。
 
 地形 HLSL 离线编译 DXIL/SPIR-V。Group 0 保存每槽帧常量，Group 1 保存持久材质纹理与采样器。shader 包含图集采样修正、RGSS、光照、雾和淡入；sampler 随 MC anisotropy 设置更新。
-SOLID 使用不混合颜色写入、反向 Z（clear=0、GreaterEqual、深度写入）、帧内 D32，D3D12 补偿 clip Y，绕序与 MC Vulkan 一致。
+SOLID 使用不混合颜色写入、反向 Z（clear=0、GreaterEqual、深度写入）、每槽常驻 D32，D3D12 补偿 clip Y，绕序与 MC Vulkan 一致。
 小 RT 的宽高各取主 RT 的四分之一整除值，使用 MC 投影；非整除尺寸的宽高比存在取整误差。
 
 ## 多 mip 输入与 fallback
@@ -73,7 +73,7 @@ MC:   wait outputReady(frame) → acquire/copy/release output → outputConsumed
 ```
 
 每条 timeline 只有一个 signal 方。MC wait/signal 划分同一次 submit 中的多个 batch，不在正常帧中途 CPU 等待尚未提交的 MC 工作。
-resize 排空帧槽后重建输出颜色和交接信息，后续帧按新尺寸创建深度，保留 renderer、帧调度器与驻留几何。
+resize 排空帧槽后重建输出颜色和交接信息，各槽在下一帧按新尺寸重建深度，保留 renderer、帧调度器与驻留几何。
 图集对象变化先排空再重建共享输入，后续帧从新输入创建材质 Proxy 和绑定；MC 的资源 epoch 变化另使旧 payload 失效。
 世界离开排空输出和输入后关闭 renderer，清除场景；runtime 设备继续保留。
 

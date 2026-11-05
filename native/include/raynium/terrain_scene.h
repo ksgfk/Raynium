@@ -1,4 +1,5 @@
 #pragma once
+#include <raynium/geometry_arena.h>
 #include <raynium/mesh_pass.h>
 #include <radray/runtime/frame_scheduler.h>
 #include <unordered_map>
@@ -13,8 +14,7 @@ struct TerrainMesh {
     uint64_t indexId{};
     uint32_t vertexCount{};
     std::vector<rn_submesh> ranges;
-    RenderBuffer buffer;
-    radray::VertexInput input;
+    GeometryAllocation geometry; // Range load may still be in flight; the retirement path frees it.
 };
 struct TerrainMaterial {
     rn_material_update desc{};
@@ -34,30 +34,30 @@ struct TerrainState {
     std::unordered_map<uint64_t,std::shared_ptr<TerrainPrimitive>> primitives;
     MaterialBindingMap materialBindingsByHandle;
 };
+// One copy recorded per frame; staging offsets index the frame slot's mapped staging buffer.
 struct GeometryUpload {
-    RenderBuffer staging;
     radray::render::Buffer* destination;
-    uint64_t bytes;
+    uint64_t destinationOffset,stagingOffset,bytes;
     radray::render::BufferStates after;
 };
-// Frame resources survive until the slot allocator resets; ABI pointers never survive PrepareFrame.
+struct SlotUploads {
+    MappedUploadBuffer& staging;
+    MappedUploadBuffer& instances;
+};
+// FrameData only owns transient CPU state; GPU objects live in the frame slot. ABI pointers never survive PrepareFrame.
 struct TerrainFrame {
     std::vector<GeometryUpload> uploads;
     std::vector<radray::VisibleMeshBatch> visibleBatches;
     std::vector<std::shared_ptr<void>> retiredResources;
-    RenderBuffer instances,timing;
-    radray::unique_ptr<radray::render::Texture> depth;
-    radray::unique_ptr<radray::render::TextureView> colorView,depthView;
-    radray::unique_ptr<radray::render::QueryPool> timestamps;
     rn_render_frame_desc parameters{};
     RenderTarget* target{};
     SharedTextures* textures{};
 };
 class TerrainScene final {
 public:
-    explicit TerrainScene(RayniumRuntime& device):_device(device) {}
+    TerrainScene(RayniumRuntime& device,radray::unique_ptr<GeometryArena> arena);
     bool PrepareFrame(RenderTarget&,SharedTextures*,const rn_render_frame_desc&,const MeshPassResources&,
-        TerrainFrame&,radray::string&);
+        SlotUploads,TerrainFrame&,radray::string&);
     // Requires WaitIdle before releasing bindings borrowed by cached commands or recordings.
     void DetachTextures() noexcept;
     void Reset() noexcept;
@@ -66,6 +66,8 @@ public:
     uint64_t ResidentBytes() const noexcept;
 private:
     RayniumRuntime& _device;
+    // Declared before the resident state so every geometry allocation is released first.
+    radray::unique_ptr<GeometryArena> _arena;
     TerrainState _state;
     radray::Scene _scene;
     // Failed preparation keeps retired owners alive until Reset after WaitIdle.

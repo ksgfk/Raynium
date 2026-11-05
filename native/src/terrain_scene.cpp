@@ -1,28 +1,49 @@
 #include <raynium/terrain_scene.h>
 #include <radray/profiler.h>
+#include <cstring>
+#include <limits>
 #include <unordered_set>
 
 namespace raynium {
 using namespace radray::render;
 namespace {
+constexpr uint64_t Align16(uint64_t value) noexcept { return (value+15)&~uint64_t(15); }
 template<class T> bool Array(const T* p,uint32_t n,uint32_t limit=1048576) { return n<=limit && (!n || p); }
-bool Upload(Device& device,TerrainFrame& frame,Buffer* destination,const void* data,uint64_t bytes,BufferStates after) {
-    auto staging=CreateBuffer(device,bytes,MemoryType::Upload,BufferUse::CopySource);
-    if(!staging || !WriteBuffer(*staging,data,size_t(bytes))) return false;
-    frame.uploads.push_back({std::move(staging),destination,bytes,after}); return true;
+// Copies one record into the slot's mapped staging range; the record is copied to the GPU during Record.
+bool Stage(MappedUploadBuffer& staging,uint64_t& cursor,radray::render::Buffer* destination,uint64_t destinationOffset,
+    const void* data,uint64_t bytes,BufferStates after,TerrainFrame& frame) {
+    RADRAY_PROFILE_SCOPE_N("Raynium.Geometry.StageUpload");
+    const uint64_t offset=Align16(cursor);
+    if(bytes && (!data || offset+bytes>staging.Capacity())) return false;
+    if(bytes) std::memcpy(staging.Data()+offset,data,size_t(bytes));
+    frame.uploads.push_back({destination,destinationOffset,offset,bytes,after});
+    cursor=offset+bytes; return true;
 }
-radray::MeshBatch Batch(const TerrainPrimitive& primitive,const TerrainState& state) {
+bool Batch(const TerrainPrimitive& primitive,const TerrainState& state,radray::MeshBatch& batch) {
     const auto& mesh=*state.meshes.at(primitive.desc.mesh);
-    radray::MeshBatch batch; batch.Material=state.materials.at(primitive.desc.material)->handle; batch.VertexInput=&mesh.input;
+    batch.Material=state.materials.at(primitive.desc.material)->handle; batch.VertexInput=&mesh.geometry.Input();
     auto* index=state.indices.at(mesh.indexId)->buffer.get();
-    for(const auto& range:mesh.ranges) batch.Elements.push_back({.IndexBuffer=index,.FirstIndex=range.first,
-        .IndexCount=range.count,.VertexOffset=range.base_vertex});
-    return batch;
+    const int64_t first=mesh.geometry.FirstVertex();
+    for(const auto& range:mesh.ranges) {
+        const int64_t offset=int64_t(range.base_vertex)+first;
+        if(offset<std::numeric_limits<int32_t>::min() || offset>std::numeric_limits<int32_t>::max()) return false;
+        batch.Elements.push_back({.IndexBuffer=index,.FirstIndex=range.first,
+            .IndexCount=range.count,.VertexOffset=int32_t(offset)});
+    }
+    return true;
 }
 }
+TerrainScene::TerrainScene(RayniumRuntime& device,radray::unique_ptr<GeometryArena> arena)
+    :_device(device),_arena(std::move(arena)) {}
 bool TerrainScene::PrepareFrame(RenderTarget& target,SharedTextures* textures,const rn_render_frame_desc& f,
-    const MeshPassResources& resources,TerrainFrame& frame,radray::string& error) {
+    const MeshPassResources& resources,SlotUploads slot,TerrainFrame& frame,radray::string& error) {
     RADRAY_PROFILE_SCOPE_N("Raynium.Scene.Prepare");
+    RADRAY_PROFILE_PLOT("Raynium.IndexUpdates", double(f.index_count));
+    RADRAY_PROFILE_PLOT("Raynium.MaterialUpdates", double(f.material_count));
+    RADRAY_PROFILE_PLOT("Raynium.PrimitiveUpdates", double(f.primitive_count));
+    RADRAY_PROFILE_PLOT("Raynium.PrimitiveRemovals", double(f.removed_primitive_count));
+    RADRAY_PROFILE_PLOT("Raynium.Instances", double(f.instance_count));
+    RADRAY_PROFILE_PLOT("Raynium.ChangedTextures", double(f.changed_textures));
     const auto fail=[&](const char* message) { error=message; return false; };
     if(f.struct_size!=sizeof(f) || f.reserved || (f.flags&~3u) || !f.epoch || f.epoch<_state.epoch ||
        !Array(f.indices,f.index_count,65536) || !Array(f.meshes,f.mesh_count,65536) || !Array(f.materials,f.material_count,65536) ||
@@ -95,12 +116,27 @@ bool TerrainScene::PrepareFrame(RenderTarget& target,SharedTextures* textures,co
         {
             RADRAY_PROFILE_SCOPE_N("Raynium.Scene.StageGeometry");
             frame.uploads.reserve(size_t(f.index_count)+f.mesh_count);
+            // Size the slot staging range before any upload is copied; items are 16-byte aligned.
+            uint64_t required=0;
             for(uint32_t i=0;i<f.index_count;++i) {
                 const auto& x=f.indices[i];
                 if(!x.id || x.reserved || !x.count || !Array(x.indices,x.count,16u<<20)) return fail("Invalid index resource");
+                required+=Align16(uint64_t(x.count)*4);
+            }
+            for(uint32_t i=0;i<f.mesh_count;++i) {
+                const auto& x=f.meshes[i];
+                if(!x.id || !x.vertices || !x.index_buffer || !x.vertex_count || x.vertex_count>(1u<<20) || !x.submesh_count ||
+                   !Array(x.submeshes,x.submesh_count,65536)) return fail("Invalid SOLID mesh");
+                required+=Align16(uint64_t(x.vertex_count)*GeometryArena::VertexStride);
+            }
+            if(!slot.staging.Reserve(device,required,error)) return false;
+            uint64_t cursor=0;
+            for(uint32_t i=0;i<f.index_count;++i) {
+                const auto& x=f.indices[i];
                 auto index=std::make_shared<TerrainIndex>(); const uint64_t bytes=uint64_t(x.count)*4;
                 index->buffer=CreateBuffer(device,bytes,MemoryType::Device,BufferUse::CopyDestination|BufferUse::Index);
-                if(!index->buffer || !Upload(device,frame,index->buffer.get(),x.indices,bytes,BufferState::Index)) return fail("Cannot upload index resource");
+                if(!index->buffer || !Stage(slot.staging,cursor,index->buffer.get(),0,x.indices,bytes,BufferState::Index,frame))
+                    return fail("Cannot upload index resource");
                 const auto it=state.indices.find(x.id);
                 if(it!=state.indices.end()) {
                     _retiredResources.emplace_back(it->second); it->second=std::move(index); replacedIndices.insert(x.id);
@@ -108,22 +144,20 @@ bool TerrainScene::PrepareFrame(RenderTarget& target,SharedTextures* textures,co
             }
             for(uint32_t i=0;i<f.mesh_count;++i) {
                 const auto& x=f.meshes[i];
-                if(!x.id || !x.vertices || !x.index_buffer || !x.vertex_count || x.vertex_count>(1u<<20) || !x.submesh_count ||
-                   !Array(x.submeshes,x.submesh_count,65536)) return fail("Invalid SOLID mesh");
                 auto mesh=std::make_shared<TerrainMesh>(); mesh->indexId=x.index_buffer; mesh->vertexCount=x.vertex_count;
-                mesh->ranges.assign(x.submeshes,x.submeshes+x.submesh_count); const uint64_t bytes=uint64_t(x.vertex_count)*28;
-                mesh->buffer=CreateBuffer(device,bytes,MemoryType::Device,BufferUse::CopyDestination|BufferUse::Vertex);
-                if(!mesh->buffer || !Upload(device,frame,mesh->buffer.get(),x.vertices,bytes,BufferState::Vertex)) return fail("Cannot upload terrain vertices");
-                mesh->input.Layouts={{0,28,VertexStepMode::Vertex},{1,16,VertexStepMode::Instance}};
-                mesh->input.Attributes={{0,0,"POSITION",0,VertexFormat::FLOAT32X3,0},{0,12,"COLOR",0,VertexFormat::UNORM8X4,1},
-                    {0,16,"TEXCOORD",0,VertexFormat::FLOAT32X2,2},{0,24,"TEXCOORD",1,VertexFormat::UINT16X2,3},
-                    {1,0,"TEXCOORD",2,VertexFormat::SINT32X3,4},{1,12,"TEXCOORD",3,VertexFormat::FLOAT32,5}};
-                mesh->input.Streams={{mesh->buffer.get(),0,bytes,0}};
+                mesh->ranges.assign(x.submeshes,x.submeshes+x.submesh_count);
+                auto allocation=_arena->Allocate(x.vertex_count,error);
+                if(!allocation) return false;
+                mesh->geometry=std::move(*allocation);
+                if(!Stage(slot.staging,cursor,mesh->geometry.VertexBuffer(),mesh->geometry.ByteOffset(),x.vertices,
+                       uint64_t(x.vertex_count)*GeometryArena::VertexStride,BufferState::Vertex,frame))
+                    return fail("Cannot upload terrain vertices");
                 const auto it=state.meshes.find(x.id);
                 if(it!=state.meshes.end()) {
                     _retiredResources.emplace_back(it->second); it->second=std::move(mesh); replacedMeshes.insert(x.id);
                 } else state.meshes.emplace(x.id,std::move(mesh));
             }
+            if(cursor) slot.staging.Flush(0,cursor);
         }
         {
             RADRAY_PROFILE_SCOPE_N("Raynium.Scene.MaterialBindings");
@@ -156,7 +190,9 @@ bool TerrainScene::PrepareFrame(RenderTarget& target,SharedTextures* textures,co
             RADRAY_PROFILE_SCOPE_N("Raynium.Scene.Apply");
             const auto add=[&](TerrainPrimitive& primitive) {
                 primitive.primitiveHandle=_scene.AddPrimitive();
-                primitive.batchHandle=_scene.AddMeshBatch(primitive.primitiveHandle,Batch(primitive,state));
+                radray::MeshBatch batch;
+                if(!Batch(primitive,state,batch)) return fail("Terrain vertex offset exceeds 32-bit range");
+                primitive.batchHandle=_scene.AddMeshBatch(primitive.primitiveHandle,std::move(batch));
                 if(!primitive.primitiveHandle.IsValid() || !primitive.batchHandle.IsValid()) return fail("Cannot add SOLID primitive batch");
                 return true;
             };
@@ -172,8 +208,11 @@ bool TerrainScene::PrepareFrame(RenderTarget& target,SharedTextures* textures,co
                 RADRAY_PROFILE_SCOPE_N("Raynium.Scene.RefreshBatches");
                 for(const auto& [id,primitive]:state.primitives) if(!touchedPrimitives.contains(id)) {
                     const auto& mesh=state.meshes.at(primitive->desc.mesh);
-                    if(replacedMeshes.contains(primitive->desc.mesh) || replacedIndices.contains(mesh->indexId))
-                        if(!_scene.UpdateMeshBatch(primitive->batchHandle,Batch(*primitive,state))) return fail("Cannot update SOLID primitive batch");
+                    if(replacedMeshes.contains(primitive->desc.mesh) || replacedIndices.contains(mesh->indexId)) {
+                        radray::MeshBatch batch;
+                        if(!Batch(*primitive,state,batch)) return fail("Terrain vertex offset exceeds 32-bit range");
+                        if(!_scene.UpdateMeshBatch(primitive->batchHandle,std::move(batch))) return fail("Cannot update SOLID primitive batch");
+                    }
                 }
             }
         }
@@ -193,24 +232,25 @@ bool TerrainScene::PrepareFrame(RenderTarget& target,SharedTextures* textures,co
         }
     }
     {
-        RADRAY_PROFILE_SCOPE_N("Raynium.Frame.PrepareResources");
+        RADRAY_PROFILE_SCOPE_N("Raynium.Frame.StageInstances");
         if(f.instance_count) {
             const uint64_t size=uint64_t(f.instance_count)*sizeof(rn_instance);
-            frame.instances=CreateBuffer(device,size,MemoryType::Upload,BufferUse::Vertex);
-            if(!frame.instances || !WriteBuffer(*frame.instances,f.instances,size_t(size))) return fail("Cannot upload frame instances");
-        }
-        frame.depth=device.CreateTexture({.Dim=TextureDimension::Dim2D,.Width=target.Width(),.Height=target.Height(),
-            .DepthOrArraySize=1,.MipLevels=1,.SampleCount=1,.Format=TextureFormat::D32_FLOAT,.Memory=MemoryType::Device,.Usage=TextureUse::DepthStencilWrite}).Release();
-        if(!frame.depth) return fail("Cannot create terrain depth");
-        frame.colorView=device.CreateTextureView({target.Color(),TextureDimension::Dim2D,TextureFormat::RGBA8_UNORM,{0,1,0,1},TextureViewUsage::RenderTarget}).Release();
-        frame.depthView=device.CreateTextureView({frame.depth.get(),TextureDimension::Dim2D,TextureFormat::D32_FLOAT,{0,1,0,1},TextureViewUsage::DepthWrite}).Release();
-        if(!frame.colorView || !frame.depthView) return fail("Cannot create terrain attachment views");
-        if((f.flags&RN_FRAME_PROFILE) && device.GetCapabilities().Features.TimestampQueries) {
-            frame.timestamps=device.CreateQueryPool({QueryType::Timestamp,2,"Raynium SOLID frame"}).Release();
-            frame.timing=CreateBuffer(device,16,MemoryType::ReadBack,BufferUse::CopyDestination|BufferUse::MapRead);
-            if(!frame.timestamps || !frame.timing) return fail("Cannot create terrain timing readback");
+            if(!slot.instances.Reserve(device,size,error)) return false;
+            std::memcpy(slot.instances.Data(),f.instances,size_t(size));
+            slot.instances.Flush(0,size);
         }
     }
+    RADRAY_PROFILE_PLOT("Raynium.Uploads.Count", double(frame.uploads.size()));
+    RADRAY_PROFILE_PLOT("Raynium.Arena.Blocks", double(_arena->BlockCount()));
+#ifdef RADRAY_ENABLE_PROFILER
+    uint64_t uploadBytes=0;
+    for(const auto& upload:frame.uploads) uploadBytes+=upload.bytes;
+    RADRAY_PROFILE_PLOT("Raynium.Uploads.Bytes", double(uploadBytes));
+    RADRAY_PROFILE_PLOT("Raynium.Arena.FreeBytes", double(_arena->FreeBytes()));
+    RADRAY_PROFILE_PLOT("Raynium.Frame.StagingCapacity", double(slot.staging.Capacity()));
+    RADRAY_PROFILE_PLOT("Raynium.Frame.InstanceCapacity", double(slot.instances.Capacity()));
+#endif
+    RADRAY_PROFILE_PLOT("Raynium.RetiredResources", double(_retiredResources.size()));
     frame.retiredResources.swap(_retiredResources);
     return true;
 }
@@ -225,7 +265,7 @@ void TerrainScene::Reset() noexcept { _scene.Clear(); _state=TerrainState{}; _re
 uint64_t TerrainScene::ResidentBytes() const noexcept {
     uint64_t bytes=0;
     for(const auto& [id,index]:_state.indices) bytes+=index->buffer->GetDesc().Size;
-    for(const auto& [id,mesh]:_state.meshes) bytes+=mesh->buffer->GetDesc().Size;
+    for(const auto& [id,mesh]:_state.meshes) bytes+=mesh->geometry.ByteSize();
     return bytes;
 }
 }

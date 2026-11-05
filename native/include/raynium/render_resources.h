@@ -5,8 +5,32 @@
 
 namespace raynium {
 using RenderBuffer = radray::unique_ptr<radray::render::Buffer>;
-RenderBuffer CreateBuffer(radray::render::Device&, uint64_t, radray::render::MemoryType, radray::render::BufferUses);
+RenderBuffer CreateBuffer(radray::render::Device&, uint64_t, radray::render::MemoryType, radray::render::BufferUses,
+                          radray::render::ResourceHints = {});
 bool WriteBuffer(radray::render::Buffer&, const void*, size_t);
+
+// Upload buffer that stays mapped for its lifetime. Callers may only overwrite or grow it after the
+// previous GPU use of that owner completed; growth replaces the buffer and discards its contents.
+class MappedUploadBuffer final {
+public:
+    MappedUploadBuffer(const MappedUploadBuffer&) = delete;
+    MappedUploadBuffer& operator=(const MappedUploadBuffer&) = delete;
+    ~MappedUploadBuffer() noexcept;
+    static bool Create(radray::render::Device&, uint64_t capacity, radray::render::BufferUses,
+                       radray::unique_ptr<MappedUploadBuffer>&, radray::string&);
+    bool Reserve(radray::render::Device&, uint64_t bytes, radray::string&); // 2^n capacity, drops old contents
+    void Flush(uint64_t offset, uint64_t bytes) noexcept;
+    radray::render::Buffer* Get() const noexcept { return _buffer.get(); }
+    std::byte* Data() const noexcept { return _data; }
+    uint64_t Capacity() const noexcept { return _capacity; }
+private:
+    MappedUploadBuffer(RenderBuffer buffer, std::byte* data, uint64_t capacity, radray::render::BufferUses usage) noexcept
+        :_buffer(std::move(buffer)),_data(data),_capacity(capacity),_usage(usage) {}
+    RenderBuffer _buffer;
+    std::byte* _data{};
+    uint64_t _capacity{};
+    radray::render::BufferUses _usage{};
+};
 void TextureBarrier(radray::render::CommandBuffer&, radray::render::Texture*, radray::render::TextureStates,
                     radray::render::TextureStates, radray::render::ExternalOwnershipTransfer = radray::render::ExternalOwnershipTransfer::None);
 void BufferBarrier(radray::render::CommandBuffer&, radray::render::Buffer*, radray::render::BufferStates, radray::render::BufferStates);
@@ -24,10 +48,12 @@ public:
     radray::render::Fence* Ready() const { return _r.ready.get(); }
     radray::render::Fence* Consumed() const { return _r.consumed.get(); }
     radray::render::Texture* Color() const { return _r.color.get(); }
+    radray::render::TextureView* ColorView() const { return _r.colorView.get(); }
     void Commit(uint64_t sequence) noexcept { _submitted=sequence; }
 private:
     struct Resources {
         radray::unique_ptr<radray::render::Texture> color;
+        radray::unique_ptr<radray::render::TextureView> colorView; // Declared after color; dies first.
         radray::unique_ptr<radray::render::Fence> ready, consumed;
         radray::render::ExternalTextureExport exported;
         radray::render::ExternalFenceExport readyExport, consumedExport;

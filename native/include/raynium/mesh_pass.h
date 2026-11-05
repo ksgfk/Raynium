@@ -1,6 +1,6 @@
 #pragma once
 #include <raynium/render_resources.h>
-#include <radray/runtime/material_render_proxy.h>
+#include <radray/runtime/material.h>
 #include <unordered_map>
 #include <memory>
 

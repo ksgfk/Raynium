@@ -22,8 +22,9 @@ def main():
         raise RuntimeError('Explicitly restore the pinned Tracy source before building.')
     output = root / 'build/native-dependencies/tracy' / args.config
     env = msvc_environment()
-    build = output / 'build-static'
-    run(['cmake', '-S', str(source), '-B', str(build), '-G', 'Ninja',
+    build = output / 'build-manual-lifetime'
+    run(['cmake', '-S', str(root / 'native/cmake/profiler-dependency'), '-B', str(build), '-G', 'Ninja',
+         '-DTRACY_SOURCE_DIR=' + source.as_posix(),
          '-DCMAKE_C_COMPILER=cl', '-DCMAKE_CXX_COMPILER=cl',
          '-DCMAKE_POLICY_DEFAULT_CMP0091=NEW',
          '-DCMAKE_BUILD_TYPE=' + args.config,
@@ -31,7 +32,7 @@ def main():
          '-DCMAKE_INSTALL_PREFIX=' + (output / 'sdk').as_posix(), '-DCMAKE_INSTALL_LIBDIR=lib',
          '-DTRACY_ENABLE=ON', '-DTRACY_ON_DEMAND=ON', '-DTRACY_STATIC=ON',
          '-DTRACY_ONLY_LOCALHOST=ON', '-DTRACY_NO_BROADCAST=ON', '-DTRACY_NO_CRASH_HANDLER=ON',
-         '-DTRACY_DELAYED_INIT=ON', '-DTRACY_MANUAL_LIFETIME=ON'], root, env)
+         '-DTRACY_MANUAL_LIFETIME=ON'], root, env)
     run(['cmake', '--build', str(build), '--parallel', str(args.parallel)], root, env)
     run(['cmake', '--install', str(build)], root, env)
 

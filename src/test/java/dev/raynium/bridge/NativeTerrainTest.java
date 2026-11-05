@@ -32,6 +32,20 @@ class NativeTerrainTest {
         return new NativeRenderer.Mesh(id,vertices,1,vertices.length/28,List.of(new NativeRenderer.Submesh(0,6,0)));
     }
     static NativeRenderer.Material material(int anisotropy) { return new NativeRenderer.Material(1,0,1,anisotropy); }
+    // Quad occupying the first four vertices of a larger mesh; the rest pads the allocation size.
+    static byte[] span(int vertexCount,float offset,float scale) {
+        byte[] data=new byte[vertexCount*28];
+        byte[] quad=quad(0);
+        System.arraycopy(quad,0,data,0,quad.length);
+        var vertices=ByteBuffer.wrap(data).order(ByteOrder.nativeOrder());
+        for(int v=0;v<4;++v) {
+            vertices.putFloat(v*28,vertices.getFloat(v*28)*scale+offset);
+            vertices.putFloat(v*28+4,vertices.getFloat(v*28+4)*scale);
+        }
+        return data;
+    }
+    static int[] atlas() { return new int[]{32,64,128}; }
+    static int[] clear() { return new int[]{0,0,0}; }
     static NativeRenderer.Frame frame(long epoch,long input,long output) {
         var f=new NativeRenderer.Frame(); f.epoch=epoch; f.inputSequence=input; f.outputSequence=output;
         f.flags=(Boolean.getBoolean("raynium.terrain.profile")?NativeRenderer.PROFILE:0);
@@ -380,6 +394,116 @@ class NativeTerrainTest {
                     producer.writeTerrainInputs(inputs,true,17,9,5,1);
                 } finally { for(var input:inputs) input.close(); }
             }
+        }
+    }
+    // Four meshes fill the first geometry block; the last two share the second block at a nonzero base vertex.
+    @ParameterizedTest @MethodSource("paths")
+    void multipleGeometryBlocksKeepBaseVertices(NativeEnvironment.Backend backend,boolean split) throws Exception {
+        try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var producer=new VulkanConsumer(backend.name());
+            var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
+            var renderer=runtime.createRenderer();
+            var textures=renderer.createSharedTextures(textures(split));
+            var target=renderer.createTarget(32,32);
+            var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {
+            var inputs=new ArrayList<VulkanPreviewImage>();
+            try {
+                for(var e:textures.exports()) inputs.add(VulkanPreviewImage.create(producer.device,producer.family,e.image(),e.mipCount(),true));
+                byte[][] vertices={span(500_000,-.75f,.18f),span(600_000,-.25f,.18f),span(200_000,.25f,.18f),span(200_000,.75f,.18f)};
+                for(int sequence=1;sequence<=4;++sequence) {
+                    producer.writeTerrainInputs(inputs,split,17,9,5,sequence,true);
+                    var packet=frame(1,sequence,sequence);
+                    if(sequence==1) {
+                        packet.indices=List.of(new NativeRenderer.Index(1,new int[]{0,1,2,2,3,0}));
+                        packet.meshes=List.of(mesh(1,vertices[0]),mesh(2,vertices[1]),mesh(3,vertices[2]),mesh(4,vertices[3]));
+                        packet.materials=List.of(material(1));
+                        packet.primitives=List.of(new NativeRenderer.Primitive(1,1,1),new NativeRenderer.Primitive(2,2,1),
+                            new NativeRenderer.Primitive(3,3,1),new NativeRenderer.Primitive(4,4,1));
+                    }
+                    packet.instances=List.of(new NativeRenderer.Instance(0,0,0,1));
+                    packet.visible=List.of(new NativeRenderer.Visible(1,0,0,0,1),new NativeRenderer.Visible(2,0,1,0,1),
+                        new NativeRenderer.Visible(3,0,2,0,1),new NativeRenderer.Visible(4,0,3,0,1));
+                    renderer.render(target,packet);
+                    producer.copyAndCheckImage(output,sequence,32,32,(x,y)->y>=13 && y<19 &&
+                        ((x>=1 && x<7) || (x>=9 && x<15) || (x>=17 && x<23) || (x>=25 && x<31)) ? atlas() : clear());
+                }
+            } finally { for(var image:inputs) image.close(); }
+        }
+    }
+    // One frame uploads more than the initial 8 MiB staging capacity; later frames reuse the grown slot buffer.
+    @ParameterizedTest @MethodSource("paths")
+    void stagingGrowsBeyondInitialCapacity(NativeEnvironment.Backend backend,boolean split) throws Exception {
+        try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var producer=new VulkanConsumer(backend.name());
+            var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
+            var renderer=runtime.createRenderer();
+            var textures=renderer.createSharedTextures(textures(split));
+            var target=renderer.createTarget(32,32);
+            var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {
+            var inputs=new ArrayList<VulkanPreviewImage>();
+            try {
+                for(var e:textures.exports()) inputs.add(VulkanPreviewImage.create(producer.device,producer.family,e.image(),e.mipCount(),true));
+                byte[] geometry=span(400_000,0,.25f); // 11.2 MiB, above the prebuilt staging size
+                for(int sequence=1;sequence<=4;++sequence) {
+                    producer.writeTerrainInputs(inputs,split,17,9,5,sequence,true);
+                    var packet=frame(1,sequence,sequence);
+                    if(sequence==1) {
+                        packet.indices=List.of(new NativeRenderer.Index(1,new int[]{0,1,2,2,3,0}));
+                        packet.meshes=List.of(mesh(1,geometry)); packet.materials=List.of(material(1));
+                        packet.primitives=List.of(new NativeRenderer.Primitive(1,1,1));
+                    }
+                    if(sequence==3) packet.meshes=List.of(mesh(1,geometry)); // Replace on the other slot's buffer.
+                    packet.instances=List.of(new NativeRenderer.Instance(0,0,0,1));
+                    packet.visible=List.of(new NativeRenderer.Visible(1,0,0,0,1));
+                    renderer.render(target,packet);
+                    producer.copyAndCheckImage(output,sequence,32,32,(x,y)->x>=12 && x<20 && y>=12 && y<20 ? atlas() : clear());
+                }
+            } finally { for(var image:inputs) image.close(); }
+        }
+    }
+    // A removed mesh's range is reused only after both in-flight slots released it; the neighbour keeps its range.
+    @ParameterizedTest @MethodSource("paths")
+    void geometryRangeReuseAfterMeshRemoval(NativeEnvironment.Backend backend,boolean split) throws Exception {
+        try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var producer=new VulkanConsumer(backend.name());
+            var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
+            var renderer=runtime.createRenderer();
+            var textures=renderer.createSharedTextures(textures(split));
+            var target=renderer.createTarget(32,32);
+            var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {
+            var inputs=new ArrayList<VulkanPreviewImage>();
+            try {
+                for(var e:textures.exports()) inputs.add(VulkanPreviewImage.create(producer.device,producer.family,e.image(),e.mipCount(),true));
+                byte[] left=span(10_000,-.5f,.25f),right=span(10_000,.5f,.25f);
+                for(int sequence=1;sequence<=9;++sequence) {
+                    producer.writeTerrainInputs(inputs,split,17,9,5,sequence,true);
+                    var packet=frame(1,sequence,sequence);
+                    if(sequence==1) {
+                        packet.indices=List.of(new NativeRenderer.Index(1,new int[]{0,1,2,2,3,0}));
+                        packet.meshes=List.of(mesh(1,left),mesh(2,right)); packet.materials=List.of(material(1));
+                        packet.primitives=List.of(new NativeRenderer.Primitive(1,1,1),new NativeRenderer.Primitive(2,2,1));
+                    }
+                    if(sequence==4) { packet.removedPrimitives=new long[]{1}; packet.removedMeshes=new long[]{1}; }
+                    if(sequence==7) {
+                        packet.meshes=List.of(mesh(3,left)); // Same size as the removed mesh: reuses its released range.
+                        packet.primitives=List.of(new NativeRenderer.Primitive(3,3,1));
+                    }
+                    boolean leftVisible=sequence<=3 || sequence>=7;
+                    packet.instances=leftVisible?List.of(new NativeRenderer.Instance(0,0,0,1),new NativeRenderer.Instance(0,0,0,1))
+                        :List.of(new NativeRenderer.Instance(0,0,0,1));
+                    if(sequence<=3) packet.visible=List.of(new NativeRenderer.Visible(1,0,0,0,1),new NativeRenderer.Visible(2,0,1,1,1));
+                    else if(sequence<=6) packet.visible=List.of(new NativeRenderer.Visible(2,0,0,0,1));
+                    else packet.visible=List.of(new NativeRenderer.Visible(3,0,0,0,1),new NativeRenderer.Visible(2,0,1,1,1));
+                    renderer.render(target,packet);
+                    int[] leftExpected=leftVisible?atlas():clear();
+                    producer.copyAndCheckImage(output,sequence,32,32,(x,y)->{
+                        if(y<12 || y>=20) return clear();
+                        if(x>=4 && x<12) return leftExpected;
+                        if(x>=20 && x<28) return atlas();
+                        return clear();
+                    });
+                }
+            } finally { for(var image:inputs) image.close(); }
         }
     }
 

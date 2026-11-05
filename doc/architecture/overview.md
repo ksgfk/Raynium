@@ -22,7 +22,7 @@ SOLID 使用持久 RadRay Scene、增量 MeshDrawCommand 缓存和双槽 FrameSc
 | Java bridge | payload 定位、内容缓存、FFM 布局和绑定、DLL/环境/runtime 所有权 | `src/client/java/dev/raynium/bridge/` |
 | C bridge | ABI 查询、参数校验、诊断字符串和不透明 runtime 句柄 | `native/include/raynium/bridge.h`、`native/src/bridge.cpp` |
 | MC native 管线 | ABI 转换、SolidPassProcessor、SolidFramePipeline、shader 与单队列提交 | `native/src/renderer.cpp`、`native/src/solid_pipeline.cpp`、`native/src/mesh_pass.cpp` |
-| 地形驻留 | 场景增量就地更新、独立几何缓冲、持久材质、可见批次与跨槽资源退役 | `native/src/terrain_scene.cpp` |
+| 地形驻留 | 场景增量就地更新、几何 arena 区间分配、持久材质、可见批次与跨槽资源退役 | `native/src/terrain_scene.cpp`、`native/src/geometry_arena.cpp` |
 | 共享资源 | DLL 共享输入/输出协议、显式 acquire/release 和 split mip 装配 | `native/src/render_resources.cpp` |
 | MC 场景适配 | SOLID 网格/面组转换为通用场景增量，上传预算、纹理变化 | `src/client/java/dev/raynium/client/terrain/` |
 | MC 预览适配 | 导入原始 Vulkan 对象、帧末复制、resize/退出排空 | `src/client/java/dev/raynium/client/preview/`、`src/client/java/dev/raynium/client/mixin/` |
@@ -69,5 +69,6 @@ flowchart LR
 | 2026-10-30 | [可编程渲染 Runtime](../history/2026-10-30-programmable-runtime.md)：确认的独立静态库、最小 RDG、SOLID 管线与程序化验收范围 |
 | 2026-11-04 | [RadRay 新版 Runtime 接入与重写计划](../history/2026-11-04-radray-runtime-rewrite-plan.md)：升级 ABI 9、持久 Scene 增量命令缓存、Group 0/1 绑定拆分、延迟实例流与 RetireResource 资源退役 |
 | 2026-11-04 | [Tracy 实机性能瓶颈分析与分项优化计划](../history/2026-11-04-tracy-bottleneck-optimization-plan.md)：实机 CPU/GPU 耗时归因、移除每帧事务回滚深拷贝的确认决策及后续分项优化候选 |
+| 2026-11-05 | [帧内 GPU 资源持久化与几何分配计划](../history/2026-11-05-persistent-gpu-resources-plan.md)：帧内 D3D12 资源创建/销毁的实测归因，每槽持久帧资源与 staging、GeometryArena 方案，以及块暂不回收、一次实施的用户决定 |
 
 历史记录保存当时的目标和推演，不构成当前实现或接口契约。

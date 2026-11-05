@@ -1,4 +1,5 @@
 #include <raynium/render_resources.h>
+#include <radray/profiler.h>
 #include <algorithm>
 #include <cstring>
 #include <set>
@@ -11,16 +12,60 @@ template<class T> bool Take(ExternalResult<T> result,T& output,radray::string& e
     output=std::get<T>(std::move(result)); return true;
 }
 }
-RenderBuffer CreateBuffer(Device& d,uint64_t bytes,MemoryType memory,BufferUses uses) {
+RenderBuffer CreateBuffer(Device& d,uint64_t bytes,MemoryType memory,BufferUses uses,ResourceHints hints) {
+    RADRAY_PROFILE_SCOPE_N("Raynium.Buffer.Create");
     if(memory==MemoryType::Upload) uses|=BufferUse::MapWrite;
-    return d.CreateBuffer({.Size=bytes,.Memory=memory,.Usage=uses}).Release();
+    return d.CreateBuffer({.Size=bytes,.Memory=memory,.Usage=uses,.Hints=hints}).Release();
+}
+MappedUploadBuffer::~MappedUploadBuffer() noexcept {
+    if(_buffer && _data) _buffer->Unmap();
+}
+bool MappedUploadBuffer::Create(Device& device,uint64_t capacity,BufferUses usage,radray::unique_ptr<MappedUploadBuffer>& output,radray::string& error) {
+    if(output) { error="Mapped upload output occupied"; return false; }
+    if(!capacity) { error="Mapped upload capacity must be positive"; return false; }
+    auto buffer=CreateBuffer(device,capacity,MemoryType::Upload,usage,ResourceHint::PersistentMap);
+    if(!buffer) { error="Cannot create mapped upload buffer"; return false; }
+    auto* data=static_cast<std::byte*>(buffer->Map(0,capacity));
+    if(!data) { error="Cannot map upload buffer"; return false; }
+    output=radray::unique_ptr<MappedUploadBuffer>(new MappedUploadBuffer(std::move(buffer),data,capacity,usage)); return true;
+}
+bool MappedUploadBuffer::Reserve(Device& device,uint64_t bytes,radray::string& error) {
+    if(bytes<=_capacity) return true;
+    uint64_t capacity=_capacity ? _capacity : 1;
+    while(capacity<bytes) capacity<<=1;
+    radray::unique_ptr<MappedUploadBuffer> replacement;
+    if(!Create(device,capacity,_usage,replacement,error)) return false;
+    // Only callers that confirmed the owner's previous GPU use completed reach this point.
+    if(_buffer && _data) _buffer->Unmap();
+    _data=nullptr;
+    _buffer=std::move(replacement->_buffer);
+    _data=replacement->_data;
+    _capacity=capacity;
+    replacement->_data=nullptr;
+    return true;
+}
+void MappedUploadBuffer::Flush(uint64_t offset,uint64_t bytes) noexcept {
+    if(!bytes) return;
+    _buffer->FlushMappedRange({offset,bytes});
 }
 bool WriteBuffer(Buffer& buffer,const void* data,size_t bytes) {
+    RADRAY_PROFILE_SCOPE_N("Raynium.Buffer.Write");
     if(!bytes) return true;
-    auto* mapped=buffer.Map(0,bytes);
+    void* mapped;
+    {
+        RADRAY_PROFILE_SCOPE_N("Raynium.Buffer.Map");
+        mapped=buffer.Map(0,bytes);
+    }
     if(!mapped) return false;
-    std::memcpy(mapped,data,bytes);
-    buffer.FlushMappedRange({0,bytes}); buffer.Unmap(); return true;
+    {
+        RADRAY_PROFILE_SCOPE_N("Raynium.Buffer.Copy");
+        std::memcpy(mapped,data,bytes);
+    }
+    {
+        RADRAY_PROFILE_SCOPE_N("Raynium.Buffer.FlushUnmap");
+        buffer.FlushMappedRange({0,bytes}); buffer.Unmap();
+    }
+    return true;
 }
 void TextureBarrier(CommandBuffer& c,Texture* texture,TextureStates before,TextureStates after,ExternalOwnershipTransfer transfer) {
     const ResourceBarrierDescriptor b=BarrierTextureDescriptor{.Target=texture,.Before=before,.After=after,
@@ -62,6 +107,9 @@ bool RenderTarget::Create(RayniumRuntime& runtime,const rn_render_target_desc& d
     if(!Take(ext->CreateExportableTexture(td,external),r.color,error) || !Take(ext->ExportTexture(r.color.get()),r.exported,error) ||
        !Take(ext->CreateExportableFence({ft,0}),r.ready,error) || !Take(ext->CreateExportableFence({ft,0}),r.consumed,error) ||
        !Take(ext->ExportFence(r.ready.get()),r.readyExport,error) || !Take(ext->ExportFence(r.consumed.get()),r.consumedExport,error)) return false;
+    r.colorView=d.CreateTextureView({r.color.get(),TextureDimension::Dim2D,TextureFormat::RGBA8_UNORM,{0,1,0,1},
+        TextureViewUsage::RenderTarget}).Release();
+    if(!r.colorView) { error="Cannot create output attachment view"; return false; }
     out=radray::unique_ptr<RenderTarget>(new RenderTarget(std::move(r),desc.width,desc.height)); return true;
 }
 bool RenderTarget::Finish(radray::string& error) {

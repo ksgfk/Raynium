@@ -99,7 +99,7 @@ FFM 使用 ADDRESS 表示不透明指针、JAVA_LONG 表示 ID/句柄/序号、J
 | `NativeEnvironment` | `NativeLibrary`、唯一 runtime | runtime 成功关闭后销毁环境，再关闭 library arena |
 | `NativeRuntime` | 唯一 renderer | renderer 成功关闭后销毁设备会话 |
 | `NativeRenderer` | 场景、唯一 target 与 shared textures 的 Java owner | 子 owner 关闭后等待自身提交完成 |
-| `NativeRenderTarget` | 输出共享颜色、导出与输出 timeline（深度归 native 帧槽 arena） | 宿主完成消费并关闭导入后销毁 |
+| `NativeRenderTarget` | 输出共享颜色、导出与输出 timeline（深度归 native 帧槽） | 宿主完成消费并关闭导入后销毁 |
 | `NativeSharedTextures` | 输入纹理、物理导出映射和输入 timeline | 宿主完成写入并关闭导入后销毁 |
 | `VulkanPreviewImage` | VkImage/VkDeviceMemory/semaphore | 显式排空后关闭；不拥有导出 Win32 句柄 |
 | 调用 scratch arena | 描述、数组、返回槽、诊断缓冲区 | 同步调用结束关闭，不释放返回槽中指向的 native owner |
