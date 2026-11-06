@@ -16,14 +16,11 @@ public final class TerrainPreview implements AutoCloseable {
     private final Logger logger;
     private NativeSharedTextures textures;
     private boolean splitMips;
-    private int indexCapacity,anisotropy;
     private final List<VulkanPreviewImage> images=new ArrayList<>();
-    private final Map<Long,MeshPayload> uploaded=new HashMap<>();
+    private final TerrainResidency residency=new TerrainResidency();
+    private final NativeRenderer.Frame frame=new NativeRenderer.Frame();
     private VulkanGpuTexture atlas;
     private long sequence=1,epoch,sourceEpoch;
-    private final Set<Long> pendingRemovals=new HashSet<>();
-    private record Position(int x,int y,int z) {}
-    private Map<Position,TerrainCapture.Draw> previous=new HashMap<>();
     private final boolean profile=Boolean.getBoolean("raynium.terrain.profile");
     private final double[] prepareTimes=new double[120], drawTimes=new double[120];
     private int sampleCount;
@@ -63,7 +60,6 @@ public final class TerrainPreview implements AutoCloseable {
             TextureTransfer.create(mode,()->{ create(texture,false); return textures; },()->{ create(texture,true); return textures; },
                 failure->logger.warn("Direct mip sharing unavailable; trying split-mip fallback: {}",failure.getMessage()));
         }
-        for(long id:TerrainCapture.drainRemoved()) pendingRemovals.add(id);
         var regions=TerrainTextures.drain(fresh); changedTextures=regions.isEmpty()?0:1;
         boolean lightChanged=TerrainTextures.drainLight(fresh);
         if(lightChanged) changedTextures|=2;
@@ -94,62 +90,24 @@ public final class TerrainPreview implements AutoCloseable {
         long start=System.nanoTime();
         var snapshot=TerrainCapture.snapshot();
         if(!pending || snapshot==null) return false;
-        if(sourceEpoch!=snapshot.epoch()) {
-            uploaded.clear(); previous.clear(); pendingRemovals.clear(); sourceEpoch=snapshot.epoch();
-            epoch=renderer.nextEpoch(); indexCapacity=anisotropy=0;
+        if(sourceEpoch!=snapshot.epoch) {
+            sourceEpoch=snapshot.epoch; epoch=renderer.nextEpoch(); residency.reset(epoch);
         }
-        var frame=new NativeRenderer.Frame(); frame.epoch=epoch; frame.outputSequence=outputSequence;
+        TerrainCapture.drainRemoved(residency.pendingRemovals);
+        frame.epoch=epoch; frame.outputSequence=outputSequence;
         frame.inputSequence=sequence; frame.changedTextures=changedTextures;
-        frame.flags=(snapshot.rgss()?NativeRenderer.RGSS:0)|(profile?NativeRenderer.PROFILE:0);
-        frame.projection=snapshot.projection(); frame.view=snapshot.view(); frame.cameraBlock=snapshot.block();
-        frame.cameraFraction=snapshot.fraction(); frame.fogColor=snapshot.fog(); frame.fogDistances=snapshot.distances();
-        var updates=new ArrayList<NativeRenderer.Mesh>(); var primitives=new ArrayList<NativeRenderer.Primitive>();
-        var visibleItems=new ArrayList<NativeRenderer.Visible>(); var instances=new ArrayList<NativeRenderer.Instance>();
-        var staged=new HashMap<Long,MeshPayload>();
-        var next=new HashMap<Position,TerrainCapture.Draw>(); var usedIds=new HashSet<Long>();
-        long budget=8L*1024*1024,used=0; int needed=indexCapacity,order=0;
-        for(var visible:snapshot.visible()) {
-            var payload=visible.payload();
-            boolean ready=uploaded.containsKey(payload.id) || staged.containsKey(payload.id);
-            if(!ready && payload.vertices.length>0 && (used==0 || used+payload.vertices.length<=budget)) {
-                updates.add(TerrainScene.mesh(payload)); primitives.add(new NativeRenderer.Primitive(payload.id,payload.id,1));
-                staged.put(payload.id,payload); used+=payload.vertices.length; ready=true;
-                needed=Math.max(needed,payload.vertices.length/28);
-            }
-            var draw=visible.draw(); var key=new Position(draw.x(),draw.y(),draw.z());
-            if(!ready) {
-                var old=previous.get(key);
-                if(old==null || !uploaded.containsKey(old.id())) continue;
-                draw=new TerrainCapture.Draw(old.id(),draw.x(),draw.y(),draw.z(),draw.visibility(),127);
-                payload=uploaded.get(old.id());
-            }
-            int instance=instances.size(); instances.add(new NativeRenderer.Instance(draw.x(),draw.y(),draw.z(),draw.visibility()));
-            int submesh=0;
-            for(int group=0;group<7;group++) if(payload.groupVertices[group]>0) {
-                if((draw.groupMask()&(1<<group))!=0) visibleItems.add(new NativeRenderer.Visible(draw.id(),submesh,order/64,instance,1));
-                submesh++;
-            }
-            order++; next.put(key,draw); usedIds.add(draw.id());
-        }
-        long[] removed=pendingRemovals.stream().filter(id->!usedIds.contains(id)).mapToLong(Long::longValue).toArray();
-        int capacity=indexCapacity;
-        if(needed>indexCapacity) {
-            capacity=Math.max(65536,Integer.highestOneBit(needed-1)<<1);
-            frame.indices=List.of(new NativeRenderer.Index(1,TerrainScene.quadIndices(capacity)));
-        }
-        if(anisotropy!=snapshot.anisotropy()) frame.materials=List.of(new NativeRenderer.Material(1,0,1,snapshot.anisotropy()));
-        frame.meshes=updates; frame.primitives=primitives; frame.visible=visibleItems; frame.instances=instances;
-        frame.removedMeshes=removed; frame.removedPrimitives=removed;
-        renderer.render(output,frame);
-        indexCapacity=capacity; anisotropy=snapshot.anisotropy(); uploaded.putAll(staged);
-        for(long id:removed) { pendingRemovals.remove(id); uploaded.remove(id); }
-        previous=next; sequence++; pending=false;
+        frame.flags=(snapshot.rgss?NativeRenderer.RGSS:0)|(profile?NativeRenderer.PROFILE:0);
+        frame.projection=snapshot.projection; frame.view=snapshot.view; frame.cameraBlock=snapshot.block;
+        frame.cameraFraction=snapshot.fraction; frame.fogColor=snapshot.fog; frame.fogDistances=snapshot.distances;
+        var buffer=renderer.frameBuffer(); residency.prepare(snapshot,buffer);
+        renderer.renderPrepared(output,frame);
+        residency.commit(); sequence++; pending=false;
         if(profile) {
-            uploadBytes+=used; prepareTimes[sampleCount]=prepareMs; drawTimes[sampleCount++]=(System.nanoTime()-start)/1e6;
+            uploadBytes+=residency.uploadBytes; prepareTimes[sampleCount]=prepareMs; drawTimes[sampleCount++]=(System.nanoTime()-start)/1e6;
             if(sampleCount==120) {
                 Arrays.sort(prepareTimes); Arrays.sort(drawTimes);
                 logger.info("Terrain CPU samples=120 input_ms_p50={} p95={} p99={} frame_ms_p50={} p95={} p99={} geometry_upload_bytes={} texture_copy_bytes={} visible={} resident={}",
-                    prepareTimes[60],prepareTimes[114],prepareTimes[118],drawTimes[60],drawTimes[114],drawTimes[118],uploadBytes,textureBytes,instances.size(),uploaded.size());
+                    prepareTimes[60],prepareTimes[114],prepareTimes[118],drawTimes[60],drawTimes[114],drawTimes[118],uploadBytes,textureBytes,buffer.visibleCount(),residency.residentCount());
                 sampleCount=0; uploadBytes=textureBytes=0;
             }
         }
@@ -170,6 +128,6 @@ public final class TerrainPreview implements AutoCloseable {
         textures.close(); textures=null; atlas=null; sequence=1; pending=false;
     }
     @Override public void close() {
-        closeInputs(); uploaded.clear(); previous.clear(); pendingRemovals.clear(); sourceEpoch=0;
+        closeInputs(); residency.reset(0); sourceEpoch=0;
     }
 }

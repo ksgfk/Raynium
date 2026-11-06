@@ -158,6 +158,15 @@ final class NativeBindings {
         java.util.Arrays.fill(layouts,ValueLayout.ADDRESS); layouts[pointers+1]=ValueLayout.JAVA_INT;
         return FunctionDescriptor.of(ValueLayout.JAVA_INT,layouts);
     }
+    static void callRenderFrame(MethodHandle method,MemorySegment renderer,MemorySegment target,
+                                MemorySegment frame,MemorySegment error,int errorCapacity) {
+        try {
+            error.set(ValueLayout.JAVA_BYTE,0,(byte)0);
+            int status=(int)method.invokeExact(renderer,target,frame,error,errorCapacity);
+            if(status!=0) throw new IllegalStateException("render frame: "+error.getString(0));
+        } catch(RuntimeException | Error failure) { throw failure; }
+        catch(Throwable failure) { throw new IllegalStateException("render frame",failure); }
+    }
     static void call(MethodHandle method, String operation, Object... arguments) {
         try(var arena=Arena.ofConfined()) {
             var error=arena.allocate(1024);

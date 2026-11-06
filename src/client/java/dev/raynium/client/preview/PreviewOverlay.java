@@ -105,6 +105,7 @@ public final class PreviewOverlay implements AutoCloseable {
                 throw new IllegalStateException("Main target is not a Vulkan texture");
             if(!terrain.draw(preview,drawn+1)) throw new IllegalStateException("Terrain input prepared without a matching world frame");
             drawn++;
+            dev.raynium.client.benchmark.BenchmarkSession.nativeFrame();
             encoder.waitSemaphore(imported.readySemaphore(), drawn, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
             var command = encoder.allocateAndBeginTransientCommandBuffer();
             imported.recordCopy(command, color.vkImage(), region.x(), region.y());

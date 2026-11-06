@@ -1,5 +1,6 @@
 #include <raynium/geometry_arena.h>
 #include <radray/logger.h>
+#include <radray/profiler.h>
 #include <algorithm>
 #include <iterator>
 
@@ -51,6 +52,7 @@ uint64_t GeometryArena::FreeBytes() const noexcept {    uint64_t bytes=0;
     return bytes;
 }
 std::optional<GeometryAllocation> GeometryArena::Allocate(uint32_t vertexCount,radray::string& error) {
+    RADRAY_PROFILE_SCOPE_N("Raynium.Arena.Allocate");
     if(!vertexCount) { error="Empty terrain geometry allocation"; return std::nullopt; }
     if(const auto found=_bySize.lower_bound({vertexCount,0,0}); found!=_bySize.end()) {
         const auto [count,index,first]=*found;
@@ -78,6 +80,7 @@ std::optional<GeometryAllocation> GeometryArena::Allocate(uint32_t vertexCount,r
     return GeometryAllocation(this,index,0,vertexCount);
 }
 void GeometryArena::Release(uint32_t index,uint32_t first,uint32_t count) noexcept {
+    RADRAY_PROFILE_SCOPE_N("Raynium.Arena.Release");
     auto& free=_blocks[index]->free;
     uint32_t start=first, length=count;
     auto next=free.lower_bound(first);
@@ -99,6 +102,7 @@ void GeometryArena::Release(uint32_t index,uint32_t first,uint32_t count) noexce
     _bySize.emplace(length,index,start);
 }
 bool GeometryArena::AddBlock(uint32_t vertices,radray::string& error) {
+    RADRAY_PROFILE_SCOPE_N("Raynium.Arena.AddBlock");
     auto block=radray::make_unique<Block>();
     const uint64_t bytes=uint64_t(vertices)*VertexStride;
     block->buffer=CreateBuffer(_device,bytes,MemoryType::Device,BufferUse::CopyDestination|BufferUse::Vertex);

@@ -18,6 +18,11 @@ CLIENT_STARTED 在渲染线程取得 MC Vulkan GPU 的 LUID/node mask 并创建 
 CLIENT_STOPPING 先关闭预览和取消挂接，再依次关闭 runtime、环境和 bridge DLL（包含静态分配器）。启动失败执行相同清理顺序；清理失败保留剩余所有者并记录为附带异常。
 资源重载、切换世界不重建设备。
 
+显式设置 `raynium.benchmark.config` 时，`BenchmarkSession` 注册客户端 tick 控制并通过
+`MinecraftBenchmarkMixin` 在帧提取前驱动旁观玩家路线；正常启动不注册控制。
+路线完成使用 `Minecraft.stop()` 进入既有退出流程。独立存档副本、采集与参数说明见
+[自动跑图与保存 Tracy](../guide/build-test.md#自动跑图与保存-tracy)。
+
 未选择 payload 且非 required 模式时记录提示并继续游戏；无效 payload、ABI 不匹配、runtime 创建失败
 仍由入口转为 MC 崩溃报告。CLIENT_STARTED 早于 Minecraft.run 的异常处理，入口显式调用 emergencySaveAndCrash。
 预览不可用属于单独的降级路径，不改变原有加载错误处理。
@@ -77,8 +82,8 @@ MC 非 Vulkan、显式关闭、能力不足、创建或导入失败时记录原�
 清理只在完成等待成功后释放资源；超时或 device lost 导致清理失败向上传播，保留活跃所有者，
 不把失败当作完成或继续卸载 DLL。
 
-## 当前边界与验证
+## 当前接入范围
 
 原版世界、手持物、后处理、GUI 和呈现继续执行。预览仅覆盖指定矩形，内容是 native GPU 绘制的 SOLID 地形。
 复用 MC 区块编译、采用和可见性，native 使用通用场景描述和统一提交，没有窗口接管；运行路径不经过 CPU 像素读回。
-开关、启动命令、实际环境和覆盖限制见[构建与测试](../guide/build-test.md)。
+开关、启动参数与现有测试覆盖见[构建与测试](../guide/build-test.md)。

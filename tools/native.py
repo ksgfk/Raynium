@@ -13,6 +13,9 @@ import tempfile
 import zipfile
 
 
+ABI_VERSION = 10
+
+
 def digest(path):
     checksum = hashlib.sha256()
     with path.open('rb') as stream:
@@ -77,7 +80,7 @@ def checked_dependencies(dll, environment):
                 'rn_create_render_target', 'rn_destroy_render_target', 'rn_create_shared_textures',
                 'rn_destroy_shared_textures', 'rn_render_frame'}
     if actual != expected:
-        raise RuntimeError(f'ABI 9 export mismatch: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}')
+        raise RuntimeError(f'ABI {ABI_VERSION} export mismatch: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}')
     text = run(['dumpbin', '/nologo', '/dependents', str(dll)], dll.parent, environment, True).stdout
     names = sorted(set(re.findall(r'^\s*([\w.-]+\.dll)\s*$', text, re.MULTILINE | re.IGNORECASE)))
     if not names:
@@ -130,7 +133,7 @@ def collect_licenses(radray, destination, profiler=False):
 
 def check_manifest(manifest):
     if (manifest.get('schemaVersion') != 1 or manifest.get('platform') != 'windows-x86_64'
-            or manifest.get('abiVersion') != 9 or manifest.get('abiInfoSize') != 240
+            or manifest.get('abiVersion') != ABI_VERSION or manifest.get('abiInfoSize') != 240
             or manifest.get('configuration') not in ('Debug', 'Release')
             or manifest.get('crt') != ('MTd' if manifest.get('configuration') == 'Debug' else 'MT')
             or not isinstance(manifest.get('radrayDirty'), bool)):

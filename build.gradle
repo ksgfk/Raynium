@@ -40,6 +40,17 @@ loom {
         clientNative {
             inherit client
             getJvmArguments().set(client.getJvmArguments())
+            if (providers.gradleProperty('benchmarkConfig').isPresent()) {
+                if (!providers.gradleProperty('benchmarkRunDir').isPresent()) {
+                    throw new GradleException('benchmarkConfig requires benchmarkRunDir')
+                }
+                runDir = file(providers.gradleProperty('benchmarkRunDir').get()).absolutePath
+                property 'raynium.benchmark.config', file(providers.gradleProperty('benchmarkConfig').get()).absolutePath
+                programArg '--gameDir'
+                programArg file(providers.gradleProperty('benchmarkRunDir').get()).absolutePath
+                programArg '--quickPlaySingleplayer'
+                programArg 'benchmark'
+            }
             configName = 'Minecraft Client (Raynium Native)'
             ideConfigGenerated = true
             property 'raynium.native.required', 'true'
@@ -84,6 +95,7 @@ tasks.withType(JavaCompile).configureEach {
 
 tasks.named('test', Test) {
     useJUnitPlatform { excludeTags 'native' }
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
 }
 
 apply from: 'gradle/native.gradle'

@@ -2,6 +2,7 @@ package dev.raynium.bridge;
 
 import java.lang.foreign.*;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
 import static java.lang.foreign.ValueLayout.*;
 
 /** Persistent scene owner. All frame arrays are borrowed only until render returns. */
@@ -13,7 +14,7 @@ public final class NativeRenderer implements AutoCloseable {
     public record Material(long id,int albedo,int light,int anisotropy) {}
     public record Primitive(long id,long mesh,long material) {}
     public record Instance(int x,int y,int z,float visibility) {}
-    public record Visible(long primitive,int submesh,int sortKey,int firstInstance,int instanceCount) {}
+    public record Visible(long primitive,int elementMask,int sortKey,int firstInstance,int instanceCount) {}
     public static final class Frame {
         public long epoch=1, outputSequence, inputSequence;
         public int flags,changedTextures;
@@ -28,6 +29,8 @@ public final class NativeRenderer implements AutoCloseable {
         public int[] cameraBlock=new int[3];
         private static float[] identity() { return new float[]{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1}; }
     }
+    private static final AtomicLong GENERATIONS=new AtomicLong();
+    private final NativeFrameBuffer frames=new NativeFrameBuffer();
     private final NativeRuntime owner;
     final NativeBindings bindings;
     private MemorySegment handle=MemorySegment.NULL;
@@ -42,7 +45,7 @@ public final class NativeRenderer implements AutoCloseable {
             var output=arena.allocate(ADDRESS);
             NativeBindings.call(bindings.createRenderer,"create renderer",runtime,desc,output);
             renderer.handle=output.get(ADDRESS,0); return renderer;
-        }
+        } catch(RuntimeException | Error failure) { renderer.frames.close(); throw failure; }
     }
     public NativeRenderTarget createTarget(int width,int height) {
         checkOpen(); if(target!=null) throw new IllegalStateException("Renderer already has a target");
@@ -89,64 +92,34 @@ public final class NativeRenderer implements AutoCloseable {
             }
         }
     }
-    public long nextEpoch() { checkOpen(); return ++lastEpoch; }
+    public static long nextFrameId() { return GENERATIONS.incrementAndGet(); }
+    public long nextEpoch() {
+        checkOpen();
+        return GENERATIONS.updateAndGet(value->Math.max(value,lastEpoch)+1);
+    }
+    public NativeFrameBuffer frameBuffer() { checkOpen(); return frames; }
     public void render(NativeRenderTarget target,Frame frame) {
+        checkTarget(target);
+        submit(target,frame,frames.marshal(frame));
+    }
+    /** Submits data written to frameBuffer since its most recent begin. */
+    public void renderPrepared(NativeRenderTarget target,Frame parameters) {
+        checkTarget(target);
+        submit(target,parameters,frames.finish(parameters));
+    }
+    private void checkTarget(NativeRenderTarget target) {
         checkOpen(); target.checkOpen();
         if(target.owner!=this) throw new IllegalArgumentException("Render target owner mismatch");
-        try(var arena=Arena.ofConfined()) {
-            NativeBindings.call(bindings.renderFrame,"render frame",handle,target.handle,marshal(arena,frame));
-            lastEpoch=Math.max(lastEpoch,frame.epoch);
-        }
     }
-    private static MemorySegment array(Arena arena,int count,int stride) {
-        return count==0?MemorySegment.NULL:arena.allocate((long)count*stride,8);
-    }
-    private static MemorySegment copy(Arena arena,MemorySegment source) {
-        if(source.byteSize()==0) return MemorySegment.NULL;
-        var result=arena.allocate(source.byteSize(),8); result.copyFrom(source); return result;
-    }
-    private static void floats(MemorySegment dest,long offset,float[] values,int count) {
-        if(values.length!=count) throw new IllegalArgumentException("Expected "+count+" floats");
-        MemorySegment.copy(MemorySegment.ofArray(values),0,dest,offset,count*4L);
-    }
-    static MemorySegment marshal(Arena a,Frame f) {
-        var s=a.allocate(344,8); s.set(JAVA_INT,0,344); s.set(JAVA_INT,4,f.flags);
-        s.set(JAVA_LONG,8,f.epoch); s.set(JAVA_LONG,16,f.outputSequence); s.set(JAVA_LONG,24,f.inputSequence);
-        var indices=array(a,f.indices.size(),24);
-        for(int i=0;i<f.indices.size();i++) {
-            var x=f.indices.get(i); long o=i*24L;
-            indices.set(JAVA_LONG,o,x.id()); indices.set(ADDRESS,o+8,copy(a,MemorySegment.ofArray(x.values()))); indices.set(JAVA_INT,o+16,x.values().length);
-        }
-        var meshes=array(a,f.meshes.size(),40);
-        for(int i=0;i<f.meshes.size();i++) {
-            var x=f.meshes.get(i); long o=i*40L;
-            if(x.vertexCount()*28L!=x.vertices().length) throw new IllegalArgumentException("Vertex byte count mismatch");
-            var ranges=array(a,x.submeshes().size(),16);
-            for(int j=0;j<x.submeshes().size();j++) { var r=x.submeshes().get(j); ranges.set(JAVA_INT,j*16L,r.first()); ranges.set(JAVA_INT,j*16L+4,r.count()); ranges.set(JAVA_INT,j*16L+8,r.baseVertex()); }
-            meshes.set(JAVA_LONG,o,x.id()); meshes.set(ADDRESS,o+8,copy(a,MemorySegment.ofArray(x.vertices()))); meshes.set(JAVA_LONG,o+16,x.index()); meshes.set(ADDRESS,o+24,ranges);
-            meshes.set(JAVA_INT,o+32,x.vertexCount()); meshes.set(JAVA_INT,o+36,x.submeshes().size());
-        }
-        var materials=array(a,f.materials.size(),24);
-        for(int i=0;i<f.materials.size();i++) { var x=f.materials.get(i); long o=i*24L; materials.set(JAVA_LONG,o,x.id()); materials.set(JAVA_INT,o+8,x.albedo()); materials.set(JAVA_INT,o+12,x.light()); materials.set(JAVA_INT,o+16,x.anisotropy()); materials.set(JAVA_INT,o+20,0); }
-        var primitives=array(a,f.primitives.size(),24);
-        for(int i=0;i<f.primitives.size();i++) { var x=f.primitives.get(i); long o=i*24L; primitives.set(JAVA_LONG,o,x.id()); primitives.set(JAVA_LONG,o+8,x.mesh()); primitives.set(JAVA_LONG,o+16,x.material()); }
-        var visible=array(a,f.visible.size(),24);
-        for(int i=0;i<f.visible.size();i++) { var x=f.visible.get(i); long o=i*24L; visible.set(JAVA_LONG,o,x.primitive()); visible.set(JAVA_INT,o+8,x.submesh()); visible.set(JAVA_INT,o+12,x.sortKey()); visible.set(JAVA_INT,o+16,x.firstInstance()); visible.set(JAVA_INT,o+20,x.instanceCount()); }
-        var instances=array(a,f.instances.size(),16);
-        for(int i=0;i<f.instances.size();i++) { var x=f.instances.get(i); long o=i*16L; instances.set(JAVA_INT,o,x.x()); instances.set(JAVA_INT,o+4,x.y()); instances.set(JAVA_INT,o+8,x.z()); instances.set(JAVA_FLOAT,o+12,x.visibility()); }
-        var arrays=new MemorySegment[]{indices,meshes,materials,primitives,copy(a,MemorySegment.ofArray(f.removedMeshes)),copy(a,MemorySegment.ofArray(f.removedPrimitives)),copy(a,MemorySegment.ofArray(f.removedMaterials)),copy(a,MemorySegment.ofArray(f.removedIndices)),visible,instances};
-        int[] counts={f.indices.size(),f.meshes.size(),f.materials.size(),f.primitives.size(),f.removedMeshes.length,f.removedPrimitives.length,f.removedMaterials.length,f.removedIndices.length,f.visible.size(),f.instances.size()};
-        for(int i=0;i<10;i++) { s.set(ADDRESS,32+i*8L,arrays[i]); s.set(JAVA_INT,112+i*4L,counts[i]); }
-        s.set(JAVA_INT,152,f.changedTextures); floats(s,160,f.projection,16); floats(s,224,f.view,16);
-        if(f.cameraBlock.length!=3) throw new IllegalArgumentException("Expected three camera coordinates");
-        MemorySegment.copy(MemorySegment.ofArray(f.cameraBlock),0,s,288,12);
-        floats(s,300,f.cameraFraction,3); floats(s,312,f.fogColor,4); floats(s,328,f.fogDistances,4); return s;
+    private void submit(NativeRenderTarget target,Frame parameters,MemorySegment descriptor) {
+        NativeBindings.callRenderFrame(bindings.renderFrame,handle,target.handle,descriptor,frames.error(),1024);
+        lastEpoch=Math.max(lastEpoch,parameters.epoch);
     }
     void checkOpen() { owner.checkOpen(); if(handle.equals(MemorySegment.NULL)) throw new IllegalStateException("Renderer is closed"); }
     void checkThread() { owner.checkThread(); }
     @Override public void close() {
         checkThread(); if(handle.equals(MemorySegment.NULL)) return;
         if(target!=null || textures!=null) throw new IllegalStateException("Close target and shared textures before renderer");
-        NativeBindings.call(bindings.destroyRenderer,"destroy renderer",handle); handle=MemorySegment.NULL; owner.releasedRenderer(this);
+        NativeBindings.call(bindings.destroyRenderer,"destroy renderer",handle); handle=MemorySegment.NULL; frames.close(); owner.releasedRenderer(this);
     }
 }

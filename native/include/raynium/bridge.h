@@ -7,7 +7,7 @@
 #else
 #define RAYNIUM_API __declspec(dllimport)
 #endif
-#define RN_ABI_VERSION 9u
+#define RN_ABI_VERSION 10u
 
 struct rn_runtime;
 struct rn_renderer;
@@ -108,7 +108,8 @@ struct rn_mesh_update {
 struct rn_material_update { uint64_t id; uint32_t albedo_texture, light_texture, anisotropy, reserved; };
 struct rn_primitive_update { uint64_t id, mesh, material; };
 struct rn_instance { int32_t origin[3]; float visibility; };
-struct rn_visible_item { uint64_t primitive; uint32_t submesh, sort_key, first_instance, instance_count; };
+// element_mask is nonzero; bit k selects submesh k, UINT32_MAX selects all submeshes.
+struct rn_visible_item { uint64_t primitive; uint32_t element_mask, sort_key, first_instance, instance_count; };
 struct rn_render_frame_desc {
     uint32_t struct_size, flags;
     uint64_t epoch, output_sequence, input_sequence;

@@ -11,7 +11,7 @@ class NativeManifestTest {
     private JsonObject manifest(String configuration) {
         JsonObject object = new JsonObject();
         object.addProperty("schemaVersion", 1);
-        object.addProperty("abiVersion", 9);
+        object.addProperty("abiVersion", NativeManifest.ABI_VERSION);
         object.addProperty("abiInfoSize", 240);
         object.addProperty("platform", "windows-x86_64");
         object.addProperty("configuration", configuration);
@@ -43,11 +43,12 @@ class NativeManifestTest {
         assertEquals(configuration.equals("Debug") ? "MTd" : "MT", parsed.crt());
     }
 
-    @ParameterizedTest @ValueSource(strings = {"schema", "MD", "MDd", "MTd", "debug-mt", "missing", "extra", "path", "hash"})
+    @ParameterizedTest @ValueSource(strings = {"schema", "old-abi", "MD", "MDd", "MTd", "debug-mt", "missing", "extra", "path", "hash"})
     void rejectsIncompatibleOrUnsafePayload(String mutation) {
         var object = manifest("Release");
         var files = object.getAsJsonArray("files");
         switch (mutation) {
+            case "old-abi" -> object.addProperty("abiVersion", 9);
             case "schema" -> object.addProperty("schemaVersion", 2);
             case "MD", "MDd", "MTd" -> object.addProperty("crt", mutation);
             case "debug-mt" -> object.addProperty("configuration", "Debug");

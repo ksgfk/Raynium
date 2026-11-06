@@ -4,26 +4,24 @@
 
 # Minecraft 26.3 渲染流程
 
-基线为 Raynium 使用 Loom 生成的 Minecraft 26.3 源码。Raynium 当前能力见[架构地图](overview.md)，已有模组调查版本的注入点见[接入调研](integration-references.md)。
+本文说明 Raynium 当前依赖 Minecraft 26.3 的渲染 API 与调用顺序。Raynium 的接入实现见[Minecraft 接入](minecraft-integration.md)。
 
 ## 版本和源码位置
 
 26.3 的 GPU 抽象主要位于 `com.mojang.renderpearl`。部分窗口、状态入口和帧图设施仍位于 `com.mojang.blaze3d`。窗口实现使用 SDL；不能直接沿用旧版模组的 GLFW 句柄和注入描述符。
 
-调查时使用的本机解包目录为 `.gradle/mc-source-26.3/client/` 和 `common/`。它们是忽略提交的阅读缓存；在其他机器上按 [开发环境](../guide/dev-environment.md#阅读-minecraft-源码) 生成并附加对应版本源码。下面行号对应 2026-10-26 调查时生成的源码，重新生成后优先通过类和方法定位。
+源码由当前工程的 Loom 依赖生成，获取与附加方法见[开发环境](../guide/dev-environment.md#阅读-minecraft-源码)。下文以类和方法定位，不依赖个人解包目录或旧行号。
 
 ## 初始化
 
 `Minecraft` 构造过程中从 `PreferredGraphicsApi.getBackendsToTry()` 取得后端候选，创建窗口和设备，安装到 `RenderSystem`，然后通过设备创建窗口 surface。
 
-| 入口 | 当前行号 | 职责 |
-| --- | --- | --- |
-| `Minecraft.java` | 488 | 后端候选选择 |
-| 同上 | 528 | `RenderSystem.initRenderer(device)` |
-| 同上 | 552 | `device.createSurface(window.handle(), ...)` |
-| `PreferredGraphicsApi.java` | 32 | 返回 OpenGL/Vulkan 后端候选 |
-| `GpuBackend.java` | 类入口 | 库加载/卸载、窗口创建、设备创建 |
-| `Window.java` | 类入口 | SDL 窗口与事件相关操作 |
+| 类 / 方法 | 职责 |
+| --- | --- |
+| `Minecraft.<init>` | 选择后端候选，调用 `RenderSystem.initRenderer(device)`，通过 `device.createSurface` 创建 surface |
+| `PreferredGraphicsApi.getBackendsToTry` | 返回 OpenGL/Vulkan 后端候选 |
+| `GpuBackend` | 库加载/卸载、窗口创建、设备创建 |
+| `Window` | SDL 窗口与事件相关操作 |
 
 `PreferredGraphicsApi.DEFAULT` 和 `OPENGL` 均先尝试 OpenGL，再尝试 Vulkan；`VULKAN` 的尝试顺序相反。实际设备由成功创建的后端决定。
 
@@ -50,23 +48,23 @@ Minecraft.renderFrame
   帧结束处理
 ```
 
-| 类与方法 | 行号 | 阅读重点 |
-| --- | --- | --- |
-| `Minecraft.renderFrame` | 1292 | 一帧调度；1353 extract，1376 render，1415 submit，1418 present |
-| `GameRenderer.extract` | 436 | 准备帧状态 |
-| 同文件 `render` | 463 | 世界、手持物、效果和 GUI 的组织；505 GUI 绘制 |
-| 同文件 `renderLevel` | 628 | 世界渲染调用边界 |
-| `LevelExtractor.extract` | 108 | 提取世界相机、实体、方块实体、天空、天气、粒子等状态 |
-| `LevelRenderer.render` | 185 | 世界帧图及与渲染耦合的维护 |
+| 类与方法 | 职责 |
+| --- | --- |
+| `Minecraft.renderFrame` | 按 extract、render、submit、present 顺序调度一帧 |
+| `GameRenderer.extract` | 准备帧状态 |
+| `GameRenderer.render` | 组织世界、手持物、画面效果和 GUI |
+| `GameRenderer.renderLevel` | 世界渲染调用边界 |
+| `LevelExtractor.extract` | 提取世界相机、实体、方块实体、天空、天气、粒子等状态 |
+| `LevelRenderer.render` | 世界帧图及与渲染耦合的维护 |
 
 ## 世界渲染和维护工作
 
-`LevelRenderer.render` 从 208 行附近建立 FrameGraph，安排清理、天空、主场景及相关特性；世界渲染存在不同透明路径，不能假定只有一个固定的不透明/透明 pass 序列。
+`LevelRenderer.render` 建立 FrameGraph，安排清理、天空、主场景及相关特性；世界渲染存在不同透明路径，不能假定只有一个固定的不透明/透明 pass 序列。
 
 该方法后部还执行：
 
-- 297 行附近的 `compileSections`；
-- 302 行附近的地形上传，最终调用 `SectionRenderDispatcher.uploadTerrainBuffersToGpu`；
+- `LevelRenderer.compileSections`；
+- 地形上传，最终调用 `SectionRenderDispatcher.uploadTerrainBuffersToGpu`；
 - 与可见性、区块状态和加载完成相关的维护。
 
 世界维护代码与 GPU 绘制位于同一方法中，方法整体取消也会跳过这些维护调用。
@@ -84,7 +82,7 @@ Minecraft.renderFrame
   → 世界地形绘制
 ```
 
-关键入口是 `SectionCompiler.compile:53` 和 `SectionRenderDispatcher.uploadTerrainBuffersToGpu:141`。
+关键入口是 `SectionCompiler.compile` 和 `SectionRenderDispatcher.uploadTerrainBuffersToGpu`。
 
 `SectionCompiler.compile` 产生 `Results` 与各层 `MeshData`。`SectionRenderDispatcher.CompileTask.doTask` 消费结果、构造 `CompiledSectionMesh`、进入 UberBuffer 并关闭 MeshData。`DefaultVertexFormat.BLOCK` 包含 Position、Color、UV0、UV2，没有 Normal 属性。
 
@@ -100,13 +98,13 @@ Minecraft.renderFrame
   → 几何准备、分组、上传与绘制
 ```
 
-关键入口为 `FeatureRenderDispatcher.prepareFrame:58`。
+关键入口为 `FeatureRenderDispatcher.prepareFrame`。
 
 `ModelFeatureRenderer.prepareModel` 执行 pose 设置、UV/decal 包装、`model.setupAnim(state)` 和 `model.renderToBuffer(...)`。`FeatureRenderDispatcher.prepareFrame` 还包含 staged vertex buffer 上传，`RenderTypeFeatureRenderer.Group` 会调用 `RenderType.prepare()`；这些不是纯 CPU 数据提取入口。
 
 ## RenderState 生命周期
 
-`GameRenderState` 与 `LevelRenderState` 是可变并会复用的数据；后者的 `reset` 位于 36 行。
+`GameRenderState` 与 `LevelRenderState` 是可变并会复用的数据；`LevelRenderState.reset` 清理其帧状态。
 
 当前 `renderFrame` 中 extract 和 render 按顺序调用。`LevelRenderer.submitFeatures` 在提交后清空实体和方块实体 RenderState 列表；这些对象和列表不是跨帧不可变快照。Raynium 当前没有接收这些对象的 native 接口。
 
@@ -130,7 +128,7 @@ MC 的 uniform 类别含 combined image sampler。Raynium 没有自定义 Render
 
 ## 纹理、主目标与最终输出
 
-以下是 2026-10-26 RT 调查核对的 MC 26.3 API 行为，不表示 Raynium 已有纹理传输或叠加实现。
+下表描述当前依赖版本的原版 API；Raynium 的共享输入与输出协议见[地形预览](terrain-preview.md)。
 
 | 类/方法 | 源码行为 |
 | --- | --- |
@@ -147,7 +145,7 @@ MC 的 uniform 类别含 combined image sampler。Raynium 没有自定义 Render
 | `RenderPassDescriptor` | 颜色附件可指定空 clearValue；render area 与 scissor 限制写入范围 |
 | GL/Vulkan render pass | viewport 覆盖整个附件，render area 不把全屏纹理自动缩放到局部矩形 |
 
-原版 `Screenshot.grab(Minecraft, ...)` 使用 main render target，帧末 Tracy capture 也读取该目标。
+原版 `Screenshot.grab(Minecraft, ...)` 使用 main render target，MC 自身的帧末 Tracy capture 也读取该目标。
 `GameRenderer` 内部的截图发生在最终 surface blit 之前；不同读取点对应不同阶段的目标内容。
 
 ## 动画纹理、光照与 GUI
@@ -157,5 +155,3 @@ MC 的 uniform 类别含 combined image sampler。Raynium 没有自定义 Render
 
 `GuiRenderer.addElementToMesh` 取得 pipeline、纹理、scissor 并调用 `GuiElementRenderState.buildVertices`。
 `GuiRenderer.prepare` 处理 picture-in-picture、物品 atlas 与文字，再区分 BEFORE_BLUR / AFTER_BLUR；原版 GUI 包含离屏预览与模糊边界。
-
-由上述事实推演的接入候选和显示方案见[思考历史](../history/2026-10-26-rendering-design-notes.md#当时的-minecraft-接入草案)。

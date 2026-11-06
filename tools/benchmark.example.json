@@ -1,0 +1,23 @@
+{
+  "tracyCapture": "F:/program/tracy/tracy-capture.exe",
+  "world": "../run/saves/新的世界",
+  "optionsFile": "../run/options.txt",
+  "outputDir": "../build/benchmarks",
+  "backend": "d3d12",
+  "terrainProfile": true,
+  "jfrEnabled": true,
+  "warmupSeconds": 20,
+  "startupTimeoutSeconds": 180,
+  "shutdownTimeoutSeconds": 60,
+  "captureTimeoutSeconds": 120,
+  "width": 1280,
+  "height": 720,
+  "renderDistance": 32,
+  "simulationDistance": 8,
+  "route": [
+    { "seconds": 0,  "x": 0,   "y": 100, "z": 0,   "yaw": 0,   "pitch": 25 },
+    { "seconds": 20, "x": 0,   "y": 100, "z": 320, "yaw": 0,   "pitch": 25 },
+    { "seconds": 40, "x": 320, "y": 100, "z": 320, "yaw": -90, "pitch": 25 },
+    { "seconds": 60, "x": 320, "y": 100, "z": 0,   "yaw": 180, "pitch": 25 }
+  ]
+}

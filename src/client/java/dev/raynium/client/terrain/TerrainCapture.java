@@ -1,67 +1,104 @@
 package dev.raynium.client.terrain;
 
 import net.minecraft.client.renderer.LevelRenderer;
+import net.minecraft.client.renderer.chunk.CompiledSectionMesh;
 import net.minecraft.client.renderer.state.OptionsRenderState;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.util.Util;
 import org.joml.Matrix4f;
-import java.util.*;
+import org.joml.Vector4f;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class TerrainCapture {
     public static final boolean ENABLED=Boolean.parseBoolean(System.getProperty("raynium.preview.enabled","true"));
     private static final AtomicLong EPOCH=new AtomicLong(1);
-    private static final ConcurrentLinkedQueue<Long> REMOVED=new ConcurrentLinkedQueue<>();
-    private static Matrix4f projection;
-    private static Snapshot snapshot;
+    private static final ConcurrentLinkedQueue<MeshPayload> REMOVED=new ConcurrentLinkedQueue<>();
+    private static final Buffer BUFFER=new Buffer();
+    private static final Matrix4f capturedProjection=new Matrix4f(),inverseView=new Matrix4f();
+    private static final Vector4f eye=new Vector4f();
+    private static boolean hasProjection,hasSnapshot;
     private static volatile boolean active;
-    public static boolean active() { return ENABLED && active; }
-    public static void activate(boolean value) { active=value; if(!value) { snapshot=null; REMOVED.clear(); } }
-    public record Draw(long id,int x,int y,int z,float visibility,int groupMask) {}
-    public record Visible(MeshPayload payload, Draw draw) {}
-    public record Snapshot(long epoch, List<Visible> visible, float[] projection, float[] view,
-                           int[] block, float[] fraction, float[] fog, float[] distances, boolean rgss, int anisotropy) {}
-    public static long epoch() { return EPOCH.get(); }
-    public static void invalidate() { EPOCH.incrementAndGet(); snapshot=null; }
-    public static void beginFrame() { snapshot=null; projection=null; }
-    public static void projection(Matrix4f value) { if(active()) projection=new Matrix4f(value); }
-    public static void removed(MeshPayload payload) { if(active() && payload!=null) REMOVED.add(payload.id); }
-    public static long[] drainRemoved() {
-        var removed=new ArrayList<Long>(); Long value;
-        while((value=REMOVED.poll())!=null) removed.add(value);
-        return removed.stream().mapToLong(Long::longValue).toArray();
+
+    /** Borrowed on the render thread until beginFrame, invalidation or the next capture. */
+    static final class Buffer {
+        MeshPayload[] payloads=new MeshPayload[1024];
+        int[] originX=new int[1024],originY=new int[1024],originZ=new int[1024];
+        float[] visibility=new float[1024];
+        int[] elementMask=new int[1024],distKey=new int[1024];
+        int count;
+        long epoch;
+        final float[] projection=new float[16],view=new float[16],fraction=new float[3],fog=new float[4],distances=new float[4];
+        final int[] block=new int[3];
+        boolean rgss;
+        int anisotropy;
+        void put(int i,MeshPayload payload,int x,int y,int z,float fade,int mask,int distance) {
+            if(i>=payloads.length) {
+                int capacity=Math.max(i+1,payloads.length*2);
+                payloads=Arrays.copyOf(payloads,capacity);
+                originX=Arrays.copyOf(originX,capacity); originY=Arrays.copyOf(originY,capacity); originZ=Arrays.copyOf(originZ,capacity);
+                visibility=Arrays.copyOf(visibility,capacity); elementMask=Arrays.copyOf(elementMask,capacity); distKey=Arrays.copyOf(distKey,capacity);
+            }
+            payloads[i]=payload; originX[i]=x; originY[i]=y; originZ[i]=z;
+            visibility[i]=fade; elementMask[i]=mask; distKey[i]=distance;
+        }
+        void finish(int size) { if(size<count) Arrays.fill(payloads,size,count,null); count=size; }
+        void clear() { finish(0); }
     }
-    public static Snapshot snapshot() { return snapshot; }
-    public static void capture(LevelRenderer renderer, CameraRenderState camera, OptionsRenderState options) {
-        if(!active() || projection==null) return;
-        long epoch=epoch(), now=Util.getMillis(), fade=Util.toMillis(options.chunkSectionFadeInTime);
-        var visible=new ArrayList<Visible>();
-        var eye=new org.joml.Vector4f(0,0,1,0);
-        new Matrix4f(projection).mul(camera.viewRotationMatrix).invert().transform(eye);
+    public static boolean active() { return ENABLED && active; }
+    public static void activate(boolean value) { active=value; if(!value) { clear(); REMOVED.clear(); } }
+    public static long epoch() { return EPOCH.get(); }
+    private static void clear() { BUFFER.clear(); hasSnapshot=hasProjection=false; }
+    public static void invalidate() { EPOCH.incrementAndGet(); clear(); REMOVED.clear(); }
+    public static void beginFrame() { clear(); }
+    public static void projection(Matrix4f value) { if(active()) { capturedProjection.set(value); hasProjection=true; } }
+    public static void removed(MeshPayload payload) { if(active() && payload!=null) REMOVED.add(payload); }
+    public static void drainRemoved(Collection<MeshPayload> target) {
+        MeshPayload value;
+        while((value=REMOVED.poll())!=null) target.add(value);
+    }
+    static Buffer snapshot() { return hasSnapshot?BUFFER:null; }
+    public static void capture(LevelRenderer renderer,CameraRenderState camera,OptionsRenderState options) {
+        if(!active() || !hasProjection) return;
+        long epoch=epoch(),now=Util.getMillis(),fade=Util.toMillis(options.chunkSectionFadeInTime);
+        eye.set(0,0,1,0);
+        inverseView.set(capturedProjection).mul(camera.viewRotationMatrix).invert().transform(eye);
         boolean cull=!Boolean.getBoolean("raynium.terrain.disableFaceCull") && Float.isFinite(eye.w) && Math.abs(eye.w)>1e-8f;
         if(cull) eye.div(eye.w);
         var dispatcher=renderer.sectionRenderDispatcher();
         if(dispatcher==null) return;
+        int count=0;
         dispatcher.lock();
         try {
-            for(var section:renderer.visibleSections()) {
-                if(!(section.getSectionMesh() instanceof PayloadOwner owner)) continue;
+            var sections=renderer.visibleSections();
+            for(int i=0;i<sections.size();i++) {
+                var section=sections.get(i); var mesh=section.getSectionMesh();
+                if(mesh==CompiledSectionMesh.EMPTY || mesh==CompiledSectionMesh.UNCOMPILED || !(mesh instanceof PayloadOwner owner)) continue;
                 var payload=owner.raynium$payload();
                 if(payload==null || payload.epoch!=epoch) continue;
-                var origin=section.getRenderOrigin();
-                int mask=cull ? payload.visibleGroups(camera.pos.x-origin.getX()+eye.x,camera.pos.y-origin.getY()+eye.y,camera.pos.z-origin.getZ()+eye.z) : 127;
-                visible.add(new Visible(payload,new Draw(payload.id,origin.getX(),origin.getY(),origin.getZ(),section.getVisibility(now,fade),mask)));
+                var origin=section.getRenderOrigin(); int x=origin.getX(),y=origin.getY(),z=origin.getZ();
+                int mask=cull?payload.visibleElementMask(camera.pos.x-x+eye.x,camera.pos.y-y+eye.y,camera.pos.z-z+eye.z):payload.allElementMask;
+                double dx=x+8.0-camera.pos.x,dy=y+8.0-camera.pos.y,dz=z+8.0-camera.pos.z;
+                int distance=distanceKey(dx*dx+dy*dy+dz*dz);
+                BUFFER.put(count++,payload,x,y,z,section.getVisibility(now,fade),mask,distance);
             }
         } finally { dispatcher.unlock(); }
-        visible.sort(Comparator.comparingDouble(v -> {
-            var draw=v.draw(); double x=draw.x()+8.0-camera.pos.x,y=draw.y()+8.0-camera.pos.y,z=draw.z()+8.0-camera.pos.z;
-            return x*x+y*y+z*z;
-        }));
+        BUFFER.finish(count); BUFFER.epoch=epoch;
+        capturedProjection.get(BUFFER.projection); camera.viewRotationMatrix.get(BUFFER.view);
         var p=camera.pos; var b=camera.blockPos; var f=camera.fogData;
-        snapshot=new Snapshot(epoch,List.copyOf(visible),projection.get(new float[16]),camera.viewRotationMatrix.get(new float[16]),
-            new int[]{b.getX(),b.getY(),b.getZ()},new float[]{(float)(p.x-b.getX()),(float)(p.y-b.getY()),(float)(p.z-b.getZ())},
-            new float[]{f.color.x,f.color.y,f.color.z,f.color.w},new float[]{f.environmentalStart,f.environmentalEnd,f.renderDistanceStart,f.renderDistanceEnd},options.textureFiltering==net.minecraft.client.TextureFilteringMethod.RGSS,
-            options.textureFiltering==net.minecraft.client.TextureFilteringMethod.ANISOTROPIC?options.maxAnisotropyValue:1);
+        BUFFER.block[0]=b.getX(); BUFFER.block[1]=b.getY(); BUFFER.block[2]=b.getZ();
+        BUFFER.fraction[0]=(float)(p.x-b.getX()); BUFFER.fraction[1]=(float)(p.y-b.getY()); BUFFER.fraction[2]=(float)(p.z-b.getZ());
+        BUFFER.fog[0]=f.color.x; BUFFER.fog[1]=f.color.y; BUFFER.fog[2]=f.color.z; BUFFER.fog[3]=f.color.w;
+        BUFFER.distances[0]=f.environmentalStart; BUFFER.distances[1]=f.environmentalEnd;
+        BUFFER.distances[2]=f.renderDistanceStart; BUFFER.distances[3]=f.renderDistanceEnd;
+        BUFFER.rgss=options.textureFiltering==net.minecraft.client.TextureFilteringMethod.RGSS;
+        BUFFER.anisotropy=options.textureFiltering==net.minecraft.client.TextureFilteringMethod.ANISOTROPIC?options.maxAnisotropyValue:1;
+        hasSnapshot=true;
+    }
+    static int distanceKey(double squared) {
+        float distance=(float)squared;
+        return Float.floatToRawIntBits(Float.isNaN(distance)?Float.POSITIVE_INFINITY:Math.max(0,distance));
     }
 }

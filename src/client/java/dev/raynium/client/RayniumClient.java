@@ -27,6 +27,7 @@ public final class RayniumClient implements ClientModInitializer {
         prepare(logger);
         ClientLifecycleEvents.CLIENT_STARTED.register(client -> start(client, logger));
         ClientLifecycleEvents.CLIENT_STOPPING.register(this::closeNative);
+        dev.raynium.client.benchmark.BenchmarkSession.register();
     }
 
     private void prepare(Logger logger) {

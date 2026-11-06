@@ -58,6 +58,8 @@ static_assert(sizeof(rn_material_update)==24);
 static_assert(offsetof(rn_material_update,albedo_texture)==8 && offsetof(rn_material_update,reserved)==20);
 static_assert(sizeof(rn_primitive_update)==24);
 static_assert(sizeof(rn_visible_item)==24);
+static_assert(offsetof(rn_visible_item,primitive)==0 && offsetof(rn_visible_item,element_mask)==8);
+static_assert(offsetof(rn_visible_item,sort_key)==12 && offsetof(rn_visible_item,first_instance)==16 && offsetof(rn_visible_item,instance_count)==20);
 static_assert(sizeof(rn_render_frame_desc)==344);
 static_assert(offsetof(rn_render_frame_desc,projection)==160);
 static_assert(offsetof(rn_render_frame_desc,indices)==32);

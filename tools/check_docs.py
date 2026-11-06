@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Check current Raynium documentation, project skills and source doc references.
 
-Only Git-tracked and non-ignored new files participate. History references retain
-their recorded baseline. Web URLs and Markdown fragments are not validated.
+Only Git-tracked and non-ignored new files participate. Historical records retain
+their original references; the history index is checked as current navigation.
+Web URLs and Markdown fragments are not validated.
 Run from any directory with: python tools/check_docs.py
 """
 
@@ -33,7 +34,7 @@ def check(root: Path, files: list[Path]) -> tuple[list[str], dict[str, int]]:
     code_extensions = {'.java', '.h', '.hpp', '.cpp', '.c', '.hlsl', '.hlsli'}
     doc_pattern = re.compile(r'(?<![/\w.-])doc/[A-Za-z0-9_./-]+\.md')
     link_pattern = re.compile(r'\[[^\]]*\]\(([^)]+)\)')
-    for entry in ('AGENTS.md', 'README.md', 'doc/architecture/overview.md',
+    for entry in ('AGENTS.md', 'README.md', 'doc/architecture/overview.md', 'doc/history/README.md',
                   'doc/guide/documentation.md', '.agents/skills/raynium-doc/SKILL.md'):
         if entry not in known:
             errors.append(f'missing required entry: {entry}')
@@ -42,7 +43,8 @@ def check(root: Path, files: list[Path]) -> tuple[list[str], dict[str, int]]:
         relative = path.relative_to(root)
         label = relative.as_posix()
         in_doc = relative.parts[0] == 'doc'
-        history = in_doc and len(relative.parts) > 1 and relative.parts[1] == 'history'
+        history = (in_doc and len(relative.parts) > 1 and relative.parts[1] == 'history'
+                   and label != 'doc/history/README.md')
         if in_doc and (len(relative.parts) < 3 or relative.parts[1] not in {'architecture', 'guide', 'history'}):
             errors.append(f'{label}: doc only contains architecture/, guide/ and history/')
         if history:

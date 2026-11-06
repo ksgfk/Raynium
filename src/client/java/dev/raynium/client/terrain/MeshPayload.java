@@ -11,25 +11,36 @@ public final class MeshPayload {
     public final long epoch;
     public final byte[] vertices;
     public final int[] groupVertices=new int[7];
-    private final float[] minimum={Float.POSITIVE_INFINITY,Float.POSITIVE_INFINITY,Float.POSITIVE_INFINITY};
-    private final float[] maximum={Float.NEGATIVE_INFINITY,Float.NEGATIVE_INFINITY,Float.NEGATIVE_INFINITY};
+    public final int allElementMask;
+    private final long groupElementBits;
+    private final float minX,minY,minZ,maxX,maxY,maxZ;
+    private final boolean finiteBounds;
+    // Render-thread state; epochs and frame IDs are globally unique across preview owners.
+    public long uploadedEpoch,stagedFrame,lastActiveFrame,sectionKey;
     public MeshPayload(long epoch, ByteBuffer source) {
         this.epoch=epoch;
-        byte[] original=new byte[source.remaining()]; source.duplicate().get(original);
-        if(original.length%112!=0) throw new IllegalArgumentException("SOLID mesh is not a 28-byte quad stream");
-        var data=ByteBuffer.wrap(original).order(ByteOrder.nativeOrder());
-        int[] groups=new int[original.length/112];
+        var data=source.slice().order(ByteOrder.nativeOrder());
+        if(data.remaining()%112!=0) throw new IllegalArgumentException("SOLID mesh is not a 28-byte quad stream");
+        float lx=Float.POSITIVE_INFINITY,ly=lx,lz=lx,hx=Float.NEGATIVE_INFINITY,hy=hx,hz=hx;
+        int[] groups=new int[data.remaining()/112];
         for(int q=0;q<groups.length;q++) {
-            for(int v=0;v<4;v++) for(int axis=0;axis<3;axis++) {
-                float p=data.getFloat(q*112+v*28+axis*4);
-                minimum[axis]=Math.min(minimum[axis],p); maximum[axis]=Math.max(maximum[axis],p);
+            for(int v=0;v<4;v++) {
+                int o=q*112+v*28;
+                float x=data.getFloat(o),y=data.getFloat(o+4),z=data.getFloat(o+8);
+                lx=Math.min(lx,x); ly=Math.min(ly,y); lz=Math.min(lz,z);
+                hx=Math.max(hx,x); hy=Math.max(hy,y); hz=Math.max(hz,z);
             }
             groups[q]=group(data,q*112); groupVertices[groups[q]]+=4;
         }
         int[] offsets=new int[7];
         for(int i=1;i<7;i++) offsets[i]=offsets[i-1]+groupVertices[i-1]*28;
-        vertices=new byte[original.length];
-        for(int q=0;q<groups.length;q++) { int g=groups[q]; System.arraycopy(original,q*112,vertices,offsets[g],112); offsets[g]+=112; }
+        vertices=new byte[data.remaining()];
+        for(int q=0;q<groups.length;q++) { int g=groups[q]; data.get(q*112,vertices,offsets[g],112); offsets[g]+=112; }
+        minX=lx; minY=ly; minZ=lz; maxX=hx; maxY=hy; maxZ=hz;
+        finiteBounds=Float.isFinite(lx)&&Float.isFinite(ly)&&Float.isFinite(lz)&&Float.isFinite(hx)&&Float.isFinite(hy)&&Float.isFinite(hz);
+        long bits=0; int elements=0;
+        for(int g=0;g<7;g++) if(groupVertices[g]>0) bits|=(1L<<elements++)<<(g*8);
+        groupElementBits=bits; allElementMask=(1<<elements)-1;
     }
     // Only exactly planar, consistently wound axis-aligned quads enter a cullable group.
     private static int group(ByteBuffer data,int offset) {
@@ -48,13 +59,16 @@ public final class MeshPayload {
         }
         return 6;
     }
-    public int visibleGroups(double x,double y,double z) {
-        double[] eye={x,y,z}; int mask=127;
-        for(int a=0;a<3;a++) {
-            if(!Double.isFinite(eye[a]) || !Float.isFinite(minimum[a]) || !Float.isFinite(maximum[a])) return 127;
-            if(eye[a]<minimum[a]-0.001) mask &= ~(1<<(a*2));
-            if(eye[a]>maximum[a]+0.001) mask &= ~(1<<(a*2+1));
-        }
+    public int visibleElementMask(double x,double y,double z) {
+        if(!finiteBounds || !Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)) return allElementMask;
+        int mask=element(6);
+        if(x>=minX-0.001) mask|=element(0);
+        if(x<=maxX+0.001) mask|=element(1);
+        if(y>=minY-0.001) mask|=element(2);
+        if(y<=maxY+0.001) mask|=element(3);
+        if(z>=minZ-0.001) mask|=element(4);
+        if(z<=maxZ+0.001) mask|=element(5);
         return mask;
     }
+    private int element(int group) { return (int)(groupElementBits>>>(group*8))&0x7f; }
 }

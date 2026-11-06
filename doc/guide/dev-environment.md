@@ -1,6 +1,6 @@
 > - 适用: 配置 Java/IDEA、生成和阅读 MC 源码
 > - 权威: 本文维护开发环境和源码获取方法；native 依赖、构建与测试见构建指南
-> - 锚点: `gradle.properties`, `gradle/wrapper/gradle-wrapper.properties`, `build.gradle`, `settings.gradle`
+> - 锚点: `gradle.properties`, `gradle/wrapper/gradle-wrapper.properties`, `build.gradle`, `settings.gradle`, `.gitignore`
 
 # 开发环境
 
@@ -25,7 +25,6 @@
 2. **Settings → Build, Execution, Deployment → Build Tools → Gradle** 中使用项目的 **Wrapper**，Gradle JVM 选择 **JDK 25**。若本机路径未自动解析，选择本机 JDK 25 目录。
 3. **File → Project Structure → Project SDK** 选择 **JDK 25**。项目使用 Java 25 toolchain。
 4. 运行/调试配置为 **Minecraft Client (Raynium)**，由 Loom 生成。若首次导入后暂未显示，可重新加载 Gradle 工程。
-5. 可选安装 **Minecraft Development** 插件，便于编辑 Mixin；阅读 MC 源码不依赖此插件。
 
 ## 阅读 Minecraft 源码
 
@@ -50,16 +49,11 @@ MC 26.3 的渲染入口与职责如下：
 | `com.mojang.renderpearl` | 26.3 的 GPU API、前端、资源、命令与图形后端 |
 | `com.mojang.blaze3d.platform.Window` | SDL 窗口；旧版模组的 GLFW 接入不能直接沿用 |
 
-## 本机源码缓存
-
-历史调查使用 `.gradle/mc-source-26.3/client/` 和 `common/` 作为解包阅读目录；它们不是 Loom 保证生成的路径。
-先运行上面的 `genSources`，按需要将对应 clientOnly/common sources JAR 解压到阅读目录，或直接在 IDEA 中导航类与方法。
-文档中的类名、包名与 MC 版本用于重新定位，旧行号只作辅助；忽略缓存不存在不影响仓库文档检查。
+## 缓存与产物
 
 `.gradle/`、`.idea/`、`build/`、`run/` 是本机缓存和产物，不提交配置、日志或测试世界。
 构建、开发客户端和 native 运行命令见[构建与测试](build-test.md)。
 
-## 工程来源
+## 工具参考
 
-Gradle Wrapper 文件取自 Fabric 官方示例；当前版本和校验值以 Wrapper 配置为准。
 官方参考：[IDEA 设置](https://docs.fabricmc.net/develop/getting-started/intellij-idea/setting-up)、[生成与附加 Minecraft 源码](https://docs.fabricmc.net/develop/getting-started/intellij-idea/generating-sources)。
