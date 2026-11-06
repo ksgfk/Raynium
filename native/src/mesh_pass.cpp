@@ -1,10 +1,12 @@
 #include <raynium/mesh_pass.h>
+#include <radray/profiler.h>
 #include <raynium/terrain_bytecode.h>
 #include <algorithm>
 
 namespace raynium {
 using namespace radray::render;
 bool MeshPassResources::Create(Device& device,radray::unique_ptr<MeshPassResources>& output,radray::string& error) {
+    RADRAY_PROFILE_SCOPE_N("Raynium.MeshPass.Create");
     if(output) { error="Pass resources output occupied"; return false; }
     auto objects=radray::make_unique<Objects>(); auto& p=*objects;
     const bool vk=device.GetBackend()==RenderBackend::Vulkan;
@@ -48,6 +50,7 @@ bool MeshPassResources::Create(Device& device,radray::unique_ptr<MeshPassResourc
 }
 bool MeshPassResources::CreateMaterialBinding(Device& device,const rn_material_update& desc,const SharedTextures& textures,
     MeshMaterialBinding& binding,radray::MaterialRenderProxy& proxy,radray::string& error) const {
+    RADRAY_PROFILE_SCOPE_N("Raynium.Material.CreateBinding");
     auto* albedo=textures.View(desc.albedo_texture); auto* light=textures.View(desc.light_texture);
     SamplerDescriptor sampler{.AddressS=AddressMode::ClampToEdge,.AddressT=AddressMode::ClampToEdge,.AddressR=AddressMode::ClampToEdge,
         .MinFilter=FilterMode::Linear,.MagFilter=FilterMode::Linear,.MipmapFilter=FilterMode::Linear,

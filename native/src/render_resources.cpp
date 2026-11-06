@@ -1,8 +1,6 @@
 #include <raynium/render_resources.h>
 #include <radray/profiler.h>
 #include <algorithm>
-#include <cstring>
-#include <set>
 
 namespace raynium {
 using namespace radray::render;
@@ -21,6 +19,7 @@ MappedUploadBuffer::~MappedUploadBuffer() noexcept {
     if(_buffer && _data) _buffer->Unmap();
 }
 bool MappedUploadBuffer::Create(Device& device,uint64_t capacity,BufferUses usage,radray::unique_ptr<MappedUploadBuffer>& output,radray::string& error) {
+    RADRAY_PROFILE_SCOPE_N("Raynium.UploadBuffer.Create");
     if(output) { error="Mapped upload output occupied"; return false; }
     if(!capacity) { error="Mapped upload capacity must be positive"; return false; }
     auto buffer=CreateBuffer(device,capacity,MemoryType::Upload,usage,ResourceHint::PersistentMap);
@@ -31,6 +30,7 @@ bool MappedUploadBuffer::Create(Device& device,uint64_t capacity,BufferUses usag
 }
 bool MappedUploadBuffer::Reserve(Device& device,uint64_t bytes,radray::string& error) {
     if(bytes<=_capacity) return true;
+    RADRAY_PROFILE_SCOPE_N("Raynium.UploadBuffer.Grow");
     uint64_t capacity=_capacity ? _capacity : 1;
     while(capacity<bytes) capacity<<=1;
     radray::unique_ptr<MappedUploadBuffer> replacement;
@@ -45,27 +45,9 @@ bool MappedUploadBuffer::Reserve(Device& device,uint64_t bytes,radray::string& e
     return true;
 }
 void MappedUploadBuffer::Flush(uint64_t offset,uint64_t bytes) noexcept {
+    RADRAY_PROFILE_SCOPE_N("Raynium.UploadBuffer.Flush");
     if(!bytes) return;
     _buffer->FlushMappedRange({offset,bytes});
-}
-bool WriteBuffer(Buffer& buffer,const void* data,size_t bytes) {
-    RADRAY_PROFILE_SCOPE_N("Raynium.Buffer.Write");
-    if(!bytes) return true;
-    void* mapped;
-    {
-        RADRAY_PROFILE_SCOPE_N("Raynium.Buffer.Map");
-        mapped=buffer.Map(0,bytes);
-    }
-    if(!mapped) return false;
-    {
-        RADRAY_PROFILE_SCOPE_N("Raynium.Buffer.Copy");
-        std::memcpy(mapped,data,bytes);
-    }
-    {
-        RADRAY_PROFILE_SCOPE_N("Raynium.Buffer.FlushUnmap");
-        buffer.FlushMappedRange({0,bytes}); buffer.Unmap();
-    }
-    return true;
 }
 void TextureBarrier(CommandBuffer& c,Texture* texture,TextureStates before,TextureStates after,ExternalOwnershipTransfer transfer) {
     const ResourceBarrierDescriptor b=BarrierTextureDescriptor{.Target=texture,.Before=before,.After=after,
@@ -91,6 +73,7 @@ rn_shared_image_info DescribeImage(const ExternalTextureExport& texture,const Ex
     return info;
 }
 bool RenderTarget::Create(RayniumRuntime& runtime,const rn_render_target_desc& desc,radray::unique_ptr<RenderTarget>& out,radray::string& error) {
+    RADRAY_PROFILE_SCOPE_N("Raynium.Target.Create");
     if(out || desc.struct_size!=sizeof(desc) || desc.reserved || !desc.width || !desc.height || desc.width>16384 || desc.height>16384) {
         error="Render target dimensions must be 1..16384"; return false;
     }
@@ -113,6 +96,7 @@ bool RenderTarget::Create(RayniumRuntime& runtime,const rn_render_target_desc& d
     out=radray::unique_ptr<RenderTarget>(new RenderTarget(std::move(r),desc.width,desc.height)); return true;
 }
 bool RenderTarget::Finish(radray::string& error) {
+    RADRAY_PROFILE_SCOPE_N("Raynium.Target.WaitConsumed");
     if(_submitted && (!_r.ready->WaitFor(_submitted,5000) || !_r.consumed->WaitFor(_submitted,5000))) {
         error="Output completion timed out; resources remain live"; return false;
     }
@@ -120,6 +104,7 @@ bool RenderTarget::Finish(radray::string& error) {
 }
 
 bool SharedTextures::Create(RayniumRuntime& runtime,const rn_shared_textures_desc& desc,radray::unique_ptr<SharedTextures>& out,radray::string& error) {
+    RADRAY_PROFILE_SCOPE_N("Raynium.Textures.Create");
     if(out || desc.struct_size!=sizeof(desc) || !desc.texture_count || desc.texture_count>16 || !desc.textures) { error="Invalid shared texture set"; return false; }
     for(uint32_t i=0;i<desc.texture_count;++i) {
         const auto& t=desc.textures[i]; uint32_t levels=1;
@@ -176,6 +161,7 @@ void SharedTextures::DescribeExports(rn_shared_image_export* output) const noexc
         image.logical,image.mip,_logical[image.logical].desc.split_mips ? 1u : _logical[image.logical].desc.mip_levels,0};
 }
 bool SharedTextures::Finish(radray::string& error) {
+    RADRAY_PROFILE_SCOPE_N("Raynium.Textures.WaitReleased");
     if(!_sync.released->WaitFor(_released,5000)) { error="Shared input completion timed out; resources remain live"; return false; }
     return true;
 }
@@ -186,22 +172,43 @@ bool SharedTextures::Validate(uint64_t sequence,uint32_t changed,radray::string&
     }
     return true;
 }
-void SharedTextures::Acquire(CommandBuffer& command,uint32_t changed) {
+void SharedTextures::Acquire(CommandBuffer& command) {
     for(auto& image:_images) {
         const bool split=_logical[image.logical].desc.split_mips!=0;
         TextureBarrier(command,image.texture.get(),TextureState::Common,
             split ? TextureState::CopySource : TextureState::ShaderRead,ExternalOwnershipTransfer::Acquire);
     }
+}
+radray::vector<radray::RDGTextureHandle> SharedTextures::SetupGraph(radray::RDGBuilder& graph,uint32_t changed) const {
+    RADRAY_PROFILE_SCOPE_N("Raynium.Graph.Textures");
+    radray::vector<radray::RDGTextureHandle> sampled;
+    sampled.reserve(Count());
     for(uint32_t i=0;i<Count();++i) {
-        auto& l=_logical[i]; if(!l.desc.split_mips) continue;
-        if(!(changed&(1u<<i))) continue;
-        TextureBarrier(command,l.assembled.get(),l.initialized ? TextureState::ShaderRead : TextureState::Undefined,TextureState::CopyDestination);
-        for(auto& image:_images) if(image.logical==i) {
-            command.CopyTextureToTexture({.Destination=l.assembled.get(),.DestinationMipLevel=image.mip,
-                .Source=image.texture.get(),.Width=std::max(1u,l.desc.width>>image.mip),.Height=std::max(1u,l.desc.height>>image.mip)});
+        const auto& logical=_logical[i];
+        const auto destination=graph.ImportTexture(logical.sampled,
+            logical.desc.split_mips && !logical.initialized ? TextureState::Undefined : TextureState::ShaderRead,
+            TextureState::ShaderRead);
+        sampled.push_back(destination);
+        if(!logical.desc.split_mips || !(changed&(1u<<i))) continue;
+        struct MipSource { radray::RDGTextureHandle texture; uint32_t mip,width,height; };
+        radray::vector<MipSource> sources;
+        for(const auto& image:_images) if(image.logical==i) {
+            sources.push_back({graph.ImportTexture(image.texture.get(),TextureState::CopySource,TextureState::CopySource),
+                image.mip,std::max(1u,logical.desc.width>>image.mip),std::max(1u,logical.desc.height>>image.mip)});
         }
-        TextureBarrier(command,l.assembled.get(),TextureState::CopyDestination,TextureState::ShaderRead);
+        // Persistent texture updates must survive even when no material samples them this frame.
+        graph.MarkOutput(destination);
+        graph.AddCopyPass("Raynium AssembleMips",[destination,sources](radray::RDGCopyPassBuilder& pass) {
+            pass.WriteTexture(destination);
+            for(const auto& source:sources) pass.ReadTexture(source.texture);
+        },[destination,sources](radray::RDGCopyPassContext& context) {
+            for(const auto& source:sources) context.GetCommandBuffer().CopyTextureToTexture({
+                .Destination=&context.Resolve(destination),.DestinationMipLevel=source.mip,
+                .Source=&context.Resolve(source.texture),.Width=source.width,.Height=source.height});
+            return true;
+        });
     }
+    return sampled;
 }
 void SharedTextures::Release(CommandBuffer& command) {
     for(auto& image:_images) TextureBarrier(command,image.texture.get(),

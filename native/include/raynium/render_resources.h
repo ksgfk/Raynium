@@ -1,13 +1,13 @@
 #pragma once
 #include <raynium/runtime.h>
 #include <raynium/bridge.h>
+#include <radray/runtime/rdg.h>
 #include <array>
 
 namespace raynium {
 using RenderBuffer = radray::unique_ptr<radray::render::Buffer>;
 RenderBuffer CreateBuffer(radray::render::Device&, uint64_t, radray::render::MemoryType, radray::render::BufferUses,
                           radray::render::ResourceHints = {});
-bool WriteBuffer(radray::render::Buffer&, const void*, size_t);
 
 // Upload buffer that stays mapped for its lifetime. Callers may only overwrite or grow it after the
 // previous GPU use of that owner completed; growth replaces the buffer and discards its contents.
@@ -75,7 +75,9 @@ public:
     radray::render::TextureView* View(uint32_t i) const { return _logical.at(i).view.get(); }
     radray::render::Fence* Released() const { return _sync.released.get(); }
     radray::render::Fence* Available() const { return _sync.available.get(); }
-    void Acquire(radray::render::CommandBuffer&,uint32_t changed);
+    // Acquires/releases physical shared images around graph execution in the same queue submission.
+    void Acquire(radray::render::CommandBuffer&);
+    radray::vector<radray::RDGTextureHandle> SetupGraph(radray::RDGBuilder&,uint32_t changed) const;
     void Release(radray::render::CommandBuffer&);
     radray::render::Texture* SampledTexture(uint32_t i) const { return _logical.at(i).sampled; }
     void Commit(uint32_t changed) noexcept;

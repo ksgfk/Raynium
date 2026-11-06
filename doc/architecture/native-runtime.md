@@ -13,11 +13,12 @@
 
 `Renderer` 拥有 `TerrainScene` 和一个双槽 `FrameScheduler`，调度器独占 `SolidFramePipeline`。
 `Renderer::Create` 依次创建 `GeometryArena`（预建首块）、`SolidFramePipeline` 和调度器，全部成功后才构造 renderer 并把 arena 移入 `TerrainScene`。
-Raynium 固定执行几何上传、共享输入 acquire、按需 split mip 装配、SolidRaster、输入/输出 release 和一次 Direct queue Submit。
-没有 Render Graph、通用 RenderSystem、SceneRenderer 或 View/Pass 框架。
+SolidFramePipeline 继承上游 RenderGraphFramePipeline，使用 RDG 声明常量上传、几何复制、按需 split mip 装配和 SolidRaster。
+图编译/裁剪、依赖调度、资源屏障、附件和命令缓冲开闭、可见命令排序及每槽瞬态资源池由 runtime 执行。
+Raynium 负责输入/输出共享 ownership transfer、timeline 提交和完成等待；没有通用 RenderSystem、SceneRenderer 或 View/Pass 框架。
 
 `TerrainScene` 持有持久的 RadRay Scene、`GeometryArena` 和以 `std::unordered_map` 按 ID 索引的 TerrainState。
-`Renderer::Render` 检查输入/输出序号并等待待复用槽就绪、该槽附件尺寸合适后，由 `PrepareFrame` 按当帧 ABI 增量数组就地更新状态与 Scene。
+`Renderer::Render` 检查输入/输出序号并等待待复用槽就绪后，由 `PrepareFrame` 按当帧 ABI 增量数组就地更新状态与 Scene。
 入口检查布局、epoch、数组指针/数量及增量记录的基本字段；资源引用和几何内容由同一模组的 Java 调用方保证，
 native 不扫描驻留表校验引用或逐个读取索引值。顶点与索引先按该槽 staging 容量写入当前帧槽持久映射的 Upload 缓冲，
 由 Record 一次复制到几何 arena 区间或独立索引 Buffer，CPU 不驻留索引值副本；实例写入同一槽的持久映射实例缓冲。
@@ -33,18 +34,29 @@ RunFrame 正常返回后推进输入/输出 timeline 序号。PrepareFrame 更�
 ## 命令缓存与参数绑定
 
 SolidFramePipeline 注册一个 MeshPassId 为 0 的 SolidPassProcessor。可变 Scene 的 RunFrame 在 Extract 前同步脏 batch 的缓存命令。
-Processor 通过 BuildMeshDrawCommands 为每个 submesh 生成命令；未改变的 batch 跨帧复用命令。
+Processor 通过 BuildMeshDrawCommands 为每个非空 batch 生成一条包含 submesh 掩码的命令；未改变的 batch 跨帧复用命令。
 材质更新由 Scene 标脏引用它的 batch，索引扩容或网格替换由适配层原地更新关联 batch；可见性、相机和实例变化不标脏命令。
 
 Group 0 是每槽独立的 256 字节 Upload CBuffer 与参数集，在管线 Create 中创建并绑定。
-Group 1 是每个材质版本的图集/lightmap 与 sampler 参数集，随材质更新或纹理重绑创建，存入缓存 MeshDrawCommand 的 ParameterSets。
+Group 1 是每个材质版本的图集/lightmap 与 sampler 参数集，随材质更新或纹理重绑创建。
+BuildMeshDrawCommands 将全部顶点流、参数组/PushConstants 和额外 submesh 分别存入缓存 pass 的 Bindings 存储；
+MeshDrawCommand 通过 VertexBuffersHandle、PayloadHandle 和 ExtraElementsHandle 引用其独占的非空池条目，没有引用计数。
+命令及池条目不拥有所引用的 RHI 对象，缓存列表负责销毁命令及其池条目。
 MeshPassResources 的稳定存储拥有 shader、group layouts、pipeline layout、PSO、MaterialResource 与 base Material；
 逆序析构保证被依赖布局晚于参数集和 PSO 释放，帧槽常量也晚于自身参数集释放。
 
 VertexInput 声明 28 字节顶点槽 0 和 16 字节实例槽 1；驻留 mesh 只绑定槽 0，允许延迟实例流。
 槽 0 的 stream 覆盖整个 arena 块，同一块的网格共享相同 view，绘制时用 submesh 的 base_vertex 加区间首顶点定位。
-Extract 使用 GatherVisibleMeshDrawCommands 选择 submesh 并覆盖 FirstInstance/InstanceCount，再由 SortVisibleCommands 排序。
-Record 把当帧实例流和 Group 0 参数集传入 MeshPassFrameDrawList::Submit，由上游执行预检、PSO/参数绑定和 DrawIndexed。
+PrepareFrame 将 ABI 可见项转换为 runtime 的 VisibleMeshBatch，并同时收集几何 Buffer 借用；ExtractFrameData 转交帧参数和列表 span，SetupGraph 声明上传、资源访问和输出。
+相邻项仅在 primitive、sort_key、FirstInstance 和 InstanceCount 相同，且 submesh 下标严格递增时合并 ElementMask。
+UINT32_MAX 选择全部 submesh，独立保留；逆序、重复元素、不同实例范围或排序键均切开，保持 runtime 按位递增绘制时的原有顺序和次数。
+每组合并项只查询一次 primitive 和 runtime MeshBatch，以后者的 Elements 数量验证下标，不再逐面组查询 TerrainMesh。
+几何访问在同次遍历按 Buffer/状态对去重：Terrain batch 的顶点流来自共享 arena，所有 Elements 使用同一索引 Buffer，因此每组只收集一次。
+不再在 Extract 中二次遍历 Scene，也不逐面组扫描全部 Elements。
+图编译后，ExtractMeshPass 使用 GatherVisibleMeshDrawCommands 的帧列表重载，收集缓存命令指针、有效元素掩码及当帧 FirstInstance/InstanceCount；BindingStorage 指针由命令保存。
+Scene、命令缓存与绑定存储从同步完成到 RunFrame 返回保持只读且地址稳定；不再逐帧复制 MeshDrawCommand。Wait 和槽清理不解引用这些指针。
+runtime 的 Record 排序存活 MeshPass；SolidRaster 回调把当帧实例流和 Group 0 参数集传入 MeshPassFrameDrawList::Submit，
+由上游执行 PSO/参数绑定和 DrawIndexed，Debug 另执行整批预检；录制直接使用借用的缓存命令。
 Raynium 不再展开实例、另建 indirect 参数或手写 draw 循环。MC 数据与 shader 见[地形预览](terrain-preview.md)。
 
 ## 上传、帧槽与资源退役
@@ -57,8 +69,10 @@ Raynium 不再展开实例、另建 indirect 参数或手写 draw 循环。MC �
 | 每个索引的独立 Device Buffer、每个材质的 Group 1 与 sampler | 当前 TerrainState 保活；旧版本先由 TerrainScene 暂存，再交给 FrameSlot::RetireResource |
 | 几何 arena 块（32 MiB Device Buffer）与网格顶点区间 | GeometryArena 归 TerrainScene 并晚于驻留状态析构；块在场景寿命内不释放，区间随 mesh owner 退役归还 |
 | 每槽的 passConstants/passParameterSet | SolidFramePipeline 固定双槽资源；仅在对应槽完成后写入 |
-| 每槽 staging、实例、深度及 view、timestamp/readback | SolidFramePipeline 固定双槽资源：Create 预建，深度在 ReadyForFrame 按目标尺寸重建；仅在对应槽完成后写入或替换 |
-| CommandAllocator / CommandBuffer | FrameSlot 独占；Record 从槽内池借用一条 command buffer，成对 Begin/End |
+| 每槽 staging、实例、timestamp/readback | SolidFramePipeline 固定双槽资源；Create 预建，仅在对应槽完成后写入或替换 |
+| 每槽可见 batch 与几何访问列表 | SolidFramePipeline 固定双槽 CPU 存储；PrepareFrame 清空后保留容量，可见列表按几何增长扩容 |
+| 每槽 D32 深度及 view | SetupGraph 声明瞬态附件；RenderGraphFramePipeline 的槽池按完整描述符复用，保留实际终态，旧尺寸对象保留到池销毁 |
+| CommandAllocator / CommandBuffer | FrameSlot 独占；runtime 录制图命令，SubmitFrame 另借 acquire/release 两条短命令，按 acquire → graph → release 单次提交 |
 | 共享输出及输入 | C bridge 子句柄持有 RenderTarget / SharedTextures；帧借用，销毁前完成宿主交接并排空调度器 |
 
 网格顶点从 GeometryArena 的块内区间分配，28 字节/顶点，按 best fit 选空闲区间并与相邻区间合并；单块 32 MiB，
@@ -71,12 +85,19 @@ PrepareFrame 在替换或删除 owner 前把它加入 TerrainScene 的待退役�
 若 PrepareFrame 中途失败，待退役集合留在 TerrainScene，排空调度器后由 Reset 或 DetachTextures 清理。
 
 管线维护独立 completion timeline。复用槽时 Wait 确认提交完成，调度器依次重置 allocator、处理退役、清空帧记录与 arena。
-FrameData 只拥有瞬态 CPU 数据（上传记录、可见 batch、待退役所有者），不持有 GPU 对象、不复制整份 Scene 或持有整份 TerrainState。
-Record 写入当前槽常量，按目标去重后分批录制几何上传的 barrier 与复制、共享 acquire、光栅、release、常量和实例回到 HostWrite
-以及可选 timestamp resolve，最后单次 Submit。
-缓冲在每次提交后按 D3D12 规则衰减为 COMMON，因此复制前统一从 Undefined 开始；不带 simultaneous access 的深度纹理不衰减，
-首帧从 Undefined、之后从 DepthWrite 进入渲染。
-RenderPass 和 CommandBuffer 正常返回时各由 scope guard 闭合。Extract、Record 与 RunFrame 返回 void；
+FrameData 拥有上传记录、标量帧参数和完成值；可见 batch 与去重几何列表通过 span 借用本槽 CPU 存储，不拥有 GPU 对象、不复制整份 Scene 或持有整份 TerrainState。
+列表只在本次 RunFrame 内的 SetupGraph/ExtractMeshPass 使用。旧帧 CPU 录制和该槽 completion 完成后，下一次 PrepareFrame 可以清空复用；
+后续旧槽 Wait 和 arena 清理不读取这些 span。RHI 对象仍按原有帧槽退役协议保活。
+常量使用 RDGBuilder::UploadBuffer；几何保留每槽持久映射 staging，由 GeometryUpload CopyPass 一次录制各区间复制。
+图按整 Buffer 跟踪状态，几何导入/终态统一为 Common，上传 staging、常量和实例在图末回到 HostWrite。
+几何上传目标与已变化的 split 私有纹理均标记为图输出，即使没有可见 draw 也会初始化；共享颜色也是图输出，空帧仍清屏。
+深度由 runtime 池记录真实终态并生成跨帧屏障，不再由 Raynium 维护 depthInitialized 或尺寸缓存。
+
+RDG 当前没有 external ownership transfer 声明；SubmitFrame 在已结束的图命令之外录制 acquire 和 release，
+三条命令同一次提交，GPU 顺序固定为 acquire → graph → release。共享颜色在图内为 RenderTarget，direct 输入为 ShaderRead，
+split 物理输入为 CopySource；私有完整 mip 图像的复制与采样转换由 RDG 处理。
+可选 timestamp 起点在 acquire 命令，终点与 resolve 在 release 命令，覆盖整次 native 帧的 GPU 工作。
+Extract、Record 与 RunFrame 返回 void；
 帧回调中的无效状态、资源或命令准备失败通过 RADRAY_ABORT 记录诊断并终止，不提供回滚或重试。
 
 复用槽及显式 Finish 先以 5 秒超时检查 completion，失败保留活跃所有者；成功后 WaitIdle 完成回收。
@@ -105,7 +126,7 @@ Vulkan 创建失败只清理本次取得的 instance。
 ## 共享输出与输入
 
 一个 renderer 同时允许一个 RenderTarget 和一个 SharedTextures 集合。
-RenderTarget 持有 RGBA8_UNORM 共享颜色、其 attachment view、导出和 ready/consumed timeline；D32 深度及其 view 由每个帧槽持有。
+RenderTarget 持有 RGBA8_UNORM 共享颜色、其 attachment view、导出和 ready/consumed timeline；D32 深度及其 view 由 runtime 的每槽瞬态池持有。
 SolidRaster 清雾色和 depth=0，SOLID 使用 GreaterEqual，并启用背面剔除和深度写入。
 原有 256 字节 CBuffer、28 字节顶点、16 字节 origin/visibility 流、图集/lightmap、雾、淡入和 RGSS 保持不变；没有新增渲染类别或效果。
 
@@ -117,14 +138,14 @@ D3D12 导出 D3D12Resource/D3D12Fence，Vulkan 导出 OpaqueWin32。Win32 句柄
 创建输入: 初始化布局 → release → inputReleased(1)
 MC:      wait inputReleased(n) → 写输入 → inputAvailable(n)
 native:  wait inputAvailable(n) + outputConsumed(previous)
-         上传 → acquire/装配 → SolidRaster → release
+         acquire → RDG 上传/装配/SolidRaster → release
          signal completion(k) + inputReleased(n+1) + outputReady(m)
 MC:      wait outputReady(m) → copy/release → outputConsumed(m) → 原有呈现
 ```
 
 每条 timeline 只有一个 signal 方。正常帧不 CPU 等待尚未提交的宿主输入工作，不调用整队列 Wait。
 输出首帧从 Undefined 初始化，后续从 Common acquire；输入 direct 在 Common/ShaderRead 间转换，split 物理输入使用 CopySource，私有图集在 ShaderRead/CopyDestination 间转换。
-resize 排空旧输出与帧槽后重建输出，各槽在下一次 ReadyForFrame 按新尺寸重建深度；共享输入重建也先排空槽，后续材质参数集绑定新 view。
+resize 排空旧输出与帧槽后重建输出，各槽在下一次图执行时按新描述符从池中取得深度（相同尺寸可复用）；共享输入重建也先排空槽，后续材质参数集绑定新 view。
 世界 epoch 切换清理持久场景但保留设备会话。
 
 关闭 target 同时确认 ready/consumed，关闭 inputs 确认 native 已释放，随后 Finish/WaitIdle 释放槽内引用，再销毁共享资源。

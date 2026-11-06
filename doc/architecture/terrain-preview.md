@@ -36,12 +36,12 @@ CPU 把准确平面、两三角绕序一致的 quad 分成六个轴向组，其�
 使用 mesh 实际包围范围和最终投影反算的视点保守剔除面组；不假定模型都位于 16³ section 内，退化/非轴向面不剔除。
 仅复用 MC 可见列表，没有 GPU 可见性、mesh shader、量化或额外异步队列。
 Java 将按距离排序的可见 section 每 64 个分为一个深度桶，作为可见项 sort_key。
-native 通过 GatherVisibleMeshDrawCommands 选择缓存的 submesh 命令，以材质/batch 基础键与可见项 sort_key 的按位或结果排序，
-再由 MeshPassFrameDrawList::Submit 录制索引绘制。缓存命令只绑定驻留顶点与索引；当帧通过 InstanceStream 绑定完整的 origin/visibility 流，
-FirstInstance/InstanceCount 来自可见项覆盖值，不在 CPU 上逐实例展开。没有相邻范围合并。
+native 将可见面组转换为 runtime 元素掩码，再通过 GatherVisibleMeshDrawCommands 将缓存命令指针提取到帧槽，合并规则和借用边界见 [Native runtime](native-runtime.md#命令缓存与参数绑定)；runtime 以材质/batch 基础键与可见项 sort_key 的按位或结果排序，
+再在 RDG 光栅回调中由 MeshPassFrameDrawList::Submit 录制索引绘制。缓存命令只绑定驻留顶点与索引；当帧通过 InstanceStream 绑定完整的 origin/visibility 流，
+FirstInstance/InstanceCount 来自可见项覆盖值，不在 CPU 上逐实例展开。元素掩码合并不合并索引范围，每个被选中的非空 Element 仍各自 DrawIndexed。
 
 地形 HLSL 离线编译 DXIL/SPIR-V。Group 0 保存每槽帧常量，Group 1 保存持久材质纹理与采样器。shader 包含图集采样修正、RGSS、光照、雾和淡入；sampler 随 MC anisotropy 设置更新。
-SOLID 使用不混合颜色写入、反向 Z（clear=0、GreaterEqual、深度写入）、每槽常驻 D32，D3D12 补偿 clip Y，绕序与 MC Vulkan 一致。
+SOLID 使用不混合颜色写入、反向 Z（clear=0、GreaterEqual、深度写入）、runtime 每槽瞬态池复用的 D32，D3D12 补偿 clip Y，绕序与 MC Vulkan 一致。
 小 RT 的宽高各取主 RT 的四分之一整除值，使用 MC 投影；非整除尺寸的宽高比存在取整误差。
 
 ## 多 mip 输入与 fallback
@@ -73,7 +73,7 @@ MC:   wait outputReady(frame) → acquire/copy/release output → outputConsumed
 ```
 
 每条 timeline 只有一个 signal 方。MC wait/signal 划分同一次 submit 中的多个 batch，不在正常帧中途 CPU 等待尚未提交的 MC 工作。
-resize 排空帧槽后重建输出颜色和交接信息，各槽在下一帧按新尺寸重建深度，保留 renderer、帧调度器与驻留几何。
+resize 排空帧槽后重建输出颜色和交接信息，各槽在下一帧从 runtime 池按尺寸取得深度附件，保留 renderer、帧调度器与驻留几何。
 图集对象变化先排空再重建共享输入，后续帧从新输入创建材质 Proxy 和绑定；MC 的资源 epoch 变化另使旧 payload 失效。
 世界离开排空输出和输入后关闭 renderer，清除场景；runtime 设备继续保留。
 

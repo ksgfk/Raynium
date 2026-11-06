@@ -35,7 +35,7 @@ bool Renderer::Render(RenderTarget& target,const rn_render_frame_desc& frame,rad
     if(_textures ? !_textures->Validate(frame.input_sequence,frame.changed_textures,error) : (frame.input_sequence || frame.changed_textures)) {
         if(error.empty()) error="Frame has inputs without a shared texture set"; return false;
     }
-    if(!_pipeline->ReadyForFrame(target,error)) return false;
+    if(!_pipeline->ReadyForFrame(error)) return false;
     TerrainFrame prepared;
     if(!_scene.PrepareFrame(target,_textures,frame,_pipeline->Resources(),_pipeline->NextUploads(),prepared,error)) return false;
     RADRAY_PROFILE_PLOT("Raynium.Cache.DirtyBatches", double(_scene.Scene().GetDirtyBatches().size()));

@@ -52,6 +52,45 @@ class NativeTerrainTest {
         f.changedTextures=3; f.fogColor=new float[]{0,0,0,1}; return f;
     }
     @ParameterizedTest @MethodSource("paths")
+    void uploadsWithoutDrawsSurviveSlotReuseAndTargetResize(NativeEnvironment.Backend backend,boolean split) throws Exception {
+        try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var producer=new VulkanConsumer(backend.name());
+            var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
+            var renderer=runtime.createRenderer();
+            var textures=renderer.createSharedTextures(textures(split))) {
+            var inputs=new ArrayList<VulkanPreviewImage>();
+            try {
+                for(var e:textures.exports()) inputs.add(VulkanPreviewImage.create(producer.device,producer.family,e.image(),e.mipCount(),true));
+                long inputSequence=0;
+                for(int size:new int[]{32,36,40,32}) {
+                    try(var target=renderer.createTarget(size,size);
+                        var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {
+                        for(int outputSequence=1;outputSequence<=4;++outputSequence) {
+                            ++inputSequence;
+                            boolean upload=inputSequence==1;
+                            var packet=frame(1,inputSequence,outputSequence);
+                            packet.changedTextures=upload?3:0;
+                            producer.writeTerrainInputs(inputs,split,17,9,5,inputSequence,false,packet.changedTextures);
+                            if(upload) {
+                                packet.indices=List.of(new NativeRenderer.Index(1,new int[]{0,1,2,2,3,0}));
+                                packet.meshes=List.of(mesh(1,quad(0)));
+                                packet.materials=List.of(material(1));
+                                packet.primitives=List.of(new NativeRenderer.Primitive(1,1,1));
+                            }
+                            // Both slots see empty frames before cached geometry and textures are first sampled.
+                            if(outputSequence>=3) {
+                                packet.visible=List.of(new NativeRenderer.Visible(1,0,0,0,1));
+                                packet.instances=List.of(new NativeRenderer.Instance(0,0,0,1));
+                            }
+                            renderer.render(target,packet);
+                            producer.copyAndCheckSolid(output,outputSequence,size,size,outputSequence>=3?atlas():clear());
+                        }
+                    }
+                }
+            } finally { for(var image:inputs) image.close(); }
+        }
+    }
+    @ParameterizedTest @MethodSource("paths")
     void twoPendingSlotsKeepParametersAndReplacedGeometry(NativeEnvironment.Backend backend,boolean split) throws Exception {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer();
@@ -195,6 +234,99 @@ class NativeTerrainTest {
                             if(sequence==8) return x<16?atlas:dark;
                             return x<16?atlas:clear;
                         });
+                    }
+                }
+            } finally { for(var image:inputs) image.close(); }
+        }
+    }
+    @ParameterizedTest @MethodSource("paths")
+    void visibleSubmeshMasksKeepHighestBitAndAllElements(NativeEnvironment.Backend backend,boolean split) throws Exception {
+        try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var producer=new VulkanConsumer(backend.name());
+            var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
+            var renderer=runtime.createRenderer();
+            var textures=renderer.createSharedTextures(textures(split));
+            var target=renderer.createTarget(32,32);
+            var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {
+            var inputs=new ArrayList<VulkanPreviewImage>();
+            try {
+                for(var e:textures.exports()) inputs.add(VulkanPreviewImage.create(producer.device,producer.family,e.image(),e.mipCount(),true));
+                var ranges=new ArrayList<NativeRenderer.Submesh>();
+                ranges.add(new NativeRenderer.Submesh(0,6,0));
+                for(int i=1;i<31;i++) ranges.add(new NativeRenderer.Submesh(0,0,0));
+                ranges.add(new NativeRenderer.Submesh(6,6,0));
+                for(int sequence=1;sequence<=4;sequence++) {
+                    var packet=frame(1,sequence,sequence);
+                    packet.changedTextures=sequence==1?3:0;
+                    if(sequence==1) {
+                        packet.indices=List.of(new NativeRenderer.Index(1,new int[]{0,1,2,2,3,0,4,5,6,6,7,4}));
+                        packet.meshes=List.of(new NativeRenderer.Mesh(1,twoQuads(1),1,8,ranges));
+                        packet.materials=List.of(material(1));
+                        packet.primitives=List.of(new NativeRenderer.Primitive(1,1,1));
+                    }
+                    packet.instances=List.of(new NativeRenderer.Instance(0,0,0,1));
+                    packet.visible=sequence==4
+                        ?List.of(new NativeRenderer.Visible(1,0,0,0,1),new NativeRenderer.Visible(1,31,0,0,1))
+                        :List.of(new NativeRenderer.Visible(1,sequence==1?0:sequence==2?31:-1,0,0,1));
+                    renderer.render(target,packet);
+                    producer.writeTerrainInputs(inputs,split,17,9,5,sequence,true,packet.changedTextures);
+                    final int selected=sequence;
+                    producer.copyAndCheckImage(output,sequence,32,32,(x,y)->
+                        selected>=3 || (selected==1?x<16:x>=16)?new int[]{32,64,128}:new int[]{0,0,0});
+                }
+            } finally { for(var image:inputs) image.close(); }
+        }
+    }
+    @ParameterizedTest @MethodSource("paths")
+    void groupedVisibleSubmeshesKeepOrderAndInstanceOverrides(NativeEnvironment.Backend backend,boolean split) throws Exception {
+        try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var producer=new VulkanConsumer(backend.name());
+            var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
+            var renderer=runtime.createRenderer();
+            var textures=renderer.createSharedTextures(textures(split));
+            var target=renderer.createTarget(32,32);
+            var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {
+            var inputs=new ArrayList<VulkanPreviewImage>();
+            try {
+                for(var e:textures.exports()) inputs.add(VulkanPreviewImage.create(producer.device,producer.family,e.image(),e.mipCount(),true));
+                var vertices=ByteBuffer.allocate(224).order(ByteOrder.nativeOrder());
+                vertices.put(quad(0)).put(quad(0));
+                for(int v=0;v<8;v++) vertices.putInt(v*28+12,v<4?0xff0000ff:0xff00ff00);
+                var red=new NativeRenderer.Visible(1,0,0,1,1);
+                var green=new NativeRenderer.Visible(1,1,0,1,1);
+                var all=new NativeRenderer.Visible(1,-1,0,1,1);
+                for(int pair=0;pair<5;pair++) {
+                    for(int slot=0;slot<2;slot++) {
+                        int sequence=pair*2+slot+1;
+                        var packet=frame(1,sequence,sequence);
+                        packet.changedTextures=sequence==1?3:0;
+                        if(sequence==1) {
+                            packet.indices=List.of(new NativeRenderer.Index(1,new int[]{0,1,2,2,3,0,4,5,6,6,7,4}));
+                            packet.meshes=List.of(new NativeRenderer.Mesh(1,vertices.array(),1,8,
+                                List.of(new NativeRenderer.Submesh(0,6,0),new NativeRenderer.Submesh(6,6,0))));
+                            packet.materials=List.of(material(1));
+                            packet.primitives=List.of(new NativeRenderer.Primitive(1,1,1));
+                        }
+                        packet.instances=List.of(new NativeRenderer.Instance(100,100,0,1),new NativeRenderer.Instance(0,0,0,1));
+                        packet.visible=switch(sequence) {
+                            case 1,10 -> List.of(red,green);
+                            case 2 -> List.of(green,red);
+                            case 3 -> List.of(red,green,red);
+                            case 4 -> List.of(all,red);
+                            case 5 -> List.of(red,all);
+                            case 6 -> List.of(new NativeRenderer.Visible(1,0,0,0,1),green);
+                            case 7 -> List.of(new NativeRenderer.Visible(1,0,0,0,1),new NativeRenderer.Visible(1,1,0,0,2));
+                            case 8 -> List.of(new NativeRenderer.Visible(1,0,1,1,1),green);
+                            default -> List.of();
+                        };
+                        renderer.render(target,packet);
+                    }
+                    for(int slot=0;slot<2;slot++) {
+                        int sequence=pair*2+slot+1;
+                        producer.writeTerrainInputs(inputs,split,17,9,5,sequence,true,sequence==1?3:0);
+                        int[] expected=sequence==9?new int[]{0,0,0}
+                            :sequence==2 || sequence==3 || sequence==4 || sequence==8?new int[]{32,0,0}:new int[]{0,64,0};
+                        producer.copyAndCheckSolid(output,sequence,32,32,expected);
                     }
                 }
             } finally { for(var image:inputs) image.close(); }

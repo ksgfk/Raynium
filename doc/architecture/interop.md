@@ -70,9 +70,10 @@ ID 非零，属于 frame epoch；同 ID 更新替换资源，epoch 非零且不�
 
 frame flags 位值 1/2 为 RGSS/profile，其他位必须为 0；changed_textures 的第 i 位表示第 i 个逻辑纹理已更新。
 首次输入使用须初始化全部纹理。每帧资源更新各最多 65,536 项，可见项与实例各最多 1,048,576 项。
-mesh 最多 1,048,576 顶点，submesh 最多 65,536 项；索引资源最多 16,777,216 个 uint32。
+mesh 最多 1,048,576 顶点，submesh 最多 32 项（对应 RadRay batch 的 32 位元素掩码，包含空项）；索引资源最多 16,777,216 个 uint32。
 Java 调用方保证 submesh/索引的几何范围有效、删除后资源引用完整，同类增量 ID 不重复且更新与删除集合不相交；
-native 不做逐索引检查或驻留资源引用全表扫描。可见项检查 primitive 存在，instance_count 非零且范围落在当帧实例数组中。
+native 不做逐索引检查或驻留资源引用全表扫描。可见项检查 primitive 存在，instance_count 非零且范围落在当帧实例数组中；
+submesh 必须是 mesh 中的有效下标，或用 UINT32_MAX 选择全部 submesh。
 
 | `rn_shared_image_info` 字段组（共 128 字节） | 字节偏移 |
 | --- | --- |

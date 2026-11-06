@@ -4,6 +4,8 @@
 #include <radray/runtime/frame_scheduler.h>
 #include <unordered_map>
 #include <memory>
+#include <span>
+#include <utility>
 #include <vector>
 
 namespace raynium {
@@ -38,16 +40,22 @@ struct TerrainState {
 struct GeometryUpload {
     radray::render::Buffer* destination;
     uint64_t destinationOffset,stagingOffset,bytes;
-    radray::render::BufferStates after;
+};
+using GeometryAccess=std::pair<radray::render::Buffer*,radray::render::BufferState>;
+struct TerrainFrameLists {
+    std::vector<radray::VisibleMeshBatch> visibleBatches;
+    std::vector<GeometryAccess> geometry;
 };
 struct SlotUploads {
     MappedUploadBuffer& staging;
     MappedUploadBuffer& instances;
+    TerrainFrameLists& lists;
 };
-// FrameData only owns transient CPU state; GPU objects live in the frame slot. ABI pointers never survive PrepareFrame.
+// Lists borrow slot storage through RunFrame; Wait and destruction never read them. ABI pointers end at PrepareFrame.
 struct TerrainFrame {
     std::vector<GeometryUpload> uploads;
-    std::vector<radray::VisibleMeshBatch> visibleBatches;
+    std::span<const radray::VisibleMeshBatch> visibleBatches;
+    std::span<const GeometryAccess> geometry;
     std::vector<std::shared_ptr<void>> retiredResources;
     rn_render_frame_desc parameters{};
     RenderTarget* target{};
