@@ -2,6 +2,7 @@
 
 import argparse
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -12,6 +13,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', choices=('Debug', 'Release'), default='Release')
     parser.add_argument('--parallel', type=int, default=8)
+    parser.add_argument('--clean', action='store_true', help='Remove the selected configuration build and SDK before rebuilding')
     parser.add_argument('--radray-source', type=Path)
     args = parser.parse_args()
     if args.parallel < 1:
@@ -21,6 +23,10 @@ def main():
     if not (source / 'CMakeLists.txt').is_file():
         raise RuntimeError('Explicitly restore the pinned Tracy source before building.')
     output = root / 'build/native-dependencies/tracy' / args.config
+    if output.resolve() != output.absolute() or not output.resolve().is_relative_to(root / 'build'):
+        raise RuntimeError(f'Refusing profiler output through a link or outside build/: {output}')
+    if args.clean and output.exists():
+        shutil.rmtree(output)
     env = msvc_environment()
     build = output / 'build-manual-lifetime'
     run(['cmake', '-S', str(root / 'native/cmake/profiler-dependency'), '-B', str(build), '-G', 'Ninja',

@@ -152,7 +152,8 @@ JFR 事件范围及磁盘缓冲上限见下节。源存档、原游戏选项和�
 先用 `python external/RadRay/tools/fetch_third_party.py restore --only tracy` 准备源码，再运行
 `python tools/build_profiler_dependencies.py --config Release`（Debug 使用 `--config Debug`）。
 脚本显式离线构建当前配置的静态 CRT Tracy SDK，位于 `build/native-dependencies/tracy/<配置>/sdk/`；native 构建不隐式准备该 SDK。
-当前锁定依赖使用 Tracy 0.14.1，客户端为静态、on-demand、仅 localhost，关闭广播和 crash handler。
+Tracy 源码或配方升级后，准备命令加 `--clean` 清理并重建所选配置的 build 与 SDK。
+当前锁定依赖使用 Tracy 0.15.0，客户端为静态、on-demand、仅 localhost，关闭广播和 crash handler。
 专用 SDK 开启 delayed init/manual lifetime：合法环境创建前启动，创建失败时清理，环境销毁后、FFM 卸载 DLL 前停止并回收线程。
 `native/cmake/profiler-dependency/CMakeLists.txt` 显式向 Tracy client 及其导出 target 添加 `TRACY_DELAYED_INIT`；
 不能仅传同名 CMake 变量，因为当前第三方 CMake 没有将它声明为编译选项。依赖脚本使用独立的 `build-manual-lifetime/` 构建目录。
@@ -181,11 +182,11 @@ plots 包含可见项、网格更新、draw 数量、已发布场景的驻留数
 另有 timestamp resolve、fence 等待和 GPU timing 读回区间；
 plots 记录 index/material/primitive 更新、primitive 删除、实例、纹理变化位掩码、上传次数/字节、待退役资源数量和几何 arena 块数。
 `Raynium.Arena.FreeBytes`、`Raynium.Frame.StagingCapacity` 与 `Raynium.Frame.InstanceCapacity` 只在启用 `RADRAY_ENABLE_PROFILER` 时发布。
-Raynium 还细分几何 arena 分配/回收/增块、staging 与实例 memcpy、UploadBuffer 创建/扩容/flush、材质绑定创建、
+runtime 提供几何池分配、映射上传缓冲创建/扩容和批量上传插桩；Raynium 另记录实例 memcpy、材质绑定创建、
 图常量/上传/纹理/光栅访问声明，以及 timestamp 命令录制与队列提交；共享 acquire/release 屏障由 RDG 录制。
 可见项掩码校验与几何访问去重统一计入 `Raynium.Scene.VisibleBatches`；帧数据提取不执行单独的几何访问二次遍历。`Raynium.Visible` 记录 ABI 非零掩码项数，`RadRay.Scene.VisibleBatches` 和 `Raynium.DrawCommands` 记录 runtime 输入与实际可见命令数。
 连续元素合并后，一条命令中多个面组可以只产生一次 DrawIndexed。
-`Raynium.GeometryAccesses` 记录该帧按 Buffer/状态对去重后的几何访问数量；它不是可见面组、draw 或驻留网格数量。
+`Raynium.Geometry.VertexPages` / `IndexPages` 记录池保留页数，`Raynium.Geometry.FreeBytes` 记录可复用空闲字节；这些量不表示可见面组或 draw 数。
 锁定 RadRay 自带 `RadRay.FrameScheduler`、`FrameSlot`、`FramePipeline`、`Scene`、`DrawList`、`MeshDraw` 与 `RDG` 区间，
 包含缓存同步、槽回收、排序、图依赖/裁剪/调度、资源池命中或创建、屏障、附件及逐 Pass 录制；不需要修改上游源码。
 这些 CPU 父区间包含子区间，不能直接求和；RDG 录制耗时和后端 GPU 时间线分别读取。
@@ -244,7 +245,7 @@ Raynium 自身无需动态 VC++ CRT 或额外 mimalloc DLL；系统与显卡驱�
 | `MeshPayloadTest` / `TextureTransferTest` | 保守面组、紧凑元素位、越界模型、ByteBuffer 顶点拥有权和失败降级 | `test` |
 | `TerrainCaptureTest` / `TerrainResidencyTest` | 采集引用释放、超预算近处优先与超大网格、关闭回退延迟回收、零掩码、提交边界与预览重建 | `test` |
 | `NativeFrameBufferTest` | 持久帧指针/数量复位、超过 8 MiB 的上传扩容、对齐及多实例掩码 | `test` |
-| `NativeTerrainTest` | 双后端/两传输模式的 mip、深度、大坐标、epoch、重建、双槽在途参数/资源隔离、驻留字典增长、多材质/多 submesh 缓存、索引扩容与局部增删改、多几何 arena 块与 base vertex、staging 增长后复用、删除后区间重用、空可见帧上传后跨槽及尺寸往返绘制 | `nativeTest` |
+| `NativeTerrainTest` | 双后端/两传输模式的 mip、深度、大坐标、epoch、重建、双槽在途参数/资源隔离、驻留字典增长、多材质/多 submesh 缓存、索引扩容与局部增删改、多几何池页与 base vertex、分页 staging 增长后复用、删除后区间重用、空可见帧上传后跨槽及尺寸往返绘制 | `nativeTest` |
 | `NativeRendererTest` | 双后端雾色清屏/区域外像素、连续交接、输出重建保留场景、错误线程、超时保留 owner 和导入失败清理 | `nativeTest` |
 
 `test` 排除 `native` 标签，随标准 `check/build` 运行，不加载 DLL、不构建 native；FFM 缓冲测试使用 JVM native access。`nativeTest` 是标准 Gradle `Test` 任务，只包含 `native` 标签；它复用 `testClasses`，依赖 `nativeStage`，在构建/stage 完成后启动测试 JVM。依赖仍须显式准备，执行需要 Windows x64 和 D3D12/Vulkan 驱动；缺少设备或 DLL 时明确失败，不跳过。
@@ -253,11 +254,12 @@ Raynium 自身无需动态 VC++ CRT 或额外 mimalloc DLL；系统与显卡驱�
 直接链接 `RadRay::runtime`，不包含 MC bridge。在已准备依赖并完成 configure 的 RadRay checkout 执行：
 
 ```powershell
+python tools/compile_test_shaders.py --build-dir build/windows-x64-msvc/Debug --config Debug
 cmake --build --preset win-x64-debug --target test_radray_runtime --parallel 8
-ctest --preset win-x64-debug -R 'FrameLoop|MeshDrawingPipeline|Material' --output-on-failure
+ctest --preset win-x64-debug -R 'FrameScheduler|GeometryBufferPool|GeometryUploadGpuTest|MappedUploadBuffer|BatchedBufferUpload|RDG|Material' --output-on-failure
 ```
 
-RadRay standalone 的测试依赖需在该 checkout 显式准备，包括 GTest；当前 runtime 用例不需要编译 shader fixture。
+RadRay standalone 的测试依赖需在该 checkout 显式准备，包括 GTest；runtime 的 CPU 用例使用 fake，GeometryUploadGpuTest 需要显式准备 shader fixture 和双后端 GPU。
 `nativeTest` 只运行 Raynium 的适配/共享交接回归，不构建上游 GTest。
 
 native 测试 JVM 使用 Java 25、`--enable-native-access=ALL-UNNAMED` 与指定配置的 stage 路径。仅一个 worker，禁用 JUnit 并行；每个 runtime 的创建和销毁在同一线程，错误线程用例从额外线程调用预期被拒绝的创建、渲染或关闭。GPU/驱动状态不属于普通 Gradle 输入，因此 `nativeTest` 每次显式执行，不使用 up-to-date 或构建缓存结果。

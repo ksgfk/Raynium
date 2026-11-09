@@ -15,8 +15,8 @@ public:
     RayniumRuntime& Runtime() { return _device; }
 private:
     Renderer(RayniumRuntime& device,radray::unique_ptr<radray::FrameScheduler> scheduler,
-        radray::unique_ptr<GeometryArena> arena,SolidFramePipeline* pipeline)
-        :_device(device),_scheduler(std::move(scheduler)),_scene(device,std::move(arena)),_pipeline(pipeline) {}
+        radray::unique_ptr<radray::VertexBufferPool> vertices,radray::unique_ptr<radray::IndexBufferPool> indices,SolidFramePipeline* pipeline)
+        :_device(device),_scheduler(std::move(scheduler)),_scene(device,std::move(vertices),std::move(indices)),_pipeline(pipeline) {}
     RayniumRuntime& _device;
     radray::unique_ptr<radray::FrameScheduler> _scheduler;
     TerrainScene _scene;

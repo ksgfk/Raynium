@@ -23,7 +23,7 @@ Java 复用扁平采集与堆外帧缓冲，按事件同步驻留状态，并直
 | Java bridge | payload 定位、内容缓存、FFM 布局和绑定、DLL/环境/runtime 所有权 | `src/client/java/dev/raynium/bridge/` |
 | C bridge | ABI 查询、参数校验、诊断字符串和不透明 runtime 句柄 | `native/include/raynium/bridge.h`、`native/src/bridge.cpp` |
 | MC native 管线 | ABI 转换、SolidPassProcessor、SolidFramePipeline、shader 与单队列提交 | `native/src/renderer.cpp`、`native/src/solid_pipeline.cpp`、`native/src/mesh_pass.cpp` |
-| 地形驻留 | 场景增量就地更新、几何 arena 区间分配、持久材质、可见批次与跨槽资源退役 | `native/src/terrain_scene.cpp`、`native/src/geometry_arena.cpp` |
+| 地形驻留 | 场景增量就地更新、消费 runtime 顶点/索引池、持久材质、可见批次与跨槽资源退役 | `native/src/terrain_scene.cpp`、`native/src/renderer.cpp` |
 | 共享资源 | DLL 共享输入/输出协议、显式 acquire/release 和 split mip 装配 | `native/src/render_resources.cpp` |
 | MC 场景适配 | SOLID 网格/面组转换为通用场景增量，上传预算、纹理变化 | `src/client/java/dev/raynium/client/terrain/` |
 | MC 预览适配 | 导入原始 Vulkan 对象、帧末复制、resize/退出排空 | `src/client/java/dev/raynium/client/preview/`、`src/client/java/dev/raynium/client/mixin/` |

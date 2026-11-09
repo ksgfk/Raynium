@@ -128,6 +128,7 @@ CMake 拒绝不匹配的 CRT/依赖配置，bridge 编译期拒绝动态 CRT并�
 两配置都通过 whole-archive 链接静态 mimalloc，payload 只有 `rayniumruntime.dll`。Debug 的 mimalloc 使用 `MI_OVERRIDE=OFF`，
 保留显式 `mi_*` 分配，普通 CRT/new/delete 使用 Debug CRT；Release 保留 `MI_OVERRIDE=ON` 静态覆盖。
 bridge 不包含重复的 new/delete 替换头。
+`radray::string`、`radray::vector` 等动态容器通过 `radray::allocator` 使用 `mi_stl_allocator`；适配层的标准容器遵循当前 CRT 与静态覆盖配置。
 配置阶段不恢复依赖，发布要求锁定提交的干净 Release 源码。当前未实现 RadRay 安装包消费模式。
 
 stage 使用 `dumpbin /exports` 核对十三个 ABI 10 入口，再用 `/dependents` 拒绝动态 CRT 和未分类的私有 DLL，收集上游许可证，并先验证完整快照再发布 `current.json`。

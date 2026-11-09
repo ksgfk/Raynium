@@ -152,7 +152,6 @@ add_library(rayniumruntime SHARED
     src/bridge.cpp include/raynium/bridge.h
     src/renderer.cpp include/raynium/renderer.h
     src/terrain_scene.cpp include/raynium/terrain_scene.h
-    src/geometry_arena.cpp include/raynium/geometry_arena.h
     src/solid_pipeline.cpp include/raynium/solid_pipeline.h
     src/render_resources.cpp include/raynium/render_resources.h
     src/mesh_pass.cpp include/raynium/mesh_pass.h)

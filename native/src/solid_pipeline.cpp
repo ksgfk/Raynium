@@ -3,6 +3,7 @@
 #include <radray/logger.h>
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 namespace raynium {
 using namespace radray::render;
@@ -10,15 +11,15 @@ namespace {
 constexpr uint64_t StagingCapacity=8u<<20;
 constexpr uint64_t InstanceCapacity=64u<<10;
 }
-void SolidPassProcessor::AddMeshBatch(const radray::MeshBatchContext& context) {
+void SolidPassProcessor::AddMeshBatch(const radray::MeshBatchContext& context,radray::MeshPassDrawListContext& output) {
     RADRAY_PROFILE_SCOPE_N("Raynium.Cache.BuildBatch");
     if(!_activeMaterialBindings) { _hasErrors=true; return; }
-    const auto binding=_activeMaterialBindings->find(context.Batch.Material.Index);
+    const auto binding=_activeMaterialBindings->find(context.Batch.Material.GetIndex());
     if(binding==_activeMaterialBindings->end() || !binding->second || !binding->second->parameters ||
        context.Batch.Topology!=PrimitiveTopology::TriangleList) { _hasErrors=true; return; }
     const radray::MeshShaderParameterBinding group1{.GroupIndex=1,.ParameterSet=binding->second->parameters.get()};
-    if(!BuildMeshDrawCommands(context,{.Pipeline=_resources.Pipeline(),
-        .ParameterSets=std::span{&group1,1},.AllowDeferredInstanceStream=true,.AllowElementMerging=true})) _hasErrors=true;
+    BuildMeshDrawCommands(context,{.Pipeline=_resources.Pipeline(),
+        .ParameterSets=std::span{&group1,1},.AllowDeferredInstanceStream=true,.AllowElementMerging=true},output);
 }
 bool SolidFramePipeline::Create(RayniumRuntime& device,radray::unique_ptr<SolidFramePipeline>& out,radray::string& error) {
     RADRAY_PROFILE_SCOPE_N("Raynium.Pipeline.Create");
@@ -37,8 +38,9 @@ bool SolidFramePipeline::Create(RayniumRuntime& device,radray::unique_ptr<SolidF
            !slot.passParameterSet->Set(0,0,ShaderBufferBinding{slot.passConstants.get(),{0,256}}) || !slot.passParameterSet->FlushWrites()) {
             error="Cannot create frame slot pass bindings"; return false;
         }
-        if(!MappedUploadBuffer::Create(d,StagingCapacity,BufferUse::CopySource,slot.staging,error) ||
-           !MappedUploadBuffer::Create(d,InstanceCapacity,BufferUse::Vertex,slot.instances,error)) return false;
+        slot.staging=radray::BatchedBufferUpload::Create(d,StagingCapacity).Release();
+        slot.instances=radray::MappedUploadBuffer::Create(d,InstanceCapacity,BufferUse::Vertex).Release();
+        if(!slot.staging || !slot.instances) { error="Cannot create frame slot uploads"; return false; }
         if(timestamps) {
             slot.timestamps=d.CreateQueryPool({QueryType::Timestamp,2,"Raynium SOLID frame"}).Release();
             slot.timing=CreateBuffer(d,16,MemoryType::ReadBack,BufferUse::CopyDestination|BufferUse::MapRead);
@@ -48,16 +50,10 @@ bool SolidFramePipeline::Create(RayniumRuntime& device,radray::unique_ptr<SolidF
     out=radray::unique_ptr<SolidFramePipeline>(new SolidFramePipeline(device,std::move(resources),std::move(slots),std::move(completion)));
     return true;
 }
-bool SolidFramePipeline::ReadyForFrame(radray::string& error) {
-    RADRAY_PROFILE_SCOPE_N("Raynium.Frame.WaitReusable");
-    if(_submitted==UINT64_MAX) { error="Terrain completion sequence exhausted"; return false; }
-    const auto value=_slotCompletion[_submitted%2];
-    if(value && !_completion->WaitFor(value,5000)) { error="Frame slot completion timed out; resources remain live"; return false; }
-    return true;
-}
-SlotUploads SolidFramePipeline::NextUploads() noexcept {
-    auto& slot=_slots[_submitted%2];
-    return SlotUploads{*slot.staging,*slot.instances,slot.lists};
+SlotUploads SolidFramePipeline::GetUploads(radray::FrameSlot& frame) noexcept {
+    auto& slot=_slots[frame.GetIndex()];
+    slot.staging->Reset();
+    return SlotUploads{frame,*slot.staging,*slot.instances,slot.lists};
 }
 bool SolidFramePipeline::Finish(radray::string& error) {
     if(_submitted && !_completion->WaitFor(_submitted,5000)) { error="Renderer completion timed out; resources remain live"; return false; }
@@ -66,9 +62,7 @@ bool SolidFramePipeline::Finish(radray::string& error) {
 void SolidFramePipeline::ExtractFrameData(const radray::Scene&,radray::FrameSlot& slot) noexcept {
     RADRAY_PROFILE_SCOPE_N("Raynium.Frame.Extract");
     if(!_pending || slot.GetIndex()>=_frames.size()) RADRAY_ABORT("Missing terrain frame extraction source");
-    if(slot.GetIndex()!=_submitted%2) RADRAY_ABORT("Terrain frame slot does not match the prepared slot resources");
     if(_processor.HasErrors()) RADRAY_ABORT("Invalid SOLID mesh command or material binding");
-    if(!_pending->retiredResources.empty()) slot.RetireResource(std::move(_pending->retiredResources));
     auto* frame=slot.GetArena().Emplace<FrameData>(std::move(*_pending));
     _frames[slot.GetIndex()]=frame;
 }
@@ -91,31 +85,7 @@ void SolidFramePipeline::SetupGraph(radray::RDGBuilder& graph,const radray::Scen
         graph.UploadBuffer(constants,0,bytes);
     }
     const auto instances=graph.ImportBuffer(resources.instances->Get(),BufferState::HostWrite,BufferState::HostWrite);
-    // COMMON is the submission boundary for device buffers on both backends.
-    const auto importGeometry=[&](Buffer* buffer) {
-        return graph.ImportBuffer(buffer,BufferState::Common,BufferState::Common);
-    };
-    if(!input.uploads.empty()) {
-        RADRAY_PROFILE_SCOPE_N("Raynium.Graph.GeometryUploads");
-        const auto staging=graph.ImportBuffer(resources.staging->Get(),BufferState::HostWrite,BufferState::HostWrite);
-        struct Copy { radray::RDGBufferHandle destination; uint64_t destinationOffset,sourceOffset,bytes; };
-        radray::vector<Copy> copies;
-        copies.reserve(input.uploads.size());
-        for(const auto& upload:input.uploads) if(upload.bytes) {
-            const auto destination=importGeometry(upload.destination);
-            graph.MarkOutput(destination);
-            copies.push_back({destination,upload.destinationOffset,upload.stagingOffset,upload.bytes});
-        }
-        graph.AddCopyPass("Raynium GeometryUpload",[staging,&copies](radray::RDGCopyPassBuilder& pass) {
-            pass.ReadBuffer(staging);
-            for(const auto& copy:copies) pass.WriteBuffer(copy.destination);
-        },[staging,copies](radray::RDGCopyPassContext& context) {
-            RADRAY_PROFILE_SCOPE_N("Raynium.Frame.RecordGeometryUploads");
-            for(const auto& copy:copies) context.GetCommandBuffer().CopyBufferToBuffer(
-                &context.Resolve(copy.destination),copy.destinationOffset,&context.Resolve(staging),copy.sourceOffset,copy.bytes);
-            return true;
-        });
-    }
+    if(!resources.staging->CommitToGraph(graph,"Raynium GeometryUpload")) RADRAY_ABORT("Cannot commit terrain uploads");
     radray::vector<radray::RDGTextureHandle> textures;
     if(input.textures) textures=input.textures->SetupGraph(graph,f.changed_textures);
     const bool submitted=input.target->Submitted()!=0;
@@ -133,7 +103,8 @@ void SolidFramePipeline::SetupGraph(radray::RDGBuilder& graph,const radray::Scen
             .SetDepthStencil(depth,TextureState::DepthWrite,LoadAction::Clear,StoreAction::Discard,
                 LoadAction::DontCare,StoreAction::Discard,{0,0});
         if(f.instance_count) pass.ReadBuffer(instances,BufferState::Vertex);
-        for(const auto& [buffer,state]:input.geometry) pass.ReadBuffer(importGeometry(buffer),state);
+        input.vertices->AddPassReadAccess(graph,pass);
+        input.indices->AddPassReadAccess(graph,pass);
         if(!input.visibleBatches.empty()) for(const auto texture:textures) pass.ReadTexture(texture);
     },[this,index](radray::RDGRasterPassContext& context) {
         RADRAY_PROFILE_SCOPE_N("Raynium.Frame.RecordDraws");
@@ -159,6 +130,7 @@ void SolidFramePipeline::ExtractMeshPass(radray::MeshPassId pass,const radray::S
 }
 void SolidFramePipeline::SubmitFrame(radray::FrameSlot& slot,CommandBuffer& graphCommands) noexcept {
     RADRAY_PROFILE_SCOPE_N("Raynium.Frame.SubmitHandoff");
+    if(_submitted==std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Terrain completion sequence exhausted");
     auto& frame=*_frames[slot.GetIndex()];
     auto& input=frame.input; const auto& f=input.parameters; auto& target=*input.target;
     auto& resources=_slots[slot.GetIndex()];
@@ -192,7 +164,7 @@ void SolidFramePipeline::SubmitFrame(radray::FrameSlot& slot,CommandBuffer& grap
         slot.GetQueue().Submit({.CmdBuffers={commands.data(),commandCount},.SignalFences={signals.data(),signalCount},.SignalValues={signalValues.data(),signalCount},
             .WaitFences={waits.data(),waitCount},.WaitValues={waitValues.data(),waitCount}});
     }
-    frame.completion=++_submitted; _slotCompletion[slot.GetIndex()]=frame.completion;
+    frame.completion=++_submitted;
 }
 void SolidFramePipeline::Wait(radray::FrameSlot& slot) noexcept {
     RADRAY_PROFILE_SCOPE_N("Raynium.Frame.WaitCompleted");

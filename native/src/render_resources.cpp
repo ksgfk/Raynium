@@ -15,40 +15,6 @@ RenderBuffer CreateBuffer(Device& d,uint64_t bytes,MemoryType memory,BufferUses 
     if(memory==MemoryType::Upload) uses|=BufferUse::MapWrite;
     return d.CreateBuffer({.Size=bytes,.Memory=memory,.Usage=uses,.Hints=hints}).Release();
 }
-MappedUploadBuffer::~MappedUploadBuffer() noexcept {
-    if(_buffer && _data) _buffer->Unmap();
-}
-bool MappedUploadBuffer::Create(Device& device,uint64_t capacity,BufferUses usage,radray::unique_ptr<MappedUploadBuffer>& output,radray::string& error) {
-    RADRAY_PROFILE_SCOPE_N("Raynium.UploadBuffer.Create");
-    if(output) { error="Mapped upload output occupied"; return false; }
-    if(!capacity) { error="Mapped upload capacity must be positive"; return false; }
-    auto buffer=CreateBuffer(device,capacity,MemoryType::Upload,usage,ResourceHint::PersistentMap);
-    if(!buffer) { error="Cannot create mapped upload buffer"; return false; }
-    auto* data=static_cast<std::byte*>(buffer->Map(0,capacity));
-    if(!data) { error="Cannot map upload buffer"; return false; }
-    output=radray::unique_ptr<MappedUploadBuffer>(new MappedUploadBuffer(std::move(buffer),data,capacity,usage)); return true;
-}
-bool MappedUploadBuffer::Reserve(Device& device,uint64_t bytes,radray::string& error) {
-    if(bytes<=_capacity) return true;
-    RADRAY_PROFILE_SCOPE_N("Raynium.UploadBuffer.Grow");
-    uint64_t capacity=_capacity ? _capacity : 1;
-    while(capacity<bytes) capacity<<=1;
-    radray::unique_ptr<MappedUploadBuffer> replacement;
-    if(!Create(device,capacity,_usage,replacement,error)) return false;
-    // Only callers that confirmed the owner's previous GPU use completed reach this point.
-    if(_buffer && _data) _buffer->Unmap();
-    _data=nullptr;
-    _buffer=std::move(replacement->_buffer);
-    _data=replacement->_data;
-    _capacity=capacity;
-    replacement->_data=nullptr;
-    return true;
-}
-void MappedUploadBuffer::Flush(uint64_t offset,uint64_t bytes) noexcept {
-    RADRAY_PROFILE_SCOPE_N("Raynium.UploadBuffer.Flush");
-    if(!bytes) return;
-    _buffer->FlushMappedRange({offset,bytes});
-}
 void TextureBarrier(CommandBuffer& c,Texture* texture,TextureStates before,TextureStates after,ExternalOwnershipTransfer transfer) {
     const ResourceBarrierDescriptor b=BarrierTextureDescriptor{.Target=texture,.Before=before,.After=after,
         .BeforeStages=ShaderStage::Vertex|ShaderStage::Pixel,.AfterStages=ShaderStage::Vertex|ShaderStage::Pixel,.ExternalTransfer=transfer};
