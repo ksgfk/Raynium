@@ -1,5 +1,6 @@
 #pragma once
 #include <raynium/render_resources.h>
+#include <raynium/shader_pack.h>
 #include <radray/runtime/material.h>
 #include <unordered_map>
 #include <memory>
@@ -13,13 +14,14 @@ using MaterialBindingMap = std::unordered_map<uint32_t,std::shared_ptr<MeshMater
 
 class MeshPassResources final {
 public:
-    static bool Create(radray::render::Device&,radray::unique_ptr<MeshPassResources>&,radray::string&);
+    static bool Create(radray::render::Device&,std::span<const radray::byte>,radray::unique_ptr<MeshPassResources>&,radray::string&);
     radray::render::BindingGroupLayout* PassGroupLayout() const { return _objects->passGroupLayout.get(); }
     radray::render::GraphicsPipelineState* Pipeline() const { return _objects->pipeline.get(); }
     bool CreateMaterialBinding(radray::render::Device&,const rn_material_update&,const SharedTextures&,
         MeshMaterialBinding&,radray::MaterialRenderProxy&,radray::string&) const;
 private:
     struct Objects {
+        std::unique_ptr<ShaderProgram> program;
         radray::unique_ptr<radray::render::Shader> vs,ps;
         radray::unique_ptr<radray::render::BindingGroupLayout> passGroupLayout,materialGroupLayout;
         radray::unique_ptr<radray::render::PipelineLayout> pipelineLayout;

@@ -5,7 +5,7 @@
 # Native runtime
 
 `rayniumruntime` DLL 通过 CMake `add_subdirectory` 从锁定的 RadRay 源码编译并静态链接 `RadRay::runtime`，不消费另一份预编译 runtime。
-公共头使用 `<radray/runtime/...>`，本仓库的具体适配类型位于 `raynium`。bridge DLL 为 `rayniumruntime.dll`，使用 ABI 10；Debug/MTd、Release/MT 与静态 mimalloc 的构建约束见[互操作与加载](interop.md#构建身份与-payload)。
+公共头使用 `<radray/runtime/...>`，本仓库的具体适配类型位于 `raynium`。bridge DLL 为 `rayniumruntime.dll`，使用 ABI 11；Debug/MTd、Release/MT 与静态 mimalloc 的构建约束见[互操作与加载](interop.md#构建身份与-payload)。
 默认依赖版本由 `native/radray.lock.json` 维护；本地 `radraySourceDir` 覆盖消费指定工作树。当前适配需要上游 BeginFrame、几何池与分页上传接口；本地联调命令见构建指南。构建身份包含 RadRay 源码、版本、dirty 状态及工具链。
 上游基础契约位于 RadRay `docs/architecture/runtime.md`。本项目的测试入口与覆盖见[构建与测试](../guide/build-test.md#java-与-rhi-测试)。
 
@@ -49,7 +49,7 @@ Group 1 是每个材质版本的图集/lightmap 与 sampler 参数集，随材�
 BuildMeshDrawCommands 将顶点流和参数载荷交给 runtime 按内容去重并引用计数，额外 submesh 由命令独占。
 64 字节 MeshDrawCommand 通过 VertexBuffersIndex、PayloadIndex 和 ExtraElementsIndex 引用绑定存储；
 每 Pass 的稠密命令数组和 batch 槽表由 runtime 管理。命令及池条目不拥有所引用的 RHI 对象，缓存列表负责释放其绑定引用。
-MeshPassResources 的稳定存储拥有 shader、group layouts、pipeline layout、PSO、MaterialResource 与 base Material；
+MeshPassResources 从调用方的 [shader pack](shader-pack.md) 解码当前后端的 terrain 程序并校验反射接口；稳定存储拥有 artifact、shader、group layouts、pipeline layout、PSO、MaterialResource 与 base Material；
 逆序析构保证被依赖布局晚于参数集和 PSO 释放，帧槽常量也晚于自身参数集释放。
 
 VertexInput 声明 28 字节顶点槽 0 和 16 字节实例槽 1；驻留 mesh 只绑定槽 0，允许延迟实例流。

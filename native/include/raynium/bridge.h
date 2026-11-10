@@ -7,7 +7,7 @@
 #else
 #define RAYNIUM_API __declspec(dllimport)
 #endif
-#define RN_ABI_VERSION 10u
+#define RN_ABI_VERSION 11u
 
 struct rn_runtime;
 struct rn_renderer;
@@ -88,7 +88,8 @@ struct rn_shared_image_info {
 };
 
 enum rn_frame_flags : uint32_t { RN_FRAME_RGSS = 1, RN_FRAME_PROFILE = 2 };
-struct rn_renderer_desc { uint32_t struct_size, flags; };
+// Pack bytes are borrowed only during rn_create_renderer; no pointer is retained.
+struct rn_renderer_desc { uint32_t struct_size, flags; const void* shader_pack; uint64_t shader_pack_size; };
 struct rn_render_target_desc { uint32_t struct_size, width, height, reserved; };
 struct rn_texture_desc { uint32_t width, height, mip_levels, split_mips; };
 struct rn_shared_textures_desc { uint32_t struct_size, texture_count; const rn_texture_desc* textures; };

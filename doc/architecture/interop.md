@@ -4,7 +4,7 @@
 
 # 互操作与加载
 
-Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 10。
+Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 11。
 当前只提交 SOLID 地形场景帧，不保留旧 ABI 兼容层。
 设备、场景及完成序号见 [Native runtime](native-runtime.md)，操作与验证见[构建与测试](../guide/build-test.md)。
 
@@ -30,8 +30,9 @@ Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 1
 renderer、共享资源与帧入口通过统一异常转换层报告 FAILED；进入 RadRay 帧回调后的失败及底层 RHI 的不可恢复终止不转换为可恢复错误。
 没有 upcall、全局 last-error、跨语言共享队列或 GC/Cleaner 回收。
 
-## ABI 10 布局
+## ABI 11 布局
 
+renderer 创建时借用 shader pack 数据，native 拥有所需的解码 artifact；详细来源与寿命见[Shader pack](shader-pack.md)。
 所有指针仅在本次同步调用期间借用；保留的 submesh、材质、primitive 描述被复制，顶点和索引写入 native staging 后上传到 GPU。
 索引不保留 CPU 值副本；资源增删改按当帧增量数组直接应用，失败后不恢复场景，调用方关闭 renderer。
 ID 非零，属于 frame epoch；同 ID 更新替换资源，epoch 非零且不能倒退。
@@ -42,7 +43,7 @@ ID 非零，属于 frame epoch；同 ID 更新替换资源，epoch 非零且不�
 | --- | --- |
 | `rn_env_desc` | 12，size/backend/flags；backend=1 D3D12 或 2 Vulkan，flags=1 driver validation |
 | `rn_runtime_desc` | 20，size/flags/node_mask/luid[8]，LUID 偏移 12；flags=1 匹配宿主 GPU |
-| `rn_renderer_desc` | 8，size/flags；flags 当前必须为 0 |
+| `rn_renderer_desc` | 24，size/flags，偏移 8 为 shader_pack 指针，偏移 16 为 uint64 shader_pack_size；flags 必须为 0 |
 | `rn_render_target_desc` | 16，size/width/height/reserved |
 | `rn_texture_desc` | 16，width/height/mip_levels/split_mips |
 | `rn_shared_textures_desc` | 16，size/count/textures 指针；最多 16 个逻辑纹理 |
@@ -86,7 +87,7 @@ element_mask 为非零 32 位子网格掩码，bit k 选择第 k 个 submesh，U
 
 handle_type=1 表示 D3D12Resource/D3D12Fence，2 表示 OpaqueWin32。输入图像的 ready/consumed 分别表示 native 释放与 MC 写入完成。
 输出信息 capacity 按字节；输入导出 capacity 按 144 字节记录数量。native 静态断言校验尺寸和关键偏移，Java `SharedImageInfo.read` 显式读取。
-查询结构为 240 字节；Java、构建 manifest、stage 和分发校验都只接受 ABI 10。
+查询结构为 240 字节；Java、构建 manifest、stage 和分发校验都只接受 ABI 11。
 
 ## Java 包装与所有权
 
@@ -121,7 +122,7 @@ Fabric 使用 unnamed module，游戏 JVM 显式设置 `--enable-native-access=A
 
 ## 构建身份与 payload
 
-`native/CMakeLists.txt` 用独立 binary 目录将锁定 RadRay 作为源码子工程引入，DLL 链接上游 `RadRay::runtime` 静态库，由该库传递依赖 render/core，只导出 bridge 的十三个 C 入口。
+`native/CMakeLists.txt` 用独立 binary 目录将锁定 RadRay 作为源码子工程引入，DLL 链接上游 `RadRay::runtime` 静态库，另静态链接 `RadRay::shader` decoder；依赖传递到 render/core，只导出 bridge 的十三个 C 入口。
 Windows x86_64 的 Debug 固定 `/MTd`，Release 固定 `/MT`，bridge、RadRay 和所有链接的依赖必须匹配对应配置的 CRT。
 Debug 使用 Raynium 显式准备的独立依赖前缀，Release 使用 RadRay 的 `windows-x64-msvc-staticcrt` 三元组。默认受管源码的版本由锁文件约束，本地覆盖和 dirty 源码可用于开发；分发要求锁定版本的干净源码。
 CMake 拒绝不匹配的 CRT/依赖配置，bridge 编译期拒绝动态 CRT并断言 Debug/Release 的 STL iterator 等级分别为 2/0。
@@ -131,9 +132,9 @@ bridge 不包含重复的 new/delete 替换头。
 `radray::string`、`radray::vector` 等动态容器通过 `radray::allocator` 使用 `mi_stl_allocator`；适配层的标准容器遵循当前 CRT 与静态覆盖配置。
 配置阶段不恢复依赖，发布要求锁定提交的干净 Release 源码。当前未实现 RadRay 安装包消费模式。
 
-stage 使用 `dumpbin /exports` 核对十三个 ABI 10 入口，再用 `/dependents` 拒绝动态 CRT 和未分类的私有 DLL，收集上游许可证，并先验证完整快照再发布 `current.json`。
+stage 使用 `dumpbin /exports` 核对十三个 ABI 11 入口，再用 `/dependents` 拒绝动态 CRT 和未分类的私有 DLL，收集上游许可证，并先验证完整快照再发布 `current.json`。
 schema 1 manifest 包含平台、ABI/布局、构建配置、CRT、工具链、build ID、RadRay commit/dirty、DLL/许可证大小与 SHA-256、系统依赖分类。
-ABI 10 的身份 flags 中 bit 1（static CRT）和 bit 2（mimalloc）均为 1，布局不变。loader 只接受 Debug/MTd 或 Release/MT 的单 DLL 清单，拒绝错配和 MD 的 schema 2 payload。
+ABI 11 的身份 flags 中 bit 1（static CRT）和 bit 2（mimalloc）均为 1，布局不变。loader 只接受 Debug/MTd 或 Release/MT 的单 DLL 清单，拒绝错配和 MD 的 schema 2 payload。
 build ID 来自 native/RadRay（含 `modules/runtime/`）源码及配置/工具链指纹；DLL SHA-256 标识实际二进制，manifest SHA-256 标识内容快照，三者用途不同。
 哈希用于一致性检查，不等于来源认证。
 
@@ -160,7 +161,7 @@ loader 的选择顺序为：显式开发目录 `-Draynium.native.dir=...`，否�
 2. 将实际 payload 发布到游戏目录下 `.raynium/natives/windows-x86_64/<content-hash>/`。
 3. 检查已有完整副本，或写入独立 staging 目录，校验后再发布；多进程使用文件锁协调解包。
 4. 客户端初始化入口检查游戏 JVM native access 权限，以绝对路径调用 `SymbolLookup.libraryLookup` 加载 bridge。
-5. 先调用版本入口核对 ABI 10，再用带诊断缓冲区的 `rn_query_abi` 检查布局与构建身份。
+5. 先调用版本入口核对 ABI 11，再用带诊断缓冲区的 `rn_query_abi` 检查布局与构建身份。
 6. 随后调用 `rn_init_env` 创建环境；CLIENT_STARTED 再通过 `rn_create_runtime` 创建 RHI 设备/Direct 队列。
    早期准备失败由 Fabric 初始化失败路径报告，设备创建失败清理并输出 MC 崩溃报告，仍不接管 MC 绘制。
 
@@ -177,4 +178,4 @@ loader 的选择顺序为：显式开发目录 `-Draynium.native.dir=...`，否�
 
 不通过修改进程全局 PATH 或 SetDllDirectory 来影响其他 Minecraft 模组。当前没有为不同模组的同名 DLL 提供版本隔离机制。
 
-驱动和系统图形 DLL 不从开发机复制进 mod；shader 离线编译后嵌入 DLL，运行时不加载或打包 `dxcompiler.dll`。
+驱动和系统图形 DLL 不从开发机复制进 mod；shader 离线编译为内置资源 `.rnsp`，运行时不加载或打包 `dxcompiler.dll`。资产格式与寿命见[Shader pack](shader-pack.md)。

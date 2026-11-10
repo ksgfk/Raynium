@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 project(RayniumRuntime VERSION 0.1.0 LANGUAGES C CXX)
 option(RAYNIUM_ENABLE_PROFILER "Enable on-demand Tracy instrumentation" OFF)
+option(RAYNIUM_BUILD_SHADER_TOOLS "Build the explicit offline shader pack compiler" OFF)
 set(RAYNIUM_PROFILER_JSON false)
 if(RAYNIUM_ENABLE_PROFILER)
     set(RAYNIUM_PROFILER_JSON true)
@@ -131,8 +132,8 @@ set(RADRAY_BUILD_RENDER ON)
 set(RADRAY_BUILD_RUNTIME ON)
 set(RADRAY_ENABLE_D3D12 ON)
 set(RADRAY_ENABLE_VULKAN ON)
-set(RADRAY_BUILD_SHADER OFF)
-set(RADRAY_BUILD_SHADER_COMPILER OFF)
+set(RADRAY_BUILD_SHADER ON)
+set(RADRAY_BUILD_SHADER_COMPILER ${RAYNIUM_BUILD_SHADER_TOOLS})
 set(RADRAY_BUILD_SHADER_TOOLS OFF)
 set(RADRAY_ENABLE_MIMALLOC ON)
 set(RADRAY_ENABLE_PROFILER ${RAYNIUM_ENABLE_PROFILER})
@@ -154,12 +155,13 @@ add_library(rayniumruntime SHARED
     src/terrain_scene.cpp include/raynium/terrain_scene.h
     src/solid_pipeline.cpp include/raynium/solid_pipeline.h
     src/render_resources.cpp include/raynium/render_resources.h
-    src/mesh_pass.cpp include/raynium/mesh_pass.h)
+    src/mesh_pass.cpp include/raynium/mesh_pass.h
+    src/shader_pack.cpp include/raynium/shader_pack.h)
 target_compile_features(rayniumruntime PRIVATE cxx_std_20)
 target_include_directories(rayniumruntime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_compile_definitions(rayniumruntime PRIVATE RAYNIUM_RUNTIME_EXPORTS)
 target_compile_options(rayniumruntime PRIVATE /W4 /permissive- /Zc:preprocessor /utf-8)
-target_link_libraries(rayniumruntime PRIVATE RadRay::runtime)
+target_link_libraries(rayniumruntime PRIVATE RadRay::runtime RadRay::shader)
 set_target_properties(rayniumruntime PROPERTIES
     CXX_EXTENSIONS OFF
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
@@ -169,3 +171,12 @@ set_target_properties(rayniumruntime PROPERTIES
 
 install(TARGETS rayniumruntime RUNTIME DESTINATION . COMPONENT runtime)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/bin/native-build.json" DESTINATION . COMPONENT runtime)
+
+if(RAYNIUM_BUILD_SHADER_TOOLS)
+    add_executable(raynium_shader_pack tools/shader_pack.cpp src/shader_pack.cpp)
+    target_include_directories(raynium_shader_pack PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(raynium_shader_pack PRIVATE RadRay::shadercompiler)
+    target_compile_features(raynium_shader_pack PRIVATE cxx_std_20)
+    target_compile_options(raynium_shader_pack PRIVATE /W4 /permissive- /Zc:preprocessor /utf-8)
+    set_target_properties(raynium_shader_pack PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()

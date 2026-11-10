@@ -32,10 +32,10 @@ public final class NativeRuntime implements AutoCloseable {
         }
     }
 
-    public NativeRenderer createRenderer() {
+    public NativeRenderer createRenderer(NativeShaderPack shaders) {
         checkOpen();
         if(renderer!=null) throw new IllegalStateException("Runtime already has a renderer");
-        renderer=NativeRenderer.create(this,bindings,handle);
+        renderer=NativeRenderer.create(this,bindings,handle,java.util.Objects.requireNonNull(shaders));
         return renderer;
     }
     void releasedRenderer(NativeRenderer value) {

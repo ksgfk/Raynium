@@ -9,7 +9,7 @@ Java 25 通过 FFM 和 C ABI 加载 DLL；DLL 消费上游 `RadRay::runtime` 静
 
 ## 当前实现与边界
 
-构建与分发、payload 定位和内容缓存、ABI 10 检查、设备创建/销毁及客户端生命周期已实现。
+构建与分发、payload 定位和内容缓存、ABI 11 检查、设备创建/销毁及客户端生命周期已实现。
 Windows MC Vulkan 通过 Mixin 在帧末复制 native 共享 SOLID 地形小 RT 到右上角，原版世界绘制和呈现继续运行。
 SOLID 使用持久 RadRay Scene、增量 MeshDrawCommand 缓存和双槽 FrameScheduler。SolidFramePipeline 基于上游 RenderGraphFramePipeline，使用 runtime 状态排序/元素合并及 RDG 上传、输入装配、光栅与外部所有权屏障，Raynium 负责跨宿主同步和队列提交；没有通用 RenderSystem、View/Pass 框架或窗口接管。
 Java 复用扁平采集与堆外帧缓冲，按事件同步驻留状态，并直接传递 section 元素掩码；上传预算与回退回收契约见[地形预览](terrain-preview.md)。
@@ -34,7 +34,7 @@ Java 复用扁平采集与堆外帧缓冲，按事件同步驻留状态，并直
 flowchart LR
     Lifecycle[Fabric 客户端生命周期] --> Java[NativeEnvironment / NativeRuntime]
     Java --> FFM[NativeBindings / FFM]
-    FFM --> ABI[C ABI 10]
+    FFM --> ABI[C ABI 11]
     ABI --> Env[RayniumEnvironment 单例环境]
     Env --> Runtime[RayniumRuntime 设备会话]
     Runtime --> Scheduler[FrameScheduler / 双 FrameSlot]
@@ -53,6 +53,7 @@ flowchart LR
 | 主题 | 权威入口 |
 | --- | --- |
 | native 设备会话、所有权、关闭及能力边界 | [Native runtime](native-runtime.md) |
+| shader pack、离线编译与资源来源 | [Shader pack](shader-pack.md) |
 | 当前 C ABI、FFM、payload 与加载 | [互操作与加载](interop.md) |
 | SOLID 地形数据、纹理传输与绘制 | [地形预览](terrain-preview.md) |
 | Fabric 生命周期和当前 MC 接入范围 | [Minecraft 接入](minecraft-integration.md) |

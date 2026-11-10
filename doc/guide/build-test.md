@@ -45,7 +45,7 @@ python external/RadRay/tools/build_third_party.py build --triplet windows-x64-ms
 ```
 
 Debug 用于默认开发启动，Release 用于分发；只运行相应步骤也可以。构建本身离线，缺包则停止。
-普通构建使用已嵌入的 shader 字节码，关闭 RadRay shader compiler/tools，不要求 DXC SDK。
+普通构建验证并复制已提交的 `.rnsp` 资源，native 只链接 RadRay shader decoder，关闭 compiler/tools，不要求 DXC SDK。资源验证使用 Python。
 Debug 使用 `/MTd`、Debug CRT 和默认 STL iterator 检查；Release 使用 `/MT`。两配置均静态链接 mimalloc，不复用 MD 包。
 锁定 RadRay 的 `staticcrt` 三元组在 Debug 也固定 MT，因此 Debug 使用 Raynium 的显式离线脚本，
 按上游依赖 catalog 准备当前所需的 16 个包；构建和 SDK 位于 `build/native-dependencies/windows-x64-msvc-mtd/`。
@@ -56,15 +56,23 @@ Release 如只准备当前 core/render/runtime 所需集合及测试库，可向
 `--only fmt,magic_enum,eigen,sigslot,stdexec,spdlog,xxHash,yyjson,pugixml,mimalloc,Vulkan-Headers,volk,VulkanMemoryAllocator,DirectX-Headers,D3D12MemoryAllocator,googletest`。
 stage 所需许可证来自这些第三方源码目录，需保留源码。
 
-修改 `native/shaders/terrain.hlsl` 后显式准备锁定 DXC 并重新生成头文件，再运行 native 构建：
+修改 `native/shaders/terrain.hlsl` 后显式准备锁定 DXC 并生成 shader pack：
 
 ```powershell
 python external/RadRay/tools/fetch_sdks.py restore --only radray_dxc
-python tools/compile_preview_shaders.py
+python tools/compile_shader_pack.py
+python tools/shader_pack.py src/client/resources/assets/raynium/shaderpacks/default.rnsp
 ```
 
-脚本默认使用 `external/RadRay/SDKs/radray_dxc/extracted/bin/dxc.exe`，也可通过 `--dxc` 指定路径。
-地形 HLSL 编译为 DXIL/SPIR-V，输出到 `native/include/raynium/terrain_bytecode.h`；运行时不打包编译器。
+生成器在 `build/shader-tools/Release/` 编译离线工具，输出并提交 `src/client/resources/assets/raynium/shaderpacks/default.rnsp`。
+`--program terrain=terrain.hlsl --program other=other.hlsl` 支持多个命名程序；`--output` 指定输出，`--radray-source` 指定同一依赖工作树。
+`--clean` 重新配置并全量重编离线工具。原生 DLL 不包含编译器；格式、反射校验和来源规则见[Shader pack](../architecture/shader-pack.md)。
+`verifyShaderPack` 随 `processClientResources` 检查包和必要 terrain；`testShaderPackTools` 随 `check` 运行容器拒绝测试。
+
+MSVC 升级后，清理对应配置的 `build/native/` CMake 输出及旧 stage，再用依赖脚本的 `--clean` 重编相应静态库。
+删除前解析并核对目标在构建输出目录内；不删除源码、下载 SDK 或游戏数据。
+启用 profiler 的配置还需运行 `python tools/build_profiler_dependencies.py --config Debug --clean` 或对应 Release 命令。
+CMake 子进程使用隐藏控制台，使本地化 MSVC `/showIncludes` 与 Ninja 的依赖扫描使用同一输出代码页。
 
 ## 开发启动与 IDEA
 
@@ -116,7 +124,7 @@ Loom 的两个客户端运行配置都给 Minecraft JVM 添加 `--enable-native-
 
 加载成功应记录 DLL 来源与实际路径，以及 ABI/build ID/RadRay revision/dirty/config/CRT/toolchain。
 日志的 CRT 在 Debug 为 `MTd`、Release 为 `MT`；没有 allocator DLL 的预加载或 redirected 状态。静态分配器随 bridge 加载与卸载。
-当前要求 ABI `10` 和十三个导出。`Raynium runtime created` 表示设备与队列完成；
+当前要求 ABI `11` 和十三个导出。`Raynium runtime created` 表示设备与队列完成；
 `Raynium shared preview ready` 表示输出资源已创建和导入；`Raynium SOLID terrain inputs ready` 记录输入模式及 mip 数。实际显示仍须检查游戏画面。
 
 ## 自动跑图与保存 Tracy
@@ -240,6 +248,8 @@ Raynium 自身无需动态 VC++ CRT 或额外 mimalloc DLL；系统与显卡驱�
 | `BenchmarkRouteTest` | 路线位置与最短 yaw 插值、端点限制、非法时间与角度拒绝 | `test` |
 | `NativeManifestTest` | Debug/MTd 与 Release/MT 单 DLL 清单；CRT/配置错配、MD/MDd、schema 2、缺失/多余项、非法路径和哈希拒绝 | `test` |
 | `PreviewRegionTest` | 显示矩形、MC Y 翻转后的复制位置和小窗口边界 | `test` |
+| `BuiltinShaderPackTest` | 内置来源筛选、缺失资源与流关闭 | `test` |
+| `NativeShaderPackTest` | 双后端容器/artifact/反射拒绝、ABI 10 描述符拒绝、不可变快照和创建失败后重建 | `nativeTest` |
 | `NativeAbiTest` | 参数校验、输出清空、诊断截断和空句柄销毁 | `nativeTest` |
 | `NativeRuntimeTest` | 双后端环境/设备创建、重建、线程限制、幂等关闭、单例保护及早期 factory 共享绘制 | `nativeTest` |
 | `MeshPayloadTest` / `TextureTransferTest` | 保守面组、紧凑元素位、越界模型、ByteBuffer 顶点拥有权和失败降级 | `test` |

@@ -18,7 +18,7 @@ private:
 };
 class SolidFramePipeline final : public radray::RenderGraphFramePipeline {
 public:
-    static bool Create(RayniumRuntime&,radray::unique_ptr<SolidFramePipeline>&,radray::string&);
+    static bool Create(RayniumRuntime&,std::span<const radray::byte>,radray::unique_ptr<SolidFramePipeline>&,radray::string&);
     const MeshPassResources& Resources() const { return *_resources; }
     void BeginFrame(TerrainFrame& frame,const MaterialBindingMap* bindings) noexcept {
         _pending=&frame; _processor.BeginSync(bindings);

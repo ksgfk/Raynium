@@ -49,7 +49,7 @@ native 直接消费可见元素掩码，再通过 GatherVisibleMeshDrawCommands 
 再在 RDG 光栅回调中由 MeshPassFrameDrawList::Submit 录制索引绘制。缓存命令只绑定驻留顶点与索引；当帧通过 InstanceStream 绑定完整的 origin/visibility 流，
 FirstInstance/InstanceCount 来自可见项覆盖值，不在 CPU 上逐实例展开。SOLID 开启 runtime 连续元素合并，满足索引连续和单实例等条件时减少 DrawIndexed 调用。
 
-地形 HLSL 离线编译 DXIL/SPIR-V。Group 0 保存每槽帧常量，Group 1 保存持久材质纹理与采样器。shader 包含图集采样修正、RGSS、光照、雾和淡入；sampler 随 MC anisotropy 设置更新。
+地形 HLSL 离线编译为 [shader pack](shader-pack.md) 中的 DXIL/SPIR-V artifact，由 MC ResourceManager 加载。Group 0 保存每槽帧常量，Group 1 保存持久材质纹理与采样器。shader 包含图集采样修正、RGSS、光照、雾和淡入；sampler 随 MC anisotropy 设置更新。
 SOLID 使用不混合颜色写入、反向 Z（clear=0、GreaterEqual、深度写入）、runtime 每槽瞬态池复用的 D32，D3D12 补偿 clip Y，绕序与 MC Vulkan 一致。
 小 RT 的宽高各取主 RT 的四分之一整除值，使用 MC 投影；非整除尺寸的宽高比存在取整误差。
 
@@ -88,8 +88,8 @@ resize 排空帧槽后重建输出颜色和交接信息，各槽在下一帧从 
 
 ## 通用 ABI 接入
 
-地形通过 ABI 10 的 `renderer`、`render_target`、`shared_textures` 与一次 `render_frame` 传递数据。
-完整布局和借用约束归[互操作与加载](interop.md#abi-10-布局)。
+地形通过 ABI 11 的 `renderer`、`render_target`、`shared_textures` 与一次 `render_frame` 传递数据。
+完整布局和借用约束归[互操作与加载](interop.md#abi-11-布局)。
 `TerrainPreview` 负责 MC 输入复制、纹理变化和性能采样，`TerrainResidency` 管理上传选择、版本暂用、延迟回收与直写帧缓冲；anisotropy 改变时才发送材质更新。
 共享图像依据 export 的 textureIndex/mipLevel/mipCount 导入；图集 direct 导出一张完整 mip 图像，split 导出每级一张，lightmap 另占一个逻辑纹理。
 

@@ -3,7 +3,7 @@
 #include <radray/scope_guard.h>
 
 namespace raynium {
-bool Renderer::Create(RayniumRuntime& device,radray::unique_ptr<Renderer>& out,radray::string& error) {
+bool Renderer::Create(RayniumRuntime& device,std::span<const radray::byte> shaders,radray::unique_ptr<Renderer>& out,radray::string& error) {
     RADRAY_PROFILE_SCOPE_N("Raynium.Renderer.Create");
     if(out) { error="Renderer output occupied"; return false; }
     using namespace radray::render;
@@ -19,7 +19,7 @@ bool Renderer::Create(RayniumRuntime& device,radray::unique_ptr<Renderer>& out,r
     auto indices=radray::IndexBufferPool::Create(device.GetDevice(),{.DebugNamePrefix="TerrainIndices"}).Release();
     if(!vertices || !indices) { error="Cannot create terrain geometry pools"; return false; }
     radray::unique_ptr<SolidFramePipeline> pipeline;
-    if(!SolidFramePipeline::Create(device,pipeline,error)) return false;
+    if(!SolidFramePipeline::Create(device,shaders,pipeline,error)) return false;
     auto* borrowed=pipeline.get();
     auto scheduler=radray::FrameScheduler::Create(device,std::move(pipeline),2).Release();
     if(!scheduler) { error="Cannot create terrain frame scheduler"; return false; }

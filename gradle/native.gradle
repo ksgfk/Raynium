@@ -7,6 +7,22 @@ if (!(nativeConfig in ['Debug', 'Release'])) {
     throw new GradleException('nativeConfig must be Debug or Release')
 }
 def nativeScript = layout.projectDirectory.file('tools/native.py').asFile.absolutePath
+
+def verifyShaderPack = tasks.register('verifyShaderPack', Exec) {
+    group = 'verification'
+    description = 'Check the committed shader pack without loading DXC or building native code'
+    workingDir layout.projectDirectory.asFile
+    commandLine nativePython, 'tools/shader_pack.py', 'src/client/resources/assets/raynium/shaderpacks/default.rnsp'
+    inputs.files('tools/shader_pack.py', 'src/client/resources/assets/raynium/shaderpacks/default.rnsp')
+}
+tasks.named('processClientResources') { dependsOn verifyShaderPack }
+
+tasks.register('testShaderPackTools', Exec) {
+    group = 'verification'
+    workingDir layout.projectDirectory.asFile
+    commandLine nativePython, '-m', 'unittest', 'discover', '-s', 'tools/tests', '-v'
+}
+tasks.named('check') { dependsOn tasks.named('testShaderPackTools') }
 def registerNative = { String name, String command, String configuration ->
     tasks.register(name, Exec) {
         group = 'native'

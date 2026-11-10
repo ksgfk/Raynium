@@ -18,7 +18,7 @@ class NativeRendererTest {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var consumer=new VulkanConsumer();
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(consumer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
             var target=renderer.createTarget(17,9);
             var image=VulkanPreviewImage.create(consumer.device,consumer.family,target.info())) {
             var rejection=new java.util.concurrent.atomic.AtomicReference<Throwable>();
@@ -40,7 +40,7 @@ class NativeRendererTest {
                      NativeTestSupport.recordingLogger(new ArrayList<>()));
              var consumer = new VulkanConsumer();
              var runtime = environment.createRuntime(VulkanPreviewImage.hostGpu(consumer.device.getPhysicalDevice()));
-             var renderer=runtime.createRenderer()) {
+             var renderer=runtime.createRenderer(NativeTestSupport.shaders())) {
             assertThrows(IllegalStateException.class, () -> renderer.createTarget(0, 9));
             if (backend == NativeEnvironment.Backend.VULKAN) {
                 try (var preview = renderer.createTarget(17, 9)) {

@@ -38,10 +38,11 @@ public final class NativeRenderer implements AutoCloseable {
     NativeRenderTarget target;
     NativeSharedTextures textures;
     private NativeRenderer(NativeRuntime owner,NativeBindings bindings) { this.owner=owner; this.bindings=bindings; }
-    static NativeRenderer create(NativeRuntime owner,NativeBindings bindings,MemorySegment runtime) {
+    static NativeRenderer create(NativeRuntime owner,NativeBindings bindings,MemorySegment runtime,NativeShaderPack shaders) {
         var renderer=new NativeRenderer(owner,bindings);
         try(var arena=Arena.ofConfined()) {
-            var desc=arena.allocate(8,4); desc.set(JAVA_INT,0,8);
+            var desc=arena.allocate(24,8); desc.set(JAVA_INT,0,24);
+            desc.set(ADDRESS,8,shaders.copyTo(arena)); desc.set(JAVA_LONG,16,shaders.size());
             var output=arena.allocate(ADDRESS);
             NativeBindings.call(bindings.createRenderer,"create renderer",runtime,desc,output);
             renderer.handle=output.get(ADDRESS,0); return renderer;

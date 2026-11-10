@@ -24,6 +24,7 @@ struct Pixel {
     float2 uv : TEXCOORD0;
     float3 fog : TEXCOORD1;
 };
+[shader("vertex")]
 Pixel VSMain(Vertex input) {
     Pixel output;
     float3 position = input.position + (input.origin - CameraBlock.xyz) - CameraFraction.xyz;
@@ -57,6 +58,7 @@ float4 sampleAtlas(float2 uv) {
     }
     return lerp(nearest,lerp(low,high,frac(lod))*.25,smoothstep(minimumPixel,2*minimumPixel,max(screen.x,screen.y)));
 }
+[shader("pixel")]
 float4 PSMain(Pixel input) : SV_Target0 {
     float4 color = sampleAtlas(input.uv) * input.color;
     color.rgb = lerp(FogColor.rgb, color.rgb, input.fog.z);

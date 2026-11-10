@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 
-from native import msvc_environment, read_json, run, write_json
+from native import compiler_console, msvc_environment, read_json, run, write_json
 
 
 def main():
@@ -64,7 +64,7 @@ def main():
         for phase, command in zip(('configure', 'build', 'install'), commands):
             log = build / (phase + '.log')
             with log.open('w', encoding='utf-8') as stream:
-                result = subprocess.run(command, cwd=root, env=env, stdout=stream, stderr=subprocess.STDOUT)
+                result = subprocess.run(command, cwd=root, env=env, stdout=stream, stderr=subprocess.STDOUT, **compiler_console())
             if result.returncode:
                 raise RuntimeError(f'{name} {phase} failed; see {log}')
     revision = run(['git', '-C', str(radray), 'rev-parse', 'HEAD'], root, env, True).stdout.strip()

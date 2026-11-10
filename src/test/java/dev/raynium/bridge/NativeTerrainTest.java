@@ -56,7 +56,7 @@ class NativeTerrainTest {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer(backend.name());
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
             var textures=renderer.createSharedTextures(textures(split))) {
             var inputs=new ArrayList<VulkanPreviewImage>();
             try {
@@ -95,7 +95,7 @@ class NativeTerrainTest {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer();
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
             var textures=renderer.createSharedTextures(textures(split));
             var target=renderer.createTarget(32,32);
             var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {
@@ -149,7 +149,7 @@ class NativeTerrainTest {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer(backend.name());
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
             var textures=renderer.createSharedTextures(textures(split));
             var target=renderer.createTarget(32,32);
             var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {
@@ -186,7 +186,7 @@ class NativeTerrainTest {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer(backend.name());
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
             var textures=renderer.createSharedTextures(textures(split));
             var target=renderer.createTarget(32,32);
             var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {
@@ -244,7 +244,7 @@ class NativeTerrainTest {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer(backend.name());
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
             var textures=renderer.createSharedTextures(textures(split));
             var target=renderer.createTarget(32,32);
             var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {
@@ -282,7 +282,7 @@ class NativeTerrainTest {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer(backend.name());
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
             var textures=renderer.createSharedTextures(textures(split));
             var target=renderer.createTarget(32,32);
             var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {
@@ -338,7 +338,7 @@ class NativeTerrainTest {
             var runtime=environment.createRuntime(null)) {
             long lastGeneration=NativeRenderer.nextFrameId();
             for(int mask:new int[]{0,2}) {
-                try(var renderer=runtime.createRenderer();
+                try(var renderer=runtime.createRenderer(NativeTestSupport.shaders());
                     var textures=renderer.createSharedTextures(textures(false));
                     var target=renderer.createTarget(8,8)) {
                     long epoch=renderer.nextEpoch(); assertTrue(epoch>lastGeneration);
@@ -372,7 +372,7 @@ class NativeTerrainTest {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer(backend.name());
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
             var textures=renderer.createSharedTextures(textures(split));
             var target=renderer.createTarget(32,32);
             var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {
@@ -429,7 +429,7 @@ class NativeTerrainTest {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer(backend.name());
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
             var terrain=renderer.createSharedTextures(textures(split));
             var preview=renderer.createTarget(32,32);
             var output=VulkanPreviewImage.create(producer.device,producer.family,preview.info())) {
@@ -462,7 +462,7 @@ class NativeTerrainTest {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer(backend.name());
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
             var terrain=renderer.createSharedTextures(textures(split));
             var preview=renderer.createTarget(32,32);
             var output=VulkanPreviewImage.create(producer.device,producer.family,preview.info())) {
@@ -500,7 +500,7 @@ class NativeTerrainTest {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer(backend.name());
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer()) {
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders())) {
             for(int generation=0;generation<3;generation++) {
                 boolean split=generation%2==1;
                 try(var textures=renderer.createSharedTextures(textures(split));
@@ -530,7 +530,7 @@ class NativeTerrainTest {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer(backend.name());
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer()) {
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders())) {
             int[] fallbacks={0};
             try(var terrain=dev.raynium.client.terrain.TextureTransfer.create("auto",()->{
                 try(var direct=renderer.createSharedTextures(textures(false))) {
@@ -557,7 +557,7 @@ class NativeTerrainTest {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer(backend.name());
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
             var textures=renderer.createSharedTextures(textures(split));
             var target=renderer.createTarget(32,32);
             var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {
@@ -591,7 +591,7 @@ class NativeTerrainTest {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer(backend.name());
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
             var textures=renderer.createSharedTextures(textures(split));
             var target=renderer.createTarget(32,32);
             var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {
@@ -622,7 +622,7 @@ class NativeTerrainTest {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer(backend.name());
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
             var textures=renderer.createSharedTextures(textures(split));
             var target=renderer.createTarget(32,32);
             var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {

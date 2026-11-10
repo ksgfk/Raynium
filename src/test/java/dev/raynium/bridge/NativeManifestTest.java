@@ -48,7 +48,7 @@ class NativeManifestTest {
         var object = manifest("Release");
         var files = object.getAsJsonArray("files");
         switch (mutation) {
-            case "old-abi" -> object.addProperty("abiVersion", 9);
+            case "old-abi" -> object.addProperty("abiVersion", 10);
             case "schema" -> object.addProperty("schemaVersion", 2);
             case "MD", "MDd", "MTd" -> object.addProperty("crt", mutation);
             case "debug-mt" -> object.addProperty("configuration", "Debug");

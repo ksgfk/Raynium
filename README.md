@@ -4,7 +4,7 @@
 
 当前已接通 native 构建与分发、Java FFM、ABI 检查和 D3D12/Vulkan 设备会话。
 Windows MC Vulkan 可在右上角显示 native 共享小 RT 的 SOLID 地形预览；原版世界渲染和呈现继续运行。
-RadRay 的 `RadRay::runtime` 静态库提供场景、Mesh Drawing Pipeline、FrameScheduler 和 Render Graph；Raynium 的 SOLID 管线基于 `RenderGraphFramePipeline`，MC native DLL 使用 ABI 10。CUTOUT、TRANSLUCENT 和窗口接管尚未实现。具体状态与文档索引见[架构地图](doc/architecture/overview.md)。
+RadRay 的 `RadRay::runtime` 静态库提供场景、Mesh Drawing Pipeline、FrameScheduler 和 Render Graph；Raynium 的 SOLID 管线基于 `RenderGraphFramePipeline`，MC native DLL 使用 ABI 11。CUTOUT、TRANSLUCENT 和窗口接管尚未实现。具体状态与文档索引见[架构地图](doc/architecture/overview.md)。
 
 ## 开发入口
 
@@ -17,6 +17,6 @@ RadRay 的 `RadRay::runtime` 静态库提供场景、Mesh Drawing Pipeline、Fra
 | 仓库约束与文档工作流程 | [AGENTS](AGENTS.md)、[文档维护](doc/guide/documentation.md) |
 
 使用仓库 Gradle Wrapper；native 依赖需要显式准备，普通 Java build 不触发 native 构建。
-分发包包含固定 `/MT` 的 Release DLL（内含静态 mimalloc）与上游许可证，产物路径和测试入口见构建指南。
+分发包包含固定 `/MT` 的 Release DLL（内含静态 mimalloc）与上游许可证，以及离线生成的内置 shader pack，产物路径和测试入口见构建指南。
 
 Raynium 自身尚未选择分发许可证；收集的上游许可证不替代项目自身授权。

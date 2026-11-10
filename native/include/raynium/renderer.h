@@ -5,7 +5,7 @@ namespace raynium {
 class Renderer final {
 public:
     ~Renderer() noexcept;
-    static bool Create(RayniumRuntime&,radray::unique_ptr<Renderer>&,radray::string&);
+    static bool Create(RayniumRuntime&,std::span<const radray::byte>,radray::unique_ptr<Renderer>&,radray::string&);
     bool Render(RenderTarget&,const rn_render_frame_desc&,radray::string&);
     bool Finish(radray::string&);
     void AttachTextures(SharedTextures* textures) noexcept {

@@ -21,12 +21,12 @@ void SolidPassProcessor::AddMeshBatch(const radray::MeshBatchContext& context,ra
     BuildMeshDrawCommands(context,{.Pipeline=_resources.Pipeline(),
         .ParameterSets=std::span{&group1,1},.AllowDeferredInstanceStream=true,.AllowElementMerging=true},output);
 }
-bool SolidFramePipeline::Create(RayniumRuntime& device,radray::unique_ptr<SolidFramePipeline>& out,radray::string& error) {
+bool SolidFramePipeline::Create(RayniumRuntime& device,std::span<const radray::byte> shaders,radray::unique_ptr<SolidFramePipeline>& out,radray::string& error) {
     RADRAY_PROFILE_SCOPE_N("Raynium.Pipeline.Create");
     if(out) { error="Frame pipeline output occupied"; return false; }
     auto& d=device.GetDevice();
     radray::unique_ptr<MeshPassResources> resources;
-    if(!MeshPassResources::Create(d,resources,error)) return false;
+    if(!MeshPassResources::Create(d,shaders,resources,error)) return false;
     auto completion=d.CreateFence().Release();
     if(!completion) { error="Cannot create terrain completion fence"; return false; }
     const bool timestamps=d.GetCapabilities().Features.TimestampQueries;

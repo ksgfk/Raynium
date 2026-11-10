@@ -1,18 +1,21 @@
 #include <raynium/mesh_pass.h>
 #include <radray/profiler.h>
-#include <raynium/terrain_bytecode.h>
 #include <algorithm>
 
 namespace raynium {
 using namespace radray::render;
-bool MeshPassResources::Create(Device& device,radray::unique_ptr<MeshPassResources>& output,radray::string& error) {
+bool MeshPassResources::Create(Device& device,std::span<const radray::byte> shaders,radray::unique_ptr<MeshPassResources>& output,radray::string& error) {
     RADRAY_PROFILE_SCOPE_N("Raynium.MeshPass.Create");
     if(output) { error="Pass resources output occupied"; return false; }
     auto objects=radray::make_unique<Objects>(); auto& p=*objects;
     const bool vk=device.GetBackend()==RenderBackend::Vulkan;
+    if(!ShaderProgram::Create(shaders,"terrain",vk?radray::shader::ShaderTarget::SPIRV:radray::shader::ShaderTarget::DXIL,p.program,error) ||
+       !ValidateTerrainShader(p.program->Artifact(),error)) return false;
+    const auto& artifact=p.program->Artifact();
+    const auto vsEntry=p.program->Entry(radray::shader::ShaderStage::Vertex),psEntry=p.program->Entry(radray::shader::ShaderStage::Pixel);
     const auto blob=vk ? ShaderBlobCategory::SPIRV : ShaderBlobCategory::DXIL;
-    p.vs=device.CreateShader({vk ? TerrainVsSpirv() : TerrainVsDxil(),blob,ShaderStage::Vertex}).Release();
-    p.ps=device.CreateShader({vk ? TerrainPsSpirv() : TerrainPsDxil(),blob,ShaderStage::Pixel}).Release();
+    p.vs=device.CreateShader({*artifact.FindStageBytecode(radray::shader::ShaderStage::Vertex),blob,ShaderStage::Vertex}).Release();
+    p.ps=device.CreateShader({*artifact.FindStageBytecode(radray::shader::ShaderStage::Pixel),blob,ShaderStage::Pixel}).Release();
     const BindingDescriptor passBinding{0,BindingKind::CBuffer,1,ShaderStage::Vertex|ShaderStage::Pixel,
         D3D12BindingDescriptor{BindingRegisterClass::CBV,0,0},VulkanBindingDescriptor{0,0}};
     const BindingDescriptor materialBindings[]{
@@ -35,11 +38,11 @@ bool MeshPassResources::Create(Device& device,radray::unique_ptr<MeshPassResourc
     auto depth=DepthStencilState::Default(); depth.Format=TextureFormat::D32_FLOAT; depth.DepthCompare=CompareFunction::GreaterEqual;
     depth.DepthTestEnable=true; depth.DepthWriteEnable=true;
     const auto color=ColorTargetState::Default(TextureFormat::RGBA8_UNORM);
-    p.pipeline=device.CreateGraphicsPipelineState({.PipelineLayout=p.pipelineLayout.get(),.VS=ShaderEntry{p.vs.get(),"VSMain"},
-        .PS=ShaderEntry{p.ps.get(),"PSMain"},.VertexInput={layouts,attributes},.Primitive=primitive,.DepthStencil=depth,
+    p.pipeline=device.CreateGraphicsPipelineState({.PipelineLayout=p.pipelineLayout.get(),.VS=ShaderEntry{p.vs.get(),vsEntry},
+        .PS=ShaderEntry{p.ps.get(),psEntry},.VertexInput={layouts,attributes},.Primitive=primitive,.DepthStencil=depth,
         .MultiSample=MultiSampleState::Default(),.ColorTargets={&color,1}}).Release();
     if(!p.pipeline) { error="Cannot create SOLID pipeline"; return false; }
-    p.materialResource.Programs={{"Solid",p.pipelineLayout.get(),p.vs.get(),"VSMain",p.ps.get(),"PSMain"}};
+    p.materialResource.Programs={{"Solid",p.pipelineLayout.get(),p.vs.get(),radray::string{vsEntry},p.ps.get(),radray::string{psEntry}}};
     p.materialResource.Properties.RenderState.Cull=primitive.Cull;
     p.materialResource.Properties.RenderState.DepthCompare=depth.DepthCompare;
     p.materialResource.Properties.RenderState.DepthTestEnable=true;

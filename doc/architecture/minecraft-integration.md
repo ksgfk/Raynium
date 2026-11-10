@@ -17,6 +17,7 @@ CLIENT_STARTED 在渲染线程取得 MC Vulkan GPU 的 LUID/node mask 并创建 
 随后创建 `PreviewOverlay`，通过 `PreviewHost` 附到 Minecraft；预览资源在首次有效帧创建。
 CLIENT_STOPPING 先关闭预览和取消挂接，再依次关闭 runtime、环境和 bridge DLL（包含静态分配器）。启动失败执行相同清理顺序；清理失败保留剩余所有者并记录为附带异常。
 资源重载、切换世界不重建设备。
+首次 renderer 创建通过 ResourceManager 读取内置 [shader pack](shader-pack.md)，CPU 快照在世界切换后复用，F3+T 不替换 shader。
 
 显式设置 `raynium.benchmark.config` 时，`BenchmarkSession` 注册客户端 tick 控制并通过
 `MinecraftBenchmarkMixin` 在帧提取前驱动旁观玩家路线；正常启动不注册控制。

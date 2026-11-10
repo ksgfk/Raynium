@@ -31,6 +31,7 @@ public final class PreviewOverlay implements AutoCloseable {
     private final VulkanDevice device;
     private NativeRenderTarget preview;
     private NativeRenderer renderer;
+    private dev.raynium.bridge.NativeShaderPack shaders;
     private VulkanPreviewImage imported;
     private int width, height;
     private long drawn;
@@ -63,15 +64,19 @@ public final class PreviewOverlay implements AutoCloseable {
         if (disabled) logger.info("Raynium preview disabled: {}", encoder == null ? "Minecraft is not using Vulkan" : "raynium.preview.enabled=false");
     }
 
-    private NativeRenderer renderer() {
-        if(renderer==null) renderer=runtime.createRenderer();
+    private NativeRenderer renderer(Minecraft client) {
+        if(shaders==null) {
+            shaders=dev.raynium.client.terrain.BuiltinShaderPack.load(client.getResourceManager());
+            logger.info("Raynium built-in shader pack loaded: {}",dev.raynium.client.terrain.BuiltinShaderPack.DEFAULT);
+        }
+        if(renderer==null) renderer=runtime.createRenderer(shaders);
         return renderer;
     }
 
     public void prepareTerrain(Minecraft client) {
         if(disabled || !dev.raynium.client.terrain.TerrainCapture.ENABLED || client.getWindow().isIconified()) return;
         try {
-            if(terrain==null) terrain=new dev.raynium.client.terrain.TerrainPreview(renderer(),device,encoder,logger);
+            if(terrain==null) terrain=new dev.raynium.client.terrain.TerrainPreview(renderer(client),device,encoder,logger);
             terrain.prepare(client);
         } catch(RuntimeException failure) { disable(failure); }
     }
@@ -96,7 +101,7 @@ public final class PreviewOverlay implements AutoCloseable {
             var region = Region.of(target.width, target.height);
             if (preview == null || width != region.width() || height != region.height()) {
                 closeOutput();
-                preview = renderer().createTarget(region.width(), region.height());
+                preview = renderer.createTarget(region.width(), region.height());
                 imported = VulkanPreviewImage.create(device.vkDevice(), device.graphicsQueue().queueFamilyIndex(), preview.info());
                 width = region.width(); height = region.height();
                 logger.info("Raynium shared preview ready: {}x{} handleType={}", width, height, preview.info().handleType());

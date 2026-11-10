@@ -92,7 +92,7 @@ class NativeRuntimeTest {
                 assertTrue(failure.getMessage().contains("already initialized"));
             }
             try (var runtime = environment.createRuntime(null);
-                 var renderer = runtime.createRenderer();
+                 var renderer = runtime.createRenderer(NativeTestSupport.shaders());
                      var preview = renderer.createTarget(1, 1)) {
                 assertEquals(1, preview.info().width());
             }
@@ -105,7 +105,7 @@ class NativeRuntimeTest {
              var consumer = new VulkanConsumer()) {
             for (int iteration = 0; iteration < 2; iteration++) {
                 try (var runtime = environment.createRuntime(VulkanPreviewImage.hostGpu(consumer.device.getPhysicalDevice()));
-                     var renderer = runtime.createRenderer();
+                     var renderer = runtime.createRenderer(NativeTestSupport.shaders());
                      var preview = renderer.createTarget(17, 9);
                      var image = VulkanPreviewImage.create(consumer.device, consumer.family, preview.info())) {
                     for (long frame = 1; frame <= 2; frame++) {

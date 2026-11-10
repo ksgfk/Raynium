@@ -11,9 +11,10 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from shader_pack import RESOURCE_PATH, verify_shader_pack
 
 
-ABI_VERSION = 10
+ABI_VERSION = 11
 
 
 def digest(path):
@@ -32,13 +33,26 @@ def write_json(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
 
+def compiler_console():
+    # Without a console, MSVC 19.52 emits UTF-8 while CMake detects the ANSI
+    # codepage. A shared hidden console keeps /showIncludes dependency scanning consistent.
+    if os.name != 'nt':
+        return {}
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags = subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = subprocess.SW_HIDE
+    return {'creationflags': subprocess.CREATE_NEW_CONSOLE, 'startupinfo': startup}
+
+
 def run(arguments, cwd, environment, capture=False):
     search_path = next((value for key, value in environment.items() if key.casefold() == 'path'), '')
     executable = shutil.which(arguments[0], path=search_path)
     if executable is None:
         raise RuntimeError(f'Required tool is not on PATH: {arguments[0]}')
+    console = compiler_console() if Path(executable).stem.lower() == 'cmake' else {}
+    output = {} if capture else {'stdout': sys.stdout, 'stderr': sys.stderr}
     return subprocess.run([executable, *arguments[1:]], cwd=cwd, env=environment, check=True, text=True,
-                          encoding='utf-8', errors='replace', capture_output=capture)
+                          encoding='utf-8', errors='replace', capture_output=capture, **console, **output)
 
 
 def msvc_environment():
@@ -227,6 +241,7 @@ def package_mod(root, input_jar, output_jar):
     with tempfile.TemporaryDirectory(prefix='.package-', dir=output_jar.parent) as directory:
         temporary = Path(directory) / output_jar.name
         with zipfile.ZipFile(input_jar) as source, zipfile.ZipFile(temporary, 'w', zipfile.ZIP_DEFLATED) as target:
+            verify_shader_pack(source.read(RESOURCE_PATH))
             names = set()
             for item in source.infolist():
                 if item.filename in names or item.filename.startswith(('natives/', 'META-INF/licenses/raynium-native/')):
@@ -249,6 +264,7 @@ def package_mod(root, input_jar, output_jar):
 
 def verify_package(path):
     with zipfile.ZipFile(path) as archive:
+        verify_shader_pack(archive.read(RESOURCE_PATH))
         names = archive.namelist()
         if len(names) != len(set(names)) or 'fabric.mod.json' not in names:
             raise RuntimeError('Invalid or duplicate mod JAR entries.')

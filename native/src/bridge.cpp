@@ -49,6 +49,7 @@ static_assert(offsetof(rn_runtime_desc, luid) == 12);
 static_assert(!std::is_default_constructible_v<raynium::RayniumRuntime>);
 static_assert(!std::is_default_constructible_v<raynium::RayniumEnvironment>);
 static_assert(sizeof(rn_render_target_desc)==16);
+static_assert(sizeof(rn_renderer_desc)==24 && offsetof(rn_renderer_desc,shader_pack)==8 && offsetof(rn_renderer_desc,shader_pack_size)==16);
 static_assert(sizeof(rn_shared_image_info)==128);
 static_assert(sizeof(rn_shared_image_export)==144);
 static_assert(sizeof(rn_index_update)==24);
@@ -273,9 +274,11 @@ rn_status rn_create_renderer(rn_runtime* runtime,const rn_renderer_desc* desc,rn
     if(output) *output=nullptr;
     return Invoke(error,capacity,[&](radray::string& failure) {
         if(!runtime || runtime!=activeRuntime || !environment || !environment->IsOwnerThread() || runtime->renderer ||
-           !desc || desc->struct_size!=sizeof(*desc) || desc->flags || !output) { failure="Invalid renderer descriptor or owner"; return false; }
+           !desc || desc->struct_size!=sizeof(*desc) || desc->flags || !desc->shader_pack ||
+           !desc->shader_pack_size || desc->shader_pack_size>raynium::ShaderPackMaxSize || !output) { failure="Invalid renderer descriptor or owner/shader pack"; return false; }
         auto owned=radray::unique_ptr<rn_renderer>(new rn_renderer{runtime,{},{},{}});
-        if(!raynium::Renderer::Create(*runtime->runtime,owned->renderer,failure)) return false;
+        const std::span shaders{static_cast<const radray::byte*>(desc->shader_pack),size_t(desc->shader_pack_size)};
+        if(!raynium::Renderer::Create(*runtime->runtime,shaders,owned->renderer,failure)) return false;
         runtime->renderer=owned.release(); *output=runtime->renderer; return true;
     });
 }

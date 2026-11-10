@@ -16,6 +16,12 @@ import org.slf4j.Logger;
 
 /** Owns raw C ABI handles so assertion failures cannot unload a DLL with live runtimes. */
 final class NativeTestSupport implements AutoCloseable {
+    static NativeShaderPack shaders() {
+        try(var input=NativeTestSupport.class.getResourceAsStream("/assets/raynium/shaderpacks/default.rnsp")) {
+            if(input==null) throw new IllegalStateException("Missing test shader pack");
+            return NativeShaderPack.read(input);
+        } catch(IOException failure) { throw new java.io.UncheckedIOException(failure); }
+    }
     static final int[] SOLID_COLOR={64,128,191};
     static NativeRenderer.Frame solidFrame(long sequence) {
         var frame=new NativeRenderer.Frame(); frame.outputSequence=sequence;
@@ -31,6 +37,7 @@ final class NativeTestSupport implements AutoCloseable {
     private final MethodHandle destroyEnv;
     private boolean ownsEnvironment;
     private final MethodHandle destroy;
+    private final MethodHandle createRenderer;
     final MemorySegment envDesc;
     final MemorySegment desc;
     final MemorySegment output;
@@ -55,6 +62,9 @@ final class NativeTestSupport implements AutoCloseable {
                             ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
             destroy = linker.downcallHandle(symbols.find("rn_destroy_runtime").orElseThrow(),
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
+            createRenderer = linker.downcallHandle(symbols.find("rn_create_renderer").orElseThrow(),
+                    FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
             envDesc = arena.allocate(12, 4);
             envDesc.set(ValueLayout.JAVA_INT, 0, 12);
             envDesc.set(ValueLayout.JAVA_INT, 4, 1);
@@ -93,6 +103,10 @@ final class NativeTestSupport implements AutoCloseable {
 
     int query(MemorySegment info, int capacity, MemorySegment diagnostic, int diagnosticCapacity) throws Throwable {
         return (int) query.invokeExact(info, capacity, diagnostic, diagnosticCapacity);
+    }
+
+    int createRenderer(MemorySegment runtime, MemorySegment descriptor, MemorySegment out) throws Throwable {
+        return (int) createRenderer.invokeExact(runtime, descriptor, out, error, 256);
     }
 
     int initEnv(MemorySegment descriptor, MemorySegment diagnostic, int capacity) throws Throwable {
