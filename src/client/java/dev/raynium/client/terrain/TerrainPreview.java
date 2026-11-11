@@ -22,7 +22,7 @@ public final class TerrainPreview implements AutoCloseable {
     private VulkanGpuTexture atlas;
     private long sequence=1,epoch,sourceEpoch;
     private final boolean profile=Boolean.getBoolean("raynium.terrain.profile");
-    private final double[] prepareTimes=new double[120], drawTimes=new double[120];
+    private final double[] prepareTimes=new double[120], drawTimes=new double[120], residencyTimes=new double[120];
     private int sampleCount;
     private double prepareMs;
     private long uploadBytes,textureBytes;
@@ -45,7 +45,7 @@ public final class TerrainPreview implements AutoCloseable {
             textures.close(); textures=null; throw failure;
         }
         atlas=texture;
-        logger.info("Raynium SOLID terrain inputs ready: {}x{} mips={} transfer={} pipeline=cached-mesh-pass",texture.getWidth(0),texture.getHeight(0),
+        logger.info("Raynium terrain inputs ready: {}x{} mips={} transfer={} pipeline=terrain-dedicated",texture.getWidth(0),texture.getHeight(0),
             texture.getMipLevels(),split?"split-mip fallback":"direct shared mip texture");
     }
     public void prepare(Minecraft client) {
@@ -88,6 +88,7 @@ public final class TerrainPreview implements AutoCloseable {
     }
     public boolean draw(NativeRenderTarget output,long outputSequence) {
         long start=System.nanoTime();
+        var event=TerrainFrameEvent.start();
         var snapshot=TerrainCapture.snapshot();
         if(!pending || snapshot==null) return false;
         if(sourceEpoch!=snapshot.epoch) {
@@ -96,16 +97,23 @@ public final class TerrainPreview implements AutoCloseable {
         TerrainCapture.drainRemoved(residency.pendingRemovals);
         frame.epoch=epoch; frame.outputSequence=outputSequence;
         frame.inputSequence=sequence; frame.changedTextures=changedTextures;
-        frame.flags=(snapshot.rgss?NativeRenderer.RGSS:0)|(profile?NativeRenderer.PROFILE:0);
+        frame.flags=(snapshot.rgss?NativeRenderer.RGSS:0)|(profile?NativeRenderer.PROFILE:0)|(snapshot.improvedTransparency?NativeRenderer.IMPROVED_TRANSPARENCY:0);
         frame.projection=snapshot.projection; frame.view=snapshot.view; frame.cameraBlock=snapshot.block;
         frame.cameraFraction=snapshot.fraction; frame.fogColor=snapshot.fog; frame.fogDistances=snapshot.distances;
         var buffer=renderer.frameBuffer(); residency.prepare(snapshot,buffer);
+        double residencyMs=(System.nanoTime()-start)/1e6;
+        long nativeStart=System.nanoTime();
         renderer.renderPrepared(output,frame);
+        if(event!=null) {
+            event.sequence=outputSequence; event.inputPreparation=(long)(prepareMs*1e6); event.preparation=nativeStart-start;
+            event.ffm=System.nanoTime()-nativeStart; event.visible=buffer.visibleCount(); event.end(); event.commit();
+        }
         residency.commit(); sequence++; pending=false;
         if(profile) {
-            uploadBytes+=residency.uploadBytes; prepareTimes[sampleCount]=prepareMs; drawTimes[sampleCount++]=(System.nanoTime()-start)/1e6;
+            uploadBytes+=residency.uploadBytes; prepareTimes[sampleCount]=prepareMs; residencyTimes[sampleCount]=residencyMs; drawTimes[sampleCount++]=(System.nanoTime()-nativeStart)/1e6;
             if(sampleCount==120) {
-                Arrays.sort(prepareTimes); Arrays.sort(drawTimes);
+                Arrays.sort(prepareTimes); Arrays.sort(drawTimes); Arrays.sort(residencyTimes);
+                logger.info("Terrain residency samples=120 ms_p50={} p95={} p99={}",residencyTimes[60],residencyTimes[114],residencyTimes[118]);
                 logger.info("Terrain CPU samples=120 input_ms_p50={} p95={} p99={} frame_ms_p50={} p95={} p99={} geometry_upload_bytes={} texture_copy_bytes={} visible={} resident={}",
                     prepareTimes[60],prepareTimes[114],prepareTimes[118],drawTimes[60],drawTimes[114],drawTimes[118],uploadBytes,textureBytes,buffer.visibleCount(),residency.residentCount());
                 sampleCount=0; uploadBytes=textureBytes=0;
@@ -113,6 +121,7 @@ public final class TerrainPreview implements AutoCloseable {
         }
         return true;
     }
+    public boolean stable() { return residency.uploadBytes==0; }
     public boolean pending() { return pending; }
     private void closeInputs() {
         if(textures==null) return;

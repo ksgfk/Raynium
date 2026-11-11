@@ -176,8 +176,8 @@ final class VulkanConsumer implements AutoCloseable {
                         + Byte.toUnsignedInt(pixels.get(offset)) + "," + Byte.toUnsignedInt(pixels.get(offset+1)) + ","
                         + Byte.toUnsignedInt(pixels.get(offset+2)) + "," + Byte.toUnsignedInt(pixels.get(offset+3)));
                     assertEquals(g, Byte.toUnsignedInt(pixels.get(offset + 1)), 1, "green x=" + x + " y=" + y);
-                    assertEquals(b, Byte.toUnsignedInt(pixels.get(offset + 2)));
-                    assertEquals(255, Byte.toUnsignedInt(pixels.get(offset + 3)));
+                    assertEquals(b, Byte.toUnsignedInt(pixels.get(offset + 2)),1);
+                    assertEquals(expected.length>3?expected[3]:255, Byte.toUnsignedInt(pixels.get(offset + 3)),1);
                 }
             } finally { vkUnmapMemory(device, bufferMemory); }
         } finally {

@@ -3,8 +3,8 @@
 基于 Fabric 的 Minecraft 客户端模组，包含 Java FFM/C ABI 桥接与使用 RadRay RHI 的 native 设备会话。
 
 当前已接通 native 构建与分发、Java FFM、ABI 检查和 D3D12/Vulkan 设备会话。
-Windows MC Vulkan 可在右上角显示 native 共享小 RT 的 SOLID 地形预览；原版世界渲染和呈现继续运行。
-RadRay 的 `RadRay::runtime` 静态库提供场景、Mesh Drawing Pipeline、FrameScheduler 和 Render Graph；Raynium 的 SOLID 管线基于 `RenderGraphFramePipeline`，MC native DLL 使用 ABI 11。CUTOUT、TRANSLUCENT 和窗口接管尚未实现。具体状态与文档索引见[架构地图](doc/architecture/overview.md)。
+Windows MC Vulkan 可在右上角显示 native 共享小 RT 的完整区块地形预览（含 CUTOUT 与随原版设置切换的透明绘制）；原版世界渲染和呈现继续运行。
+RadRay 的 `RadRay::runtime` 静态库提供场景、Mesh Drawing Pipeline、FrameScheduler 和 Render Graph；Raynium 的三层地形使用专用 direct/indirect 数据和 `RenderGraphFramePipeline`，MC native DLL 使用 ABI 13；SOLID、CUTOUT 和普通透明/小波 OIT 已实现，窗口呈现由 MC 负责。具体状态与文档索引见[架构地图](doc/architecture/overview.md)。
 
 ## 开发入口
 

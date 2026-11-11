@@ -5,13 +5,15 @@ import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
 import static java.lang.foreign.ValueLayout.*;
 
-/** Persistent scene owner. All frame arrays are borrowed only until render returns. */
+/** Persistent terrain residency owner. All frame arrays are borrowed only until render returns. */
 public final class NativeRenderer implements AutoCloseable {
-    public static final int RGSS=1, PROFILE=2;
+    public static final int RGSS=1, PROFILE=2, IMPROVED_TRANSPARENCY=4;
     public record Index(long id,int[] values) {}
     public record Submesh(int first,int count,int baseVertex) {}
     public record Mesh(long id,byte[] vertices,long index,int vertexCount,List<Submesh> submeshes) {}
-    public record Material(long id,int albedo,int light,int anisotropy) {}
+    public record Material(long id,int albedo,int light,int anisotropy,int renderMode) {
+        public Material(long id,int albedo,int light,int anisotropy) { this(id,albedo,light,anisotropy,0); }
+    }
     public record Primitive(long id,long mesh,long material) {}
     public record Instance(int x,int y,int z,float visibility) {}
     public record Visible(long primitive,int elementMask,int sortKey,int firstInstance,int instanceCount) {}
@@ -38,10 +40,11 @@ public final class NativeRenderer implements AutoCloseable {
     NativeRenderTarget target;
     NativeSharedTextures textures;
     private NativeRenderer(NativeRuntime owner,NativeBindings bindings) { this.owner=owner; this.bindings=bindings; }
-    static NativeRenderer create(NativeRuntime owner,NativeBindings bindings,MemorySegment runtime,NativeShaderPack shaders) {
+    static NativeRenderer create(NativeRuntime owner,NativeBindings bindings,MemorySegment runtime,NativeShaderPack shaders,TerrainSubmission submission) {
         var renderer=new NativeRenderer(owner,bindings);
         try(var arena=Arena.ofConfined()) {
             var desc=arena.allocate(24,8); desc.set(JAVA_INT,0,24);
+            desc.set(JAVA_INT,4,submission.flags());
             desc.set(ADDRESS,8,shaders.copyTo(arena)); desc.set(JAVA_LONG,16,shaders.size());
             var output=arena.allocate(ADDRESS);
             NativeBindings.call(bindings.createRenderer,"create renderer",runtime,desc,output);

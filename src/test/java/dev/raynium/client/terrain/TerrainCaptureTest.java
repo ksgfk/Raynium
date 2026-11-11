@@ -8,7 +8,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class TerrainCaptureTest {
     @AfterEach void cleanup() { TerrainCapture.activate(false); }
-    private static MeshPayload mesh() { return new MeshPayload(TerrainCapture.epoch(),ByteBuffer.allocate(112)); }
+    private static SectionPayload mesh() { return new SectionPayload(TerrainCapture.epoch(),new MeshPayload(TerrainCapture.epoch(),ByteBuffer.allocate(112))); }
     @Test void shrinkingAndGrowingCaptureReleasesDiscardedPayloads() {
         var buffer=new TerrainCapture.Buffer(); var a=mesh(); var b=mesh();
         buffer.put(0,a,0,0,0,1,1,0); buffer.put(1024,b,0,0,0,1,1,0); buffer.finish(1025);
@@ -30,7 +30,7 @@ class TerrainCaptureTest {
             else if(operation==1) TerrainCapture.invalidate();
             else TerrainCapture.activate(false);
             assertNull(TerrainCapture.snapshot()); assertEquals(0,buffer.count); assertNull(buffer.payloads[0]);
-            var removed=new ArrayList<MeshPayload>(); TerrainCapture.drainRemoved(removed);
+            var removed=new ArrayList<SectionPayload>(); TerrainCapture.drainRemoved(removed);
             if(operation==0) assertEquals(java.util.List.of(payload),removed);
             else assertTrue(removed.isEmpty());
         }

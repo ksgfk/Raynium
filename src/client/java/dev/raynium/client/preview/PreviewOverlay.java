@@ -117,6 +117,7 @@ public final class PreviewOverlay implements AutoCloseable {
             VulkanPreviewImage.check(vkEndCommandBuffer(command), "end preview copy command buffer");
             encoder.execute(command);
             encoder.signalSemaphore(imported.consumedSemaphore(), drawn, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+            dev.raynium.client.terrain.TerrainReference.capture(client,region,terrain.stable());
         } catch (RuntimeException failure) {
             // Cleanup may itself fail on a GPU timeout; then propagate and retain live owners.
             disable(failure);
@@ -149,6 +150,7 @@ public final class PreviewOverlay implements AutoCloseable {
         closeOutput();
         if(terrain!=null) { terrain.close(); terrain=null; }
         closeRenderer();
+        dev.raynium.client.terrain.TerrainReference.close();
         disabled = true;
         dev.raynium.client.terrain.TerrainCapture.activate(false);
     }

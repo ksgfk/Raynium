@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 project(RayniumRuntime VERSION 0.1.0 LANGUAGES C CXX)
 option(RAYNIUM_ENABLE_PROFILER "Enable on-demand Tracy instrumentation" OFF)
 option(RAYNIUM_BUILD_SHADER_TOOLS "Build the explicit offline shader pack compiler" OFF)
+option(RAYNIUM_BUILD_TESTS "Build native terrain parameter tests with prepared GTest" OFF)
 set(RAYNIUM_PROFILER_JSON false)
 if(RAYNIUM_ENABLE_PROFILER)
     set(RAYNIUM_PROFILER_JSON true)
@@ -152,7 +153,8 @@ endif()
 add_library(rayniumruntime SHARED
     src/bridge.cpp include/raynium/bridge.h
     src/renderer.cpp include/raynium/renderer.h
-    src/terrain_scene.cpp include/raynium/terrain_scene.h
+    src/terrain_residency.cpp include/raynium/terrain_residency.h
+    src/terrain_draw.cpp include/raynium/terrain_draw.h
     src/solid_pipeline.cpp include/raynium/solid_pipeline.h
     src/render_resources.cpp include/raynium/render_resources.h
     src/mesh_pass.cpp include/raynium/mesh_pass.h
@@ -171,6 +173,19 @@ set_target_properties(rayniumruntime PROPERTIES
 
 install(TARGETS rayniumruntime RUNTIME DESTINATION . COMPONENT runtime)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/bin/native-build.json" DESTINATION . COMPONENT runtime)
+
+if(RAYNIUM_BUILD_TESTS)
+    list(APPEND CMAKE_PREFIX_PATH "${RADRAY_SOURCE_DIR}/SDKs/googletest/${RADRAY_DEPENDENCY_TRIPLET}/${CMAKE_BUILD_TYPE}")
+    find_package(GTest CONFIG REQUIRED)
+    enable_testing()
+    include(GoogleTest)
+    add_executable(test_raynium_terrain tests/test_terrain_draw.cpp src/terrain_draw.cpp)
+    target_compile_features(test_raynium_terrain PRIVATE cxx_std_20)
+    target_include_directories(test_raynium_terrain PRIVATE include)
+    target_compile_options(test_raynium_terrain PRIVATE /W4 /permissive- /Zc:preprocessor /utf-8)
+    target_link_libraries(test_raynium_terrain PRIVATE RadRay::runtime RadRay::shader GTest::gtest)
+    gtest_discover_tests(test_raynium_terrain)
+endif()
 
 if(RAYNIUM_BUILD_SHADER_TOOLS)
     add_executable(raynium_shader_pack tools/shader_pack.cpp src/shader_pack.cpp)

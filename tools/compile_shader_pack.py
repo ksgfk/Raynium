@@ -7,6 +7,7 @@ import sys
 import tempfile
 
 from native import msvc_environment, run
+from shader_pack import PROGRAMS
 
 
 def main():
@@ -39,7 +40,7 @@ def main():
         temporary = Path(directory) / output.name
         command = [str(binary / 'bin/raynium_shader_pack.exe'), '--root', str(root / 'native/shaders'),
                    '--include', str(radray / 'shaderlib'), '--output', str(temporary)]
-        for program in args.program or ['terrain=terrain.hlsl']:
+        for program in args.program or [name+'='+name+'.hlsl' for name in PROGRAMS]:
             command.extend(['--program', program])
         run(command, root, env)
         if not output.exists() or output.read_bytes() != temporary.read_bytes():

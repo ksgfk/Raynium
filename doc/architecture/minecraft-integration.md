@@ -54,9 +54,9 @@ handle 和 name 非空。导入函数检查函数地址和句柄后，通过 LWJ
 
 ## 地形接入
 
-内容由 `client/terrain` 和地形 Mixin 提供，只采集 SOLID；CUTOUT 与 TRANSLUCENT 不进入预览。
+内容由 `client/terrain` 和地形 Mixin 提供，采集 SOLID、CUTOUT 和 TRANSLUCENT；透明模式跟随原版当前帧。
 `SectionCompilerMixin` 在 worker 返回时复制顶点，`CompiledSectionMeshMixin` 绑定同一结果和关闭事件；
-`LevelTerrainMixin` 在原版准备地形 draw 时冻结已采用的可见 mesh；`GameTerrainMixin` 捕获最终世界投影。
+`LevelTerrainMixin` 在原版准备地形 draw 时在原版 draw 提取锁释放前冻结已采用的可见 mesh 和透明索引快照；`GameTerrainMixin` 捕获最终世界投影。
 图集动画与 lightmap 的脏标记在原版写入时更新。lightmap 创建增加 COPY_SRC 用途。
 `Lightmap.render` 返回后录制输入复制和 signal；原版 `GameRenderer.render` 返回后提交 native 绘制，再复制输出 RT。
 数据、输入同步和 fallback 的权威说明见[地形预览](terrain-preview.md)。
@@ -85,6 +85,6 @@ MC 非 Vulkan、显式关闭、能力不足、创建或导入失败时记录原�
 
 ## 当前接入范围
 
-原版世界、手持物、后处理、GUI 和呈现继续执行。预览仅覆盖指定矩形，内容是 native GPU 绘制的 SOLID 地形。
+原版世界、手持物、后处理、GUI 和呈现继续执行。预览仅覆盖指定矩形，内容是 native GPU 绘制的三层地形。
 复用 MC 区块编译、采用和可见性，native 使用通用场景描述和统一提交，没有窗口接管；运行路径不经过 CPU 像素读回。
 开关、启动参数与现有测试覆盖见[构建与测试](../guide/build-test.md)。

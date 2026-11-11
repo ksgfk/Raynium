@@ -14,7 +14,7 @@ import zipfile
 from shader_pack import RESOURCE_PATH, verify_shader_pack
 
 
-ABI_VERSION = 11
+ABI_VERSION = 13
 
 
 def digest(path):

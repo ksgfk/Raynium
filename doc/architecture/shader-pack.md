@@ -7,7 +7,10 @@
 ## 资产与编译
 
 默认资产为 `assets/raynium/shaderpacks/default.rnsp`，资源标识为 `raynium:shaderpacks/default.rnsp`。
-它保存命名程序 `terrain` 的 DXIL 和 SPIR-V artifact；一个容器可包含多个程序，每个程序按后端索引。
+它保存八个命名程序的 DXIL 和 SPIR-V artifact，每个程序按后端索引：
+`terrain`、`terrain_cutout`、`terrain_translucent`、`terrain_oit_bounds`、`terrain_oit_transmittance`、
+`terrain_oit_accumulate`、`oit_bounds_cull` 和 `oit_composite`。
+各入口文件共享顶点、采样、雾和 OIT include；alpha-only 程序不采样 lightmap。
 当前没有纹理、材质资产或 keyword variant 选择。
 
 离线工具调用锁定 RadRay 的 `shader_compiler::Client`，对带 `[shader]` 阶段标记的 HLSL 执行 source discovery 和双 target 编译。
@@ -33,8 +36,8 @@
 target=0 为 DXIL，1 为 SPIR-V。同一程序/target 不得重复；artifact 不得覆盖目录、越界或相互重叠。
 CRC32 使用标准 IEEE 多项式，覆盖整份 artifact。包头版本独立于 RadRay artifact schema。
 
-Native 校验整个目录与 CRC32后，按程序/后端选择条目，调用上游 decoder 校验 schema、target、预期 artifact identity 和锁定 toolchain identity。
-普通资源构建和 JAR 分发检查包结构、CRC32、artifact envelope 与双后端 terrain 是否存在；完整 metadata 安全性由 native decoder 检查。
+Native 在创建 renderer 时一次校验整个目录与 CRC32，再按程序/后端选择条目，调用上游 decoder 校验 schema、target、预期 artifact identity 和锁定 toolchain identity。
+普通资源构建和 JAR 分发检查包结构、CRC32、artifact envelope 与八程序双后端条目是否存在；完整 metadata 安全性由 native decoder 检查。
 
 ## 加载与所有权
 
@@ -46,9 +49,11 @@ MC/Fabric 版本来自 `gradle.properties`，资源 API 源码获取见[开发�
 
 `NativeRuntime.createRenderer(NativeShaderPack)` 将字节复制到本次调用的 confined arena。
 `rn_create_renderer` 只在调用期间借用包；MeshPassResources 拥有 decoder 复制的选中 artifact 和 GPU shader。
-阶段入口从 artifact 读取，MaterialResource 拥有其入口名称；Java arena 关闭后 native 不再读取调用方内存。
+阶段入口从 native 自持有的 artifact 读取；Java arena 关闭后 native 不再读取调用方内存。
 完整 ABI 和失败诊断约束见[互操作与加载](interop.md)。
 
-SOLID 的 RHI 布局与渲染状态由适配层显式提供。创建前校验 artifact 的五个资源绑定、vertex/pixel 阶段、
-六个顶点输入及 192 字节 Frame 成员布局、矩阵方向和标量类型；不会从 metadata 自动生成 PSO 或绑定布局。
+各程序的 RHI 布局与渲染状态由适配层显式提供。创建前按程序校验资源绑定、vertex/pixel 阶段、顶点输入及 Frame 的成员布局、矩阵方向和标量类型。
+完整地形使用五绑定和六输入，alpha-only 使用 Frame/Atlas/AtlasSampler 及四输入；全屏程序没有顶点输入，各 OIT 程序另校验所需的 Group 2 纹理。
+Frame 使用 192 字节有效布局和 256 字节上传缓冲。pipeline layout 只声明该程序使用的 group；全部程序和 PSO 成功后才构造 renderer。
+布局及渲染状态不会从 metadata 自动生成，缺失任何必需程序也会拒绝创建。
 失败清空创建输出，经诊断缓冲返回原因。客户端沿用预览禁用路径，原版渲染继续执行。

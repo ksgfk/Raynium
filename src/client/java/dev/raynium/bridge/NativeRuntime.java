@@ -33,9 +33,12 @@ public final class NativeRuntime implements AutoCloseable {
     }
 
     public NativeRenderer createRenderer(NativeShaderPack shaders) {
+        return createRenderer(shaders,TerrainSubmission.fromProperty(System.getProperty("raynium.terrain.submission","auto")));
+    }
+    public NativeRenderer createRenderer(NativeShaderPack shaders,TerrainSubmission submission) {
         checkOpen();
         if(renderer!=null) throw new IllegalStateException("Runtime already has a renderer");
-        renderer=NativeRenderer.create(this,bindings,handle,java.util.Objects.requireNonNull(shaders));
+        renderer=NativeRenderer.create(this,bindings,handle,java.util.Objects.requireNonNull(shaders),java.util.Objects.requireNonNull(submission));
         return renderer;
     }
     void releasedRenderer(NativeRenderer value) {

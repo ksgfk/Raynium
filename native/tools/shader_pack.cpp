@@ -16,16 +16,18 @@ void Verify(std::span<const radray::byte> data) {
     radray::string error;
     std::vector<raynium::ShaderPackEntry> entries;
     if(!raynium::ReadShaderPack(data,entries,error)) throw std::runtime_error(std::string(error));
-    bool terrain[2]{};
+    bool required[8][2]{};
     for(const auto& entry:entries) {
         auto decoded=DecodeShaderArtifact(entry.data,{.Target=entry.target,.ExpectedGpuArtifact=entry.identity,.ExpectedToolchainIdentity=kShaderToolchainIdentity});
         Require(decoded.Succeeded(),decoded.Diagnostics);
-        if(entry.name=="terrain") {
-            if(!raynium::ValidateTerrainShader(*decoded.Value,error)) throw std::runtime_error(std::string(error));
-            terrain[uint8_t(entry.target)]=true;
+        for(size_t i=0;i<raynium::TerrainPrograms.size();++i) if(entry.name==raynium::TerrainPrograms[i]) {
+            if(!raynium::ValidateTerrainShader(*decoded.Value,entry.name,error))
+                throw std::runtime_error(std::string(entry.name)+": "+std::string(error));
+            required[i][uint8_t(entry.target)]=true;
         }
     }
-    Require(terrain[0] && terrain[1],"Shader pack requires terrain for both DXIL and SPIR-V");
+    for(size_t i=0;i<raynium::TerrainPrograms.size();++i)
+        Require(required[i][0] && required[i][1],"Shader pack requires every terrain program for DXIL and SPIR-V");
 }
 struct Program { std::string name,source; };
 struct Compiled { std::string name; ShaderTarget target; radray::vector<radray::byte> data; GpuArtifactHash identity; };

@@ -11,60 +11,72 @@ import net.minecraft.core.SectionPos;
 /** Render-thread residency. Commit only after a successful native submission. */
 final class TerrainResidency {
     static final long UPLOAD_BUDGET=8L*1024*1024;
-    private final Long2ObjectOpenHashMap<MeshPayload> residentBySection=new Long2ObjectOpenHashMap<>(4096);
-    final ObjectArrayList<MeshPayload> pendingRemovals=new ObjectArrayList<>();
-    private final IntArrayList unuploadedIndices=new IntArrayList(1024);
-    private final ObjectArrayList<MeshPayload> stagedMeshes=new ObjectArrayList<>(),evictingPayloads=new ObjectArrayList<>();
+    private final Long2ObjectOpenHashMap<SectionPayload> residentBySection=new Long2ObjectOpenHashMap<>(4096);
+    final ObjectArrayList<SectionPayload> pendingRemovals=new ObjectArrayList<>();
+    private final IntArrayList candidates=new IntArrayList(1024),staged=new IntArrayList(1024);
+    private final ObjectArrayList<SectionPayload> evicting=new ObjectArrayList<>();
+    private record IndexUpload(SectionPayload section,MeshPayload.IndexSnapshot snapshot) {}
+    private final ObjectArrayList<IndexUpload> indexUploads=new ObjectArrayList<>();
+    private TerrainCapture.Buffer capture;
     private long epoch,frameId;
     private int indexCapacity,anisotropy,nextIndexCapacity,nextAnisotropy,residentCount;
     long uploadBytes;
 
     void reset(long epoch) {
-        residentBySection.clear(); pendingRemovals.clear(); stagedMeshes.clear(); evictingPayloads.clear(); unuploadedIndices.clear();
-        this.epoch=epoch; indexCapacity=anisotropy=residentCount=0;
+        residentBySection.clear(); pendingRemovals.clear(); staged.clear(); evicting.clear(); candidates.clear(); indexUploads.clear();
+        capture=null; this.epoch=epoch; indexCapacity=anisotropy=residentCount=0;
     }
     void prepare(TerrainCapture.Buffer capture,NativeFrameBuffer frame) {
-        frameId=NativeRenderer.nextFrameId();
-        unuploadedIndices.clear(); stagedMeshes.clear(); evictingPayloads.clear();
-        long total=0;
+        this.capture=capture; frameId=NativeRenderer.nextFrameId();
+        candidates.clear(); staged.clear(); evicting.clear(); indexUploads.clear();
+        long total=0; uploadBytes=0;
         for(int i=0;i<capture.count;i++) {
-            var p=capture.payloads[i];
-            if(p.uploadedEpoch!=epoch && p.stagedFrame!=frameId && p.vertices.length>0) {
-                p.stagedFrame=frameId;
-                p.sectionKey=SectionPos.asLong(capture.originX[i]>>4,capture.originY[i]>>4,capture.originZ[i]>>4);
-                unuploadedIndices.add(i); total+=p.vertices.length;
+            var p=capture.payloads[i]; var indices=capture.indices[i];
+            if(p.uploadedEpoch==epoch) {
+                if(indices!=null && indices!=p.uploadedIndices) {
+                    indexUploads.add(new IndexUpload(p,indices)); uploadBytes+=indices.values().length*4L;
+                }
+            } else if(p.vertexBytes>0 && (p.layers[2]==null || indices!=null)) {
+                candidates.add(i); total+=p.uploadBytes(indices);
             }
         }
-        if(total>UPLOAD_BUDGET) {
-            for(int i=0;i<unuploadedIndices.size();i++) capture.payloads[unuploadedIndices.getInt(i)].stagedFrame=0;
-            IntArrays.unstableSort(unuploadedIndices.elements(),0,unuploadedIndices.size(),
-                (a,b)->Integer.compare(capture.distKey[a],capture.distKey[b]));
+        if(total+uploadBytes>UPLOAD_BUDGET) IntArrays.unstableSort(candidates.elements(),0,candidates.size(),
+            (a,b)->Integer.compare(capture.distKey[a],capture.distKey[b]));
+        int needed=indexCapacity,meshes=0,ranges=0;
+        long dataBytes=0;
+        for(int i=0;i<candidates.size();i++) {
+            int entry=candidates.getInt(i); var p=capture.payloads[entry]; var indices=capture.indices[entry];
+            long bytes=p.uploadBytes(indices);
+            if(uploadBytes+bytes>UPLOAD_BUDGET && (!staged.isEmpty() || uploadBytes!=0)) break;
+            staged.add(entry); p.stagedFrame=frameId;
+            p.sectionKey=SectionPos.asLong(capture.originX[entry]>>4,capture.originY[entry]>>4,capture.originZ[entry]>>4);
+            uploadBytes+=bytes;
+            if(indices!=null) indexUploads.add(new IndexUpload(p,indices));
+            for(var layer:p.layers) if(layer!=null) {
+                meshes++; ranges+=Integer.bitCount(layer.allElementMask);
+                dataBytes+=NativeFrameBuffer.alignedBytes(layer.vertices.length);
+                if(layer.mode!=2) needed=Math.max(needed,layer.vertices.length/28);
+            }
         }
-        uploadBytes=0; long dataBytes=0; int needed=indexCapacity,ranges=0;
-        for(int i=0;i<unuploadedIndices.size();i++) {
-            var p=capture.payloads[unuploadedIndices.getInt(i)];
-            if(total>UPLOAD_BUDGET && uploadBytes!=0 && uploadBytes+p.vertices.length>UPLOAD_BUDGET) break;
-            p.stagedFrame=frameId; stagedMeshes.add(p); uploadBytes+=p.vertices.length;
-            dataBytes+=NativeFrameBuffer.alignedBytes(p.vertices.length);
-            needed=Math.max(needed,p.vertices.length/28); ranges+=Integer.bitCount(p.allElementMask);
-        }
+        for(var update:indexUploads) dataBytes+=NativeFrameBuffer.alignedBytes(update.snapshot.values().length*4L);
         nextIndexCapacity=needed>indexCapacity?Math.max(65536,Integer.highestOneBit(needed-1)<<1):indexCapacity;
         nextAnisotropy=capture.anisotropy;
         boolean indexChanged=nextIndexCapacity!=indexCapacity,materialChanged=anisotropy!=nextAnisotropy;
         if(indexChanged) dataBytes+=NativeFrameBuffer.alignedBytes(nextIndexCapacity/4*6L*4);
-        frame.begin(capture.count,pendingRemovals.size(),stagedMeshes.size(),ranges,materialChanged?1:0,indexChanged?1:0,dataBytes);
+        frame.begin(capture.count*3,pendingRemovals.size()*3,meshes,ranges,materialChanged?3:0,
+            indexUploads.size()+(indexChanged?1:0),dataBytes);
         if(indexChanged) frame.quadIndices(1,nextIndexCapacity);
-        if(materialChanged) frame.material(1,0,1,nextAnisotropy);
-        for(int i=0;i<stagedMeshes.size();i++) {
-            var p=stagedMeshes.get(i);
-            frame.mesh(p.id,p.vertices,1,p.vertices.length/28,Integer.bitCount(p.allElementMask));
+        if(materialChanged) for(int mode=0;mode<3;mode++) frame.material(mode+1,0,1,nextAnisotropy,mode);
+        for(var update:indexUploads) frame.index(update.section.layers[2].id+1,update.snapshot.values());
+        for(int entry:staged) for(var layer:capture.payloads[entry].layers) if(layer!=null) {
+            frame.mesh(layer.id,layer.vertices,layer.mode==2?layer.id+1:1,layer.vertices.length/28,Integer.bitCount(layer.allElementMask));
             int first=0;
-            for(int count:p.groupVertices) {
+            for(int count:layer.groupVertices) {
                 int indices=count/4*6;
                 if(indices>0) frame.submesh(first,indices,0);
                 first+=indices;
             }
-            frame.primitive(p.id,p.id,1);
+            frame.primitive(layer.id,layer.id,layer.mode+1);
         }
         for(int i=0;i<capture.count;i++) {
             var p=capture.payloads[i]; int mask=capture.elementMask[i];
@@ -72,35 +84,43 @@ final class TerrainResidency {
                 long key=SectionPos.asLong(capture.originX[i]>>4,capture.originY[i]>>4,capture.originZ[i]>>4);
                 p=residentBySection.get(key);
                 if(p==null || p.uploadedEpoch!=epoch) continue;
-                mask=p.allElementMask;
+                mask=0;
+                for(int layer=0;layer<3;layer++) if(p.layers[layer]!=null) mask|=p.layers[layer].allElementMask<<(layer*8);
             }
             p.lastActiveFrame=frameId;
             if(mask==0) continue;
             int instance=frame.instance(capture.originX[i],capture.originY[i],capture.originZ[i],capture.visibility[i]);
-            frame.visible(p.id,mask,capture.distKey[i]>>>16,instance,1);
+            for(int layer=0;layer<3;layer++) if(p.layers[layer]!=null) {
+                int elements=(mask>>>(layer*8))&127;
+                if(elements!=0) frame.visible(p.layers[layer].id,elements,layer==2?capture.count-i:capture.distKey[i]>>>16,instance,1);
+            }
         }
         for(int i=pendingRemovals.size()-1;i>=0;i--) {
             var p=pendingRemovals.get(i);
             if(p.uploadedEpoch!=epoch) {
-                // A frozen snapshot can be closed before its first native upload completes.
                 if(p.stagedFrame!=frameId) pendingRemovals.remove(i);
                 continue;
             }
             if(p.lastActiveFrame==frameId) continue;
-            evictingPayloads.add(p); frame.removeMesh(p.id); frame.removePrimitive(p.id);
+            evicting.add(p);
+            for(var layer:p.layers) if(layer!=null) {
+                frame.removeMesh(layer.id); frame.removePrimitive(layer.id);
+                if(layer.mode==2) frame.removeIndex(layer.id+1);
+            }
         }
     }
     void commit() {
         indexCapacity=nextIndexCapacity; anisotropy=nextAnisotropy;
-        for(int i=0;i<stagedMeshes.size();i++) {
-            var p=stagedMeshes.get(i); p.uploadedEpoch=epoch; residentBySection.put(p.sectionKey,p); residentCount++;
+        for(int entry:staged) {
+            var p=capture.payloads[entry]; p.uploadedEpoch=epoch; residentBySection.put(p.sectionKey,p); residentCount++;
         }
-        for(int i=0;i<evictingPayloads.size();i++) {
-            var p=evictingPayloads.get(i); p.uploadedEpoch=0;
+        for(var update:indexUploads) update.section.uploadedIndices=update.snapshot;
+        for(var p:evicting) {
+            p.uploadedEpoch=0; p.uploadedIndices=null;
             if(residentBySection.get(p.sectionKey)==p) residentBySection.remove(p.sectionKey);
             residentCount--;
         }
-        if(!evictingPayloads.isEmpty()) {
+        if(!evicting.isEmpty()) {
             for(int i=pendingRemovals.size()-1;i>=0;i--) if(pendingRemovals.get(i).uploadedEpoch!=epoch) pendingRemovals.remove(i);
         }
     }

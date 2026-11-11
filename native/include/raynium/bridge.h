@@ -7,7 +7,7 @@
 #else
 #define RAYNIUM_API __declspec(dllimport)
 #endif
-#define RN_ABI_VERSION 11u
+#define RN_ABI_VERSION 13u
 
 struct rn_runtime;
 struct rn_renderer;
@@ -87,7 +87,9 @@ struct rn_shared_image_info {
     uint32_t reserved;
 };
 
-enum rn_frame_flags : uint32_t { RN_FRAME_RGSS = 1, RN_FRAME_PROFILE = 2 };
+enum rn_frame_flags : uint32_t { RN_FRAME_RGSS = 1, RN_FRAME_PROFILE = 2, RN_FRAME_IMPROVED_TRANSPARENCY = 4 };
+// Zero selects auto. Forced direct and indirect are mutually exclusive.
+enum rn_renderer_flags : uint32_t { RN_RENDERER_DIRECT = 1, RN_RENDERER_INDIRECT = 2 };
 // Pack bytes are borrowed only during rn_create_renderer; no pointer is retained.
 struct rn_renderer_desc { uint32_t struct_size, flags; const void* shader_pack; uint64_t shader_pack_size; };
 struct rn_render_target_desc { uint32_t struct_size, width, height, reserved; };
@@ -106,7 +108,8 @@ struct rn_mesh_update {
     uint32_t vertex_count, submesh_count; // Vertices have a fixed 28-byte stride.
 };
 // Texture indices address logical textures in the attached shared_textures set.
-struct rn_material_update { uint64_t id; uint32_t albedo_texture, light_texture, anisotropy, reserved; };
+enum rn_material_mode : uint32_t { RN_MATERIAL_OPAQUE = 0, RN_MATERIAL_CUTOUT = 1, RN_MATERIAL_TRANSLUCENT = 2 };
+struct rn_material_update { uint64_t id; uint32_t albedo_texture, light_texture, anisotropy; rn_material_mode render_mode; };
 struct rn_primitive_update { uint64_t id, mesh, material; };
 struct rn_instance { int32_t origin[3]; float visibility; };
 // element_mask is nonzero; bit k selects submesh k, UINT32_MAX selects all submeshes.
@@ -177,7 +180,7 @@ RAYNIUM_API rn_status rn_destroy_render_target(rn_render_target*, char*, uint32_
 RAYNIUM_API rn_status rn_create_shared_textures(rn_renderer*, const rn_shared_textures_desc*, rn_shared_textures**,
     rn_shared_image_export*, uint32_t export_capacity, char*, uint32_t) noexcept;
 RAYNIUM_API rn_status rn_destroy_shared_textures(rn_shared_textures*, char*, uint32_t) noexcept;
-// Only successful submissions advance sequences. Scene updates are applied in place; close the renderer after failure.
+// Only successful submissions advance sequences. Residency updates are applied in place; close the renderer after failure.
 // Failed waits preserve live owners.
 RAYNIUM_API rn_status rn_render_frame(rn_renderer*, rn_render_target*, const rn_render_frame_desc*, char*, uint32_t) noexcept;
 }

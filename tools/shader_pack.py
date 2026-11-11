@@ -4,6 +4,8 @@ import struct
 import zlib
 
 RESOURCE_PATH = 'assets/raynium/shaderpacks/default.rnsp'
+PROGRAMS = ('terrain', 'terrain_cutout', 'terrain_translucent', 'terrain_oit_bounds',
+            'terrain_oit_transmittance', 'terrain_oit_accumulate', 'oit_bounds_cull', 'oit_composite')
 HEADER = struct.Struct('<6I')
 RECORD = struct.Struct('<64s4I16s')
 
@@ -39,7 +41,7 @@ def verify_shader_pack(data):
             require(start + extent <= length and (not extent or start >= header_size), 'artifact section range')
     ranges.sort()
     require(all(a[1] <= b[0] for a, b in zip(ranges, ranges[1:])), 'overlapping artifacts')
-    require({(b'terrain', 0), (b'terrain', 1)} <= keys, 'missing terrain/backend')
+    require({(name.encode('ascii'), target) for name in PROGRAMS for target in (0, 1)} <= keys, 'missing terrain program/backend')
     return keys
 
 

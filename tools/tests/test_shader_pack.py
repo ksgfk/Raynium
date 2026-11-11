@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from shader_pack import verify_shader_pack
+from shader_pack import verify_shader_pack, PROGRAMS
 
 
 class ShaderPackTest(unittest.TestCase):
@@ -13,7 +13,7 @@ class ShaderPackTest(unittest.TestCase):
             'src/client/resources/assets/raynium/shaderpacks/default.rnsp').read_bytes())
 
     def test_dual_backend_pack(self):
-        self.assertEqual({(b'terrain', 0), (b'terrain', 1)}, verify_shader_pack(self.data))
+        self.assertEqual({(name.encode(), target) for name in PROGRAMS for target in (0, 1)}, verify_shader_pack(self.data))
 
     def test_bad_containers(self):
         for mutation in ('version', 'truncated', 'range', 'duplicate', 'missing', 'checksum', 'identity'):

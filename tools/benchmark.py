@@ -21,7 +21,7 @@ DEFAULTS = {
     'outputDir': str(ROOT / 'build/benchmarks'), 'backend': 'd3d12', 'terrainProfile': True,
     'warmupSeconds': 20, 'startupTimeoutSeconds': 180, 'shutdownTimeoutSeconds': 60,
     'captureTimeoutSeconds': 120, 'width': 1280, 'height': 720,
-    'renderDistance': 32, 'simulationDistance': 8, 'jfrEnabled': False,
+    'renderDistance': 32, 'simulationDistance': 8, 'jfrEnabled': False, 'terrainSubmission': 'auto',
 }
 PATH_KEYS = ('tracyCapture', 'world', 'optionsFile', 'outputDir')
 
@@ -67,6 +67,8 @@ def load_config(path, capture_override=None):
             raise ValueError(f'{key} does not exist: {config[key]}')
     if config['backend'] not in ('d3d12', 'vulkan'):
         raise ValueError('backend must be d3d12 or vulkan')
+    if config['terrainSubmission'] not in ('auto','direct','indirect'):
+        raise ValueError('terrainSubmission must be auto, direct or indirect')
     for key in ('terrainProfile', 'jfrEnabled'):
         if type(config[key]) is not bool:
             raise ValueError(f'{key} must be a boolean')
@@ -121,7 +123,8 @@ def gradle_properties(config):
     return ['-PnativeConfig=Release', '-PnativeProfiler=true', '-PrhiValidation=false',
             '-PvulkanValidation=false', '-PpreviewEnabled=true', '-PterrainDisableFaceCull=false',
             '-PterrainTextureTransfer=auto', '-PrhiBackend=' + config['backend'],
-            '-PterrainProfile=' + str(config['terrainProfile']).lower(), '-PnativePython=' + sys.executable]
+            '-PterrainProfile=' + str(config['terrainProfile']).lower(), '-PterrainSubmission=' + config['terrainSubmission'],
+            '-PnativePython=' + sys.executable]
 
 
 def terminate_tree(process):
@@ -238,7 +241,7 @@ def check_result(session, game_code, capture_code, jfr_enabled):
     if client.get('status') != 'completed' or client.get('routeNativeFrames', 0) <= 0:
         raise RuntimeError('Client did not complete native benchmark: ' + client.get('message', 'missing completion'))
     game_log = (session / 'game/logs/latest.log').read_text(encoding='utf-8', errors='replace')
-    for marker in ('Raynium shared preview ready:', 'Raynium SOLID terrain inputs ready',
+    for marker in ('Raynium shared preview ready:', 'Raynium terrain inputs ready',
                    'Raynium runtime destroyed', 'Raynium native environment destroyed', 'Raynium native library closed'):
         if marker not in game_log:
             raise RuntimeError(f'Game log is missing required evidence: {marker}')
@@ -271,7 +274,7 @@ def run_benchmark(config):
     print(f'Session: {session}', flush=True)
     summary = {'status': 'running', 'tracyVersion': version, 'configuration': 'Release',
                'nativeProfiler': True, 'rhiValidation': False, 'vulkanValidation': False,
-               'jfrEnabled': config['jfrEnabled']}
+               'jfrEnabled': config['jfrEnabled'], 'terrainSubmission': config['terrainSubmission']}
     game = capture = build = None
     try:
         print('Copying world and preparing isolated options...', flush=True)

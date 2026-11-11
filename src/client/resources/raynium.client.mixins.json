@@ -8,6 +8,7 @@
     "VulkanFeatureSetsMixin",
     "VulkanCommandEncoderAccessor",
     "SectionCompilerMixin",
+    "RenderSectionIndicesMixin",
     "SectionResultsMixin",
     "CompiledSectionMeshMixin",
     "LevelTerrainMixin",

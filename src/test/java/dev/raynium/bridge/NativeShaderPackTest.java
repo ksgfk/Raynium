@@ -24,6 +24,15 @@ class NativeShaderPackTest {
             assertNotNull(input); return input.readAllBytes();
         }
     }
+    private static int record(byte[] data,String name,int target) {
+        var b=ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
+        for(int i=0;i<b.getInt(12);i++) {
+            int offset=24+i*96,end=offset;
+            while(data[end]!=0) end++;
+            if(new String(data,offset,end-offset,java.nio.charset.StandardCharsets.US_ASCII).equals(name) && b.getInt(offset+64)==target) return offset;
+        }
+        throw new AssertionError("Missing program "+name);
+    }
     private static void checksum(byte[] data,int record) {
         var buffer=ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
         int offset=buffer.getInt(record+68),size=buffer.getInt(record+72);
@@ -36,14 +45,14 @@ class NativeShaderPackTest {
             byte[] original=bytes();
             for(String mutation:new String[]{"version","truncated","range","overlap","duplicate","missing","checksum","identity","schema","toolchain","binding","vertex","constants"}) {
                 byte[] changed=original.clone(); var b=ByteBuffer.wrap(changed).order(ByteOrder.LITTLE_ENDIAN);
-                int record=24+(backend==NativeEnvironment.Backend.VULKAN?96:0),offset=b.getInt(record+68);
+                int record=record(changed,"terrain",backend==NativeEnvironment.Backend.VULKAN?1:0),offset=b.getInt(record+68);
                 switch(mutation) {
                     case "version" -> b.putInt(4,2);
                     case "truncated" -> changed=Arrays.copyOf(changed,changed.length-1);
                     case "range" -> b.putInt(record+68,Integer.MAX_VALUE);
                     case "overlap" -> { b.putInt(24+96+68,b.getInt(24+68)); b.putInt(24+96+72,b.getInt(24+72)); b.putInt(24+96+76,b.getInt(24+76)); }
                     case "duplicate" -> b.putInt(24+96+64,0);
-                    case "missing" -> { changed[24]='x'; changed[24+96]='x'; }
+                    case "missing" -> { changed[record]='x'; }
                     case "checksum" -> changed[changed.length-1]^=1;
                     case "identity" -> changed[record+80]^=1;
                     case "schema" -> { b.putShort(offset+4,(short)7); checksum(changed,record); }
@@ -67,6 +76,27 @@ class NativeShaderPackTest {
         }
     }
     @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void everyRequiredProgramValidatesItsOwnInterface(NativeEnvironment.Backend backend) throws Exception {
+        try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var runtime=environment.createRuntime(null)) {
+            for(String program:new String[]{"terrain","terrain_cutout","terrain_translucent","terrain_oit_bounds",
+                "terrain_oit_transmittance","terrain_oit_accumulate","oit_bounds_cull","oit_composite"}) {
+                for(boolean missing:new boolean[]{true,false}) {
+                    byte[] data=bytes(); var b=ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
+                    int record=record(data,program,backend==NativeEnvironment.Backend.VULKAN?1:0);
+                    if(missing) data[record]='x';
+                    else {
+                        int offset=b.getInt(record+68),bindings=b.getInt(offset+24);
+                        b.putInt(offset+bindings+12,99); checksum(data,record);
+                    }
+                    var failure=assertThrows(IllegalStateException.class,()->runtime.createRenderer(NativeShaderPack.fromBytes(data)),program);
+                    assertTrue(failure.getMessage().contains(program),failure.getMessage());
+                }
+            }
+            try(var renderer=runtime.createRenderer(NativeTestSupport.shaders())) { assertNotNull(renderer); }
+        }
+    }
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
     void descriptorFailureClearsOutputAndRejectsAbi10Layout(NativeEnvironment.Backend backend) throws Throwable {
         try(var abi=new NativeTestSupport(gameDirectory); var arena=Arena.ofConfined()) {
             abi.envDesc.set(JAVA_INT,4,backend==NativeEnvironment.Backend.D3D12?1:2);
@@ -77,6 +107,22 @@ class NativeShaderPackTest {
                 desc.set(JAVA_INT,0,size); abi.output.set(ADDRESS,0,MemorySegment.ofAddress(1));
                 assertEquals(1,abi.createRenderer(runtime,desc,abi.output));
                 assertEquals(MemorySegment.NULL,abi.output.get(ADDRESS,0));
+            }
+        }
+    }
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void rejectsUnknownOrConflictingSubmissionFlags(NativeEnvironment.Backend backend) throws Throwable {
+        try(var abi=new NativeTestSupport(gameDirectory); var arena=Arena.ofConfined()) {
+            abi.envDesc.set(JAVA_INT,4,backend==NativeEnvironment.Backend.D3D12?1:2);
+            assertEquals(0,abi.initEnv(abi.envDesc,abi.error,256));
+            assertEquals(0,abi.create(abi.desc,abi.output,abi.error,256));
+            var runtime=abi.output.get(ADDRESS,0); var desc=arena.allocate(24,8); var shaders=NativeTestSupport.shaders();
+            desc.set(JAVA_INT,0,24); desc.set(ADDRESS,8,shaders.copyTo(arena)); desc.set(JAVA_LONG,16,shaders.size());
+            for(int flags:new int[]{3,4,-1}) {
+                desc.set(JAVA_INT,4,flags); abi.output.set(ADDRESS,0,MemorySegment.ofAddress(1));
+                assertEquals(1,abi.createRenderer(runtime,desc,abi.output));
+                assertEquals(MemorySegment.NULL,abi.output.get(ADDRESS,0));
+                assertTrue(abi.error.getString(0).contains("submission flags"));
             }
         }
     }

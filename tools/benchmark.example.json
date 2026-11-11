@@ -4,6 +4,7 @@
   "optionsFile": "../run/options.txt",
   "outputDir": "../build/benchmarks",
   "backend": "d3d12",
+  "terrainSubmission": "auto",
   "terrainProfile": true,
   "jfrEnabled": true,
   "warmupSeconds": 20,

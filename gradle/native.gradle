@@ -85,6 +85,7 @@ tasks.register('nativeTest', Test) {
     maxParallelForks = 1
     systemProperty 'junit.jupiter.execution.parallel.enabled', 'false'
     systemProperty 'raynium.terrain.profile', providers.gradleProperty('terrainProfile').getOrElse('false')
+    systemProperty 'raynium.terrain.submission', providers.gradleProperty('terrainSubmission').getOrElse('auto')
     systemProperty 'raynium.rhi.validation', providers.gradleProperty('rhiValidation').getOrElse('false')
     systemProperty 'raynium.test.images', providers.gradleProperty('testImages').getOrElse('')
     systemProperty 'raynium.test.baseline', providers.gradleProperty('testBaseline').getOrElse('')

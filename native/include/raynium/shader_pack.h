@@ -1,6 +1,7 @@
 #pragma once
 #include <radray/shader/shader_artifact.h>
 #include <memory>
+#include <array>
 #include <vector>
 
 // See doc/architecture/shader-pack.md for the persisted container and loading contract.
@@ -25,11 +26,15 @@ struct ShaderPackEntry {
 };
 uint32_t ShaderPackCrc32(std::span<const radray::byte>) noexcept;
 bool ReadShaderPack(std::span<const radray::byte>,std::vector<ShaderPackEntry>&,radray::string&);
-bool ValidateTerrainShader(const radray::shader::ShaderArtifactView&,radray::string&);
+inline constexpr std::array<std::string_view,8> TerrainPrograms{"terrain","terrain_cutout","terrain_translucent",
+    "terrain_oit_bounds","terrain_oit_transmittance","terrain_oit_accumulate","oit_bounds_cull","oit_composite"};
+bool ValidateTerrainShader(const radray::shader::ShaderArtifactView&,std::string_view program,radray::string&);
 
 class ShaderProgram final {
 public:
     static bool Create(std::span<const radray::byte>,std::string_view,radray::shader::ShaderTarget,
+        std::unique_ptr<ShaderProgram>&,radray::string&);
+    static bool Create(std::span<const ShaderPackEntry>,std::string_view,radray::shader::ShaderTarget,
         std::unique_ptr<ShaderProgram>&,radray::string&);
     const radray::shader::ShaderArtifactView& Artifact() const { return _artifact; }
     std::string_view Entry(radray::shader::ShaderStage stage) const;

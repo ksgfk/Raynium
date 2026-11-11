@@ -81,10 +81,11 @@ public final class NativeFrameBuffer implements AutoCloseable {
         var s=submeshes.segment; long o=submeshCursor; submeshCursor+=16;
         s.set(JAVA_INT,o,first); s.set(JAVA_INT,o+4,count); s.set(JAVA_INT,o+8,baseVertex); s.set(JAVA_INT,o+12,0);
     }
-    public void material(long id,int albedo,int light,int anisotropy) {
+    public void material(long id,int albedo,int light,int anisotropy) { material(id,albedo,light,anisotropy,0); }
+    public void material(long id,int albedo,int light,int anisotropy,int mode) {
         var s=arrays[2].segment; long o=counts[2]++*24L;
         s.set(JAVA_LONG,o,id); s.set(JAVA_INT,o+8,albedo); s.set(JAVA_INT,o+12,light);
-        s.set(JAVA_INT,o+16,anisotropy); s.set(JAVA_INT,o+20,0);
+        s.set(JAVA_INT,o+16,anisotropy); s.set(JAVA_INT,o+20,mode);
     }
     public void primitive(long id,long mesh,long material) {
         var s=arrays[3].segment; long o=counts[3]++*24L;
@@ -103,6 +104,7 @@ public final class NativeFrameBuffer implements AutoCloseable {
     private void removed(int array,long id) { arrays[array].segment.set(JAVA_LONG,counts[array]++*8L,id); }
     public void removeMesh(long id) { removed(4,id); }
     public void removePrimitive(long id) { removed(5,id); }
+    public void removeIndex(long id) { removed(7,id); }
     public int visibleCount() { return counts[8]; }
     MemorySegment error() { return error; }
     private static void floats(MemorySegment target,long offset,float[] values,int count) {
@@ -137,7 +139,7 @@ public final class NativeFrameBuffer implements AutoCloseable {
             var x=frame.meshes.get(i); mesh(x.id(),x.vertices(),x.index(),x.vertexCount(),x.submeshes().size());
             for(int j=0;j<x.submeshes().size();j++) { var r=x.submeshes().get(j); submesh(r.first(),r.count(),r.baseVertex()); }
         }
-        for(int i=0;i<frame.materials.size();i++) { var x=frame.materials.get(i); material(x.id(),x.albedo(),x.light(),x.anisotropy()); }
+        for(int i=0;i<frame.materials.size();i++) { var x=frame.materials.get(i); material(x.id(),x.albedo(),x.light(),x.anisotropy(),x.renderMode()); }
         for(int i=0;i<frame.primitives.size();i++) { var x=frame.primitives.get(i); primitive(x.id(),x.mesh(),x.material()); }
         for(int i=0;i<frame.visible.size();i++) { var x=frame.visible.get(i); visible(x.primitive(),x.elementMask(),x.sortKey(),x.firstInstance(),x.instanceCount()); }
         for(int i=0;i<frame.instances.size();i++) { var x=frame.instances.get(i); instance(x.x(),x.y(),x.z(),x.visibility()); }

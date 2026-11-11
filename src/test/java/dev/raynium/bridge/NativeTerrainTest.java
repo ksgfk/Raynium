@@ -17,6 +17,45 @@ class NativeTerrainTest {
     static Stream<Arguments> paths() {
         return Arrays.stream(NativeEnvironment.Backend.values()).flatMap(b->Stream.of(Arguments.of(b,false),Arguments.of(b,true)));
     }
+    static Stream<Arguments> submissionPaths() {
+        return Arrays.stream(NativeEnvironment.Backend.values()).flatMap(b->Stream.of(
+            Arguments.of(b,TerrainSubmission.DIRECT),Arguments.of(b,TerrainSubmission.INDIRECT)));
+    }
+    @ParameterizedTest @MethodSource("submissionPaths")
+    void hostWrittenMultiRecordArgumentsKeepFirstInstanceAndNonzeroOffsets(NativeEnvironment.Backend backend,TerrainSubmission mode) throws Exception {
+        try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var producer=new VulkanConsumer(backend.name());
+            var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders(),mode);
+            var textures=renderer.createSharedTextures(textures(false));
+            var target=renderer.createTarget(32,32);
+            var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {
+            var inputs=new ArrayList<VulkanPreviewImage>();
+            try {
+                for(var e:textures.exports()) inputs.add(VulkanPreviewImage.create(producer.device,producer.family,e.image(),e.mipCount(),true));
+                for(int sequence=1;sequence<=5;++sequence) {
+                    var packet=frame(1,sequence,sequence); packet.changedTextures=sequence==1?3:0;
+                    producer.writeTerrainInputs(inputs,false,17,9,5,sequence,false,packet.changedTextures);
+                    if(sequence==1) {
+                        packet.indices=List.of(new NativeRenderer.Index(1,new int[]{0,1,2,2,3,0}));
+                        var ranges=List.of(new NativeRenderer.Submesh(0,3,0),new NativeRenderer.Submesh(3,3,0));
+                        var left=span(4,-.5f,.5f); var right=span(4,.5f,.5f);
+                        for(var bytes:List.of(left,right)) {
+                            var vertices=ByteBuffer.wrap(bytes).order(ByteOrder.nativeOrder());
+                            for(int v=0;v<4;++v) { vertices.putFloat(v*28+16,.5f); vertices.putFloat(v*28+20,.5f); }
+                        }
+                        packet.meshes=List.of(new NativeRenderer.Mesh(1,left,1,4,ranges),new NativeRenderer.Mesh(2,right,1,4,ranges));
+                        packet.materials=List.of(material(1),new NativeRenderer.Material(2,0,1,1,1));
+                        packet.primitives=List.of(new NativeRenderer.Primitive(1,1,1),new NativeRenderer.Primitive(2,2,2));
+                    }
+                    packet.instances=List.of(new NativeRenderer.Instance(1000,0,0,1),new NativeRenderer.Instance(0,0,0,1),new NativeRenderer.Instance(0,0,0,1));
+                    packet.visible=List.of(new NativeRenderer.Visible(1,3,0,1,2),new NativeRenderer.Visible(1,3,0,1,2),new NativeRenderer.Visible(2,3,0,2,1));
+                    renderer.render(target,packet);
+                    producer.copyAndCheckImage(output,sequence,32,32,(x,y)->y>=8 && y<24?atlas():clear());
+                }
+            } finally { for(var image:inputs) image.close(); }
+        }
+    }
     static float[] identity() { return new float[]{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1}; }
     static byte[] quad(int mip) {
         var vertices=ByteBuffer.allocate(112).order(ByteOrder.nativeOrder());
@@ -45,7 +84,7 @@ class NativeTerrainTest {
         return data;
     }
     static int[] atlas() { return new int[]{32,64,128}; }
-    static int[] clear() { return new int[]{0,0,0}; }
+    static int[] clear() { return new int[]{0,0,0,0}; }
     static NativeRenderer.Frame frame(long epoch,long input,long output) {
         var f=new NativeRenderer.Frame(); f.epoch=epoch; f.inputSequence=input; f.outputSequence=output;
         f.flags=(Boolean.getBoolean("raynium.terrain.profile")?NativeRenderer.PROFILE:0);
@@ -132,15 +171,15 @@ class NativeTerrainTest {
                         int[] color=slot==0?new int[]{32,0,0}:new int[]{0,64,0};
                         producer.writeTerrainInputs(inputs,split,17,9,5,sequence,true,slot==0?3:0);
                         producer.copyAndCheckImage(output,sequence,32,32,(x,y)->y>=12 && y<20 &&
-                            ((x>=12-shift && x<20-shift) || (x>=28-shift && x<36-shift)) ? color : new int[]{sequence,0,0});
+                            ((x>=12-shift && x<20-shift) || (x>=28-shift && x<36-shift)) ? color : new int[]{sequence,0,0,0});
                     }
                 }
                 producer.writeTerrainInputs(inputs,split,17,9,5,17,true);
                 var empty=frame(1,17,17);
                 empty.removedMeshes=empty.removedPrimitives=empty.removedMaterials=empty.removedIndices=new long[]{1};
-                renderer.render(target,empty); producer.copyAndCheckSolid(output,17,32,32,new int[]{0,0,0});
+                renderer.render(target,empty); producer.copyAndCheckSolid(output,17,32,32,new int[]{0,0,0,0});
                 producer.writeTerrainInputs(inputs,split,17,9,5,18,true);
-                renderer.render(target,frame(2,18,18)); producer.copyAndCheckSolid(output,18,32,32,new int[]{0,0,0});
+                renderer.render(target,frame(2,18,18)); producer.copyAndCheckSolid(output,18,32,32,new int[]{0,0,0,0});
             } finally { for(var image:inputs) image.close(); }
         }
     }
@@ -226,7 +265,7 @@ class NativeTerrainTest {
                         int sequence=pair*2+slot+1;
                         producer.writeTerrainInputs(inputs,split,17,9,5,sequence,true,sequence==1?3:0);
                         producer.copyAndCheckImage(output,sequence,32,32,(x,y)->{
-                            int[] clear={0,0,0},atlas={32,64,128},dark={4,16,64},white={255,255,255};
+                            int[] clear={0,0,0,0},atlas={32,64,128},dark={4,16,64},white={255,255,255};
                             if(sequence==10 || sequence==12 || (sequence>=7 && sequence<=9 && (y<8 || y>=24))) return clear;
                             if(sequence==11 || sequence<=2) return x<16?atlas:white;
                             if(sequence<=4) return x<16?dark:white;
@@ -272,7 +311,7 @@ class NativeTerrainTest {
                     producer.writeTerrainInputs(inputs,split,17,9,5,sequence,true,packet.changedTextures);
                     final int selected=sequence;
                     producer.copyAndCheckImage(output,sequence,32,32,(x,y)->
-                        selected>=3 || (selected==1?x<16:x>=16)?new int[]{32,64,128}:new int[]{0,0,0});
+                        selected>=3 || (selected==1?x<16:x>=16)?new int[]{32,64,128}:new int[]{0,0,0,0});
                 }
             } finally { for(var image:inputs) image.close(); }
         }
@@ -324,7 +363,7 @@ class NativeTerrainTest {
                     for(int slot=0;slot<2;slot++) {
                         int sequence=pair*2+slot+1;
                         producer.writeTerrainInputs(inputs,split,17,9,5,sequence,true,sequence==1?3:0);
-                        int[] expected=sequence==9?new int[]{0,0,0}
+                        int[] expected=sequence==9?new int[]{0,0,0,0}
                             :sequence==2 || sequence==3 || sequence==4 || sequence==8?new int[]{32,0,0}:new int[]{0,64,0};
                         producer.copyAndCheckSolid(output,sequence,32,32,expected);
                     }
@@ -350,7 +389,7 @@ class NativeTerrainTest {
                     packet.instances=List.of(new NativeRenderer.Instance(0,0,0,1));
                     packet.visible=List.of(new NativeRenderer.Visible(1,mask,0,0,1));
                     var failure=assertThrows(IllegalStateException.class,()->renderer.render(target,packet));
-                    assertTrue(failure.getMessage().contains("Invalid visible SOLID submesh"),failure.getMessage());
+                    assertTrue(failure.getMessage().contains("Invalid visible terrain submesh"),failure.getMessage());
                 }
             }
         }
@@ -453,7 +492,7 @@ class NativeTerrainTest {
                 }
                 producer.writeTerrainInputs(inputs,split,17,9,5,11);
                 renderer.render(preview,frame(1,11,11));
-                producer.copyAndCheckSolid(output,11,32,32,new int[]{0,0,0});
+                producer.copyAndCheckSolid(output,11,32,32,new int[]{0,0,0,0});
             } finally { for(var image:inputs) image.close(); }
         }
     }
@@ -490,7 +529,7 @@ class NativeTerrainTest {
                         packet.instances=List.of(new NativeRenderer.Instance(camera[0],camera[1],camera[2],1),new NativeRenderer.Instance(camera[0],camera[1],camera[2],1));
                     }
                     renderer.render(preview,packet);
-                    producer.copyAndCheckSolid(output,number,32,32,number==3?new int[]{0,0,0}:new int[]{32,0,0});
+                    producer.copyAndCheckSolid(output,number,32,32,number==3?new int[]{0,0,0,0}:new int[]{32,0,0});
                 }
             } finally { for(var image:inputs) image.close(); }
         }

@@ -15,12 +15,16 @@ public final class MeshPayload {
     private final long groupElementBits;
     private final float minX,minY,minZ,maxX,maxY,maxZ;
     private final boolean finiteBounds;
-    // Render-thread state; epochs and frame IDs are globally unique across preview owners.
-    public long uploadedEpoch,stagedFrame,lastActiveFrame,sectionKey;
+    public final int mode;
+    public volatile IndexSnapshot indices;
+    public record IndexSnapshot(int[] values) {}
     public MeshPayload(long epoch, ByteBuffer source) {
-        this.epoch=epoch;
+        this(epoch,source,0);
+    }
+    public MeshPayload(long epoch,ByteBuffer source,int mode) {
+        this.epoch=epoch; this.mode=mode;
         var data=source.slice().order(ByteOrder.nativeOrder());
-        if(data.remaining()%112!=0) throw new IllegalArgumentException("SOLID mesh is not a 28-byte quad stream");
+        if(data.remaining()%112!=0) throw new IllegalArgumentException("Terrain mesh is not a 28-byte quad stream");
         float lx=Float.POSITIVE_INFINITY,ly=lx,lz=lx,hx=Float.NEGATIVE_INFINITY,hy=hx,hz=hx;
         int[] groups=new int[data.remaining()/112];
         for(int q=0;q<groups.length;q++) {
@@ -30,7 +34,7 @@ public final class MeshPayload {
                 lx=Math.min(lx,x); ly=Math.min(ly,y); lz=Math.min(lz,z);
                 hx=Math.max(hx,x); hy=Math.max(hy,y); hz=Math.max(hz,z);
             }
-            groups[q]=group(data,q*112); groupVertices[groups[q]]+=4;
+            groups[q]=mode==2?6:group(data,q*112); groupVertices[groups[q]]+=4;
         }
         int[] offsets=new int[7];
         for(int i=1;i<7;i++) offsets[i]=offsets[i-1]+groupVertices[i-1]*28;
@@ -41,6 +45,18 @@ public final class MeshPayload {
         long bits=0; int elements=0;
         for(int g=0;g<7;g++) if(groupVertices[g]>0) bits|=(1L<<elements++)<<(g*8);
         groupElementBits=bits; allElementMask=(1<<elements)-1;
+    }
+    public IndexSnapshot copyIndices(ByteBuffer source,int stride) {
+        var data=source.slice().order(ByteOrder.nativeOrder());
+        int count=vertices.length/112*6;
+        if((stride!=2 && stride!=4) || data.remaining()!=count*stride) throw new IllegalArgumentException("Invalid transparent indices");
+        int[] values=new int[count];
+        for(int i=0;i<count;i++) {
+            int value=stride==2?Short.toUnsignedInt(data.getShort()):data.getInt();
+            if(value<0 || value>=vertices.length/28) throw new IllegalArgumentException("Transparent index outside mesh");
+            values[i]=value;
+        }
+        return new IndexSnapshot(values);
     }
     // Only exactly planar, consistently wound axis-aligned quads enter a cullable group.
     private static int group(ByteBuffer data,int offset) {

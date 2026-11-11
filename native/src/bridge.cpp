@@ -56,7 +56,7 @@ static_assert(sizeof(rn_index_update)==24);
 static_assert(sizeof(rn_mesh_update)==40);
 static_assert(offsetof(rn_mesh_update,vertex_count)==32 && offsetof(rn_mesh_update,submesh_count)==36);
 static_assert(sizeof(rn_material_update)==24);
-static_assert(offsetof(rn_material_update,albedo_texture)==8 && offsetof(rn_material_update,reserved)==20);
+static_assert(offsetof(rn_material_update,albedo_texture)==8 && offsetof(rn_material_update,render_mode)==20);
 static_assert(sizeof(rn_primitive_update)==24);
 static_assert(sizeof(rn_visible_item)==24);
 static_assert(offsetof(rn_visible_item,primitive)==0 && offsetof(rn_visible_item,element_mask)==8);
@@ -274,11 +274,12 @@ rn_status rn_create_renderer(rn_runtime* runtime,const rn_renderer_desc* desc,rn
     if(output) *output=nullptr;
     return Invoke(error,capacity,[&](radray::string& failure) {
         if(!runtime || runtime!=activeRuntime || !environment || !environment->IsOwnerThread() || runtime->renderer ||
-           !desc || desc->struct_size!=sizeof(*desc) || desc->flags || !desc->shader_pack ||
+           !desc || desc->struct_size!=sizeof(*desc) || !desc->shader_pack ||
            !desc->shader_pack_size || desc->shader_pack_size>raynium::ShaderPackMaxSize || !output) { failure="Invalid renderer descriptor or owner/shader pack"; return false; }
+        if(desc->flags>RN_RENDERER_INDIRECT) { failure="Unknown or mutually exclusive terrain submission flags"; return false; }
         auto owned=radray::unique_ptr<rn_renderer>(new rn_renderer{runtime,{},{},{}});
         const std::span shaders{static_cast<const radray::byte*>(desc->shader_pack),size_t(desc->shader_pack_size)};
-        if(!raynium::Renderer::Create(*runtime->runtime,shaders,owned->renderer,failure)) return false;
+        if(!raynium::Renderer::Create(*runtime->runtime,shaders,desc->flags,owned->renderer,failure)) return false;
         runtime->renderer=owned.release(); *output=runtime->renderer; return true;
     });
 }

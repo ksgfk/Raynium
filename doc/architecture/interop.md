@@ -4,15 +4,15 @@
 
 # 互操作与加载
 
-Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 11。
-当前只提交 SOLID 地形场景帧，不保留旧 ABI 兼容层。
+Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 12。
+当前提交 SOLID/CUTOUT/TRANSLUCENT 地形场景帧，不保留旧 ABI 兼容层。
 设备、场景及完成序号见 [Native runtime](native-runtime.md)，操作与验证见[构建与测试](../guide/build-test.md)。
 
 ## 当前 C ABI
 
 | 导出 | 契约 |
 | --- | --- |
-| `rn_get_abi_version` | 返回 10 |
+| `rn_get_abi_version` | 返回 12 |
 | `rn_query_abi` | 240 字节身份与布局；失败不改 info |
 | `rn_init_env` / `rn_destroy_env` | DLL 单例环境；重复初始化或有活跃 runtime 时销毁失败并保留所有者 |
 | `rn_create_runtime` / `rn_destroy_runtime` | 唯一设备会话；销毁前必须先关闭 renderer |
@@ -30,7 +30,7 @@ Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 1
 renderer、共享资源与帧入口通过统一异常转换层报告 FAILED；进入 RadRay 帧回调后的失败及底层 RHI 的不可恢复终止不转换为可恢复错误。
 没有 upcall、全局 last-error、跨语言共享队列或 GC/Cleaner 回收。
 
-## ABI 11 布局
+## ABI 13 布局
 
 renderer 创建时借用 shader pack 数据，native 拥有所需的解码 artifact；详细来源与寿命见[Shader pack](shader-pack.md)。
 所有指针仅在本次同步调用期间借用；保留的 submesh、材质、primitive 描述被复制，顶点和索引写入 native staging 后上传到 GPU。
@@ -43,7 +43,7 @@ ID 非零，属于 frame epoch；同 ID 更新替换资源，epoch 非零且不�
 | --- | --- |
 | `rn_env_desc` | 12，size/backend/flags；backend=1 D3D12 或 2 Vulkan，flags=1 driver validation |
 | `rn_runtime_desc` | 20，size/flags/node_mask/luid[8]，LUID 偏移 12；flags=1 匹配宿主 GPU |
-| `rn_renderer_desc` | 24，size/flags，偏移 8 为 shader_pack 指针，偏移 16 为 uint64 shader_pack_size；flags 必须为 0 |
+| `rn_renderer_desc` | 24，size/flags，偏移 8 为 shader_pack 指针，偏移 16 为 uint64 shader_pack_size；flags=0 自动、1 强制 direct、2 强制 indirect；拒绝未知位及同时强制两种模式 |
 | `rn_render_target_desc` | 16，size/width/height/reserved |
 | `rn_texture_desc` | 16，width/height/mip_levels/split_mips |
 | `rn_shared_textures_desc` | 16，size/count/textures 指针；最多 16 个逻辑纹理 |
@@ -51,7 +51,7 @@ ID 非零，属于 frame epoch；同 ID 更新替换资源，epoch 非零且不�
 | `rn_index_update` | 24，ID/indices 指针/count/reserved |
 | `rn_submesh` | 16，first/count/base_vertex/reserved |
 | `rn_mesh_update` | 40，ID/vertices 指针/index ID/submeshes 指针，随后偏移 32/36 的 vertex_count/submesh_count |
-| `rn_material_update` | 24，ID/albedo_texture/light_texture/anisotropy/reserved；纹理字段偏移 8/12，reserved 为 0 |
+| `rn_material_update` | 24，ID/albedo_texture/light_texture/anisotropy/render_mode；纹理字段偏移 8/12，偏移 20 的 mode=0 Opaque、1 Cutout、2 Translucent |
 | `rn_primitive_update` | 24，ID/mesh ID/material ID |
 | `rn_instance` | 16，int3 origin/float visibility |
 | `rn_visible_item` | 24，primitive ID/element_mask/sort_key/first_instance/instance_count；偏移 0/8/12/16/20 |
@@ -69,7 +69,7 @@ ID 非零，属于 frame epoch；同 ID 更新替换资源，epoch 非零且不�
 | camera_block[3] / camera_fraction[3] | 288 / 300 |
 | fog_color[4] / fog_distances[4] | 312 / 328 |
 
-frame flags 位值 1/2 为 RGSS/profile，其他位必须为 0；changed_textures 的第 i 位表示第 i 个逻辑纹理已更新。
+frame flags 位值 1/2/4 为 RGSS/profile/improved transparency，其他位必须为 0；changed_textures 的第 i 位表示第 i 个逻辑纹理已更新。
 首次输入使用须初始化全部纹理。每帧资源更新各最多 65,536 项，可见项与实例各最多 1,048,576 项。
 mesh 最多 1,048,576 顶点，submesh 最多 32 项（对应 RadRay batch 的 32 位元素掩码，包含空项）；索引资源最多 16,777,216 个 uint32。
 Java 调用方保证 submesh/索引的几何范围有效、删除后资源引用完整，同类增量 ID 不重复且更新与删除集合不相交；
@@ -87,7 +87,7 @@ element_mask 为非零 32 位子网格掩码，bit k 选择第 k 个 submesh，U
 
 handle_type=1 表示 D3D12Resource/D3D12Fence，2 表示 OpaqueWin32。输入图像的 ready/consumed 分别表示 native 释放与 MC 写入完成。
 输出信息 capacity 按字节；输入导出 capacity 按 144 字节记录数量。native 静态断言校验尺寸和关键偏移，Java `SharedImageInfo.read` 显式读取。
-查询结构为 240 字节；Java、构建 manifest、stage 和分发校验都只接受 ABI 11。
+查询结构为 240 字节；Java、构建 manifest、stage 和分发校验都只接受 ABI 13。
 
 ## Java 包装与所有权
 
@@ -132,9 +132,9 @@ bridge 不包含重复的 new/delete 替换头。
 `radray::string`、`radray::vector` 等动态容器通过 `radray::allocator` 使用 `mi_stl_allocator`；适配层的标准容器遵循当前 CRT 与静态覆盖配置。
 配置阶段不恢复依赖，发布要求锁定提交的干净 Release 源码。当前未实现 RadRay 安装包消费模式。
 
-stage 使用 `dumpbin /exports` 核对十三个 ABI 11 入口，再用 `/dependents` 拒绝动态 CRT 和未分类的私有 DLL，收集上游许可证，并先验证完整快照再发布 `current.json`。
+stage 使用 `dumpbin /exports` 核对十三个 ABI 13 入口，再用 `/dependents` 拒绝动态 CRT 和未分类的私有 DLL，收集上游许可证，并先验证完整快照再发布 `current.json`。
 schema 1 manifest 包含平台、ABI/布局、构建配置、CRT、工具链、build ID、RadRay commit/dirty、DLL/许可证大小与 SHA-256、系统依赖分类。
-ABI 11 的身份 flags 中 bit 1（static CRT）和 bit 2（mimalloc）均为 1，布局不变。loader 只接受 Debug/MTd 或 Release/MT 的单 DLL 清单，拒绝错配和 MD 的 schema 2 payload。
+ABI 13 的身份 flags 中 bit 1（static CRT）和 bit 2（mimalloc）均为 1，布局不变。loader 只接受 Debug/MTd 或 Release/MT 的单 DLL 清单，拒绝错配和 MD 的 schema 2 payload。
 build ID 来自 native/RadRay（含 `modules/runtime/`）源码及配置/工具链指纹；DLL SHA-256 标识实际二进制，manifest SHA-256 标识内容快照，三者用途不同。
 哈希用于一致性检查，不等于来源认证。
 
@@ -161,7 +161,7 @@ loader 的选择顺序为：显式开发目录 `-Draynium.native.dir=...`，否�
 2. 将实际 payload 发布到游戏目录下 `.raynium/natives/windows-x86_64/<content-hash>/`。
 3. 检查已有完整副本，或写入独立 staging 目录，校验后再发布；多进程使用文件锁协调解包。
 4. 客户端初始化入口检查游戏 JVM native access 权限，以绝对路径调用 `SymbolLookup.libraryLookup` 加载 bridge。
-5. 先调用版本入口核对 ABI 11，再用带诊断缓冲区的 `rn_query_abi` 检查布局与构建身份。
+5. 先调用版本入口核对 ABI 13，再用带诊断缓冲区的 `rn_query_abi` 检查布局与构建身份。
 6. 随后调用 `rn_init_env` 创建环境；CLIENT_STARTED 再通过 `rn_create_runtime` 创建 RHI 设备/Direct 队列。
    早期准备失败由 Fabric 初始化失败路径报告，设备创建失败清理并输出 MC 崩溃报告，仍不接管 MC 绘制。
 

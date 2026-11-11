@@ -82,4 +82,19 @@ class MeshPayloadTest {
         assertEquals(0,new MeshPayload(1,ByteBuffer.allocate(0)).allElementMask);
         assertThrows(IllegalArgumentException.class,()->new MeshPayload(1,ByteBuffer.allocate(111)));
     }
+    @Test void transparencyKeepsCompilerOrderAndOwnsBothIndexWidths() {
+        var source=ByteBuffer.allocate(224).put(groupQuad(5)).put(groupQuad(0)).flip();
+        var mesh=new MeshPayload(1,source,2);
+        assertArrayEquals(source.array(),mesh.vertices); assertEquals(8,mesh.groupVertices[6]);
+        assertEquals(1,mesh.allElementMask); assertEquals(1,mesh.visibleElementMask(-100,-100,-100));
+        for(int stride:new int[]{2,4}) {
+            var buffer=ByteBuffer.allocate(12*stride).order(ByteOrder.nativeOrder());
+            int[] values={4,5,6,6,7,4,0,1,2,2,3,0};
+            for(int value:values) if(stride==2) buffer.putShort((short)value); else buffer.putInt(value);
+            buffer.flip(); var snapshot=mesh.copyIndices(buffer,stride);
+            buffer.putInt(0,0); assertArrayEquals(values,snapshot.values());
+        }
+        assertThrows(IllegalArgumentException.class,()->mesh.copyIndices(ByteBuffer.allocate(5),2));
+    }
+
 }
