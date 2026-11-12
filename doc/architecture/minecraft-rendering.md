@@ -128,7 +128,7 @@ MC 的 uniform 类别含 combined image sampler。Raynium 没有自定义 Render
 
 ## 纹理、主目标与最终输出
 
-下表描述当前依赖版本的原版 API；Raynium 的共享输入与输出协议见[地形预览](terrain-preview.md)。
+下表描述当前依赖版本的原版 API；Raynium 的 CPU 纹理上传和地形接入见[地形渲染](terrain-rendering.md)。
 
 | 类/方法 | 源码行为 |
 | --- | --- |

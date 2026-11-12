@@ -4,6 +4,7 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import dev.raynium.client.terrain.TerrainCapture;
+import dev.raynium.client.takeover.TakeoverRuntime;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -57,6 +58,8 @@ public final class BenchmarkSession {
         ClientTickEvents.END_CLIENT_TICK.register(client -> active.tick(client));
     }
 
+    public static boolean isActive() { return active!=null && !active.phase.equals("finished"); }
+
     public static void nativeFrame() {
         if (active != null) active.nativeFrames++;
     }
@@ -104,7 +107,7 @@ public final class BenchmarkSession {
                 var p = route.first();
                 if (!client.player.isSpectator() || client.player.distanceToSqr(p.x(), p.y(), p.z()) > 4
                         || client.gui.screen() != null || client.gui.overlay() != null
-                        || nativeFrames == 0 || !Files.exists(directory.resolve("capture.ready"))) return;
+                        || !TakeoverRuntime.ready() || nativeFrames == 0 || !Files.exists(directory.resolve("capture.ready"))) return;
                 result.addProperty("dimension", client.level.dimension().toString());
                 result.addProperty("windowWidth", client.getWindow().getWidth());
                 result.addProperty("windowHeight", client.getWindow().getHeight());
@@ -114,8 +117,8 @@ public final class BenchmarkSession {
             } else {
                 if (client.player == null || client.level == null || !client.player.isSpectator()
                         || client.gui.screen() != null || client.gui.overlay() != null || client.isPaused()
-                        || client.getWindow().isIconified() || !TerrainCapture.active())
-                    throw new IllegalStateException("World, spectator, window or native preview became unavailable");
+                        || client.getWindow().isIconified() || !TakeoverRuntime.ready() || !TerrainCapture.active())
+                    throw new IllegalStateException("World, spectator, window or native renderer became unavailable");
                 if (phase.equals("warmup") && secondsSince(phaseStarted) >= warmupSeconds) {
                     phase = "measuring";
                     routeStarted = System.nanoTime();

@@ -1,44 +1,28 @@
 #pragma once
+#include <radray/types.h>
+#include <radray/runtime/gpu_device.h>
 #include <raynium/mesh_pass.h>
 #include <raynium/terrain_draw.h>
-#include <raynium/terrain_lookup.h>
 #include <radray/runtime/frame_slot.h>
 #include <radray/runtime/geometry_buffer_pool.h>
 #include <radray/runtime/upload_buffer.h>
-#include <memory>
-#include <unordered_map>
-#include <unordered_set>
 
 namespace raynium {
 struct TerrainMesh {
-    uint64_t indexId{};
-    uint32_t vertexCount{};
-    std::vector<rn_submesh> ranges;
+    TerrainMeshLayout layout;
     radray::VertexBufferSubAllocation geometry;
-    std::shared_ptr<const TerrainDrawTemplate> draws;
-};
-struct TerrainMaterial { rn_material_update desc{}; std::shared_ptr<MeshMaterialBinding> binding; };
-struct TerrainPrimitive {
-    rn_primitive_update desc{};
-    std::shared_ptr<const TerrainDrawTemplate> draws;
-    std::shared_ptr<const MeshMaterialBinding> binding;
-};
-struct TerrainPrimitiveHot {
-    const TerrainDrawRange* ranges{};
-    uint32_t fullMask{},validMask{},mergeMask{},stateId{};
-    rn_material_mode renderMode{};
+    radray::shared_ptr<radray::IndexBufferSubAllocation> indices;
+    radray::shared_ptr<const TerrainDrawTemplate> draws;
+    uint32_t stateId{};
 };
 struct TerrainState {
     uint64_t epoch{},nextMaterialKey{};
-    const SharedTextures* boundTextures{};
-    std::unordered_map<uint64_t,std::shared_ptr<radray::IndexBufferSubAllocation>> indices;
-    std::unordered_map<uint64_t,std::shared_ptr<TerrainMesh>> meshes;
-    std::unordered_map<uint64_t,std::shared_ptr<TerrainMaterial>> materials;
-    TerrainPrimitiveIndex primitives;
-    std::vector<TerrainPrimitive> primitiveOwners;
-    std::vector<TerrainPrimitiveHot> primitiveHot;
+    radray::unordered_map<uint64_t,radray::shared_ptr<TerrainMesh>> meshes;
+    radray::shared_ptr<radray::IndexBufferSubAllocation> quadIndices;
+    uint32_t quadVertexCapacity{};
+    radray::shared_ptr<MeshMaterialBinding> material;
+    uint32_t albedo{},light{},anisotropy{};
     TerrainBindingStates bindings{};
-    std::unordered_map<uint64_t,std::unordered_set<uint64_t>> meshesByIndex,primitivesByMesh,primitivesByMaterial;
 };
 struct SlotUploads {
     radray::FrameSlot& frame;
@@ -47,6 +31,8 @@ struct SlotUploads {
     radray::MappedUploadBuffer& indirect;
     TerrainFrameLists& lists;
     bool useIndirect{};
+    radray::MappedUploadBuffer& textureStaging;
+    radray::vector<TextureCopy>& textureCopies;
 };
 // ABI arrays are copied during PrepareFrame. Lists remain read-only through RunFrame.
 struct TerrainFrame {
@@ -55,23 +41,24 @@ struct TerrainFrame {
     radray::Nullable<const radray::IndexBufferPool*> indices{nullptr};
     rn_render_frame_desc parameters{};
     bool hasTranslucent{};
-    RenderTarget* target{};
-    SharedTextures* textures{};
+    radray::render::Texture* color{};
+    radray::render::SwapChainSyncObject* waitToDraw{};
+    radray::render::SwapChainSyncObject* readyToPresent{};
+    radray::render::Buffer* textureStaging{};
+    const radray::vector<TextureCopy>* textureCopies{};
 };
 class TerrainResidency final {
 public:
-    TerrainResidency(RayniumRuntime&,radray::unique_ptr<radray::VertexBufferPool>,radray::unique_ptr<radray::IndexBufferPool>);
-    bool PrepareFrame(RenderTarget&,SharedTextures*,const rn_render_frame_desc&,const MeshPassResources&,SlotUploads,TerrainFrame&,radray::string&);
-    // Requires WaitIdle before releasing texture bindings.
-    void DetachTextures() noexcept;
+    TerrainResidency(radray::DeviceContext&,radray::unique_ptr<radray::VertexBufferPool>,radray::unique_ptr<radray::IndexBufferPool>);
+    bool PrepareFrame(const UploadedTextures&,const rn_render_frame_desc&,const MeshPassResources&,SlotUploads,TerrainFrame&);
     void Reset() noexcept;
     uint64_t ResidentBytes() const noexcept;
 private:
-    RayniumRuntime& _device;
+    radray::DeviceContext& _device;
     radray::unique_ptr<radray::VertexBufferPool> _vertices;
     radray::unique_ptr<radray::IndexBufferPool> _indices;
     TerrainState _state;
-    std::unordered_set<radray::render::Buffer*> _vertexPages,_indexPages;
+    radray::unordered_set<radray::render::Buffer*> _vertexPages,_indexPages;
     uint64_t _vertexReservedBytes{},_indexReservedBytes{};
 };
 }

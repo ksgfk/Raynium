@@ -151,19 +151,22 @@ if(NOT TARGET RadRay::runtime)
 endif()
 
 add_library(rayniumruntime SHARED
-    src/bridge.cpp include/raynium/bridge.h
+    src/bridge.cpp include/raynium/bridge.h include/raynium/exception.h
     src/renderer.cpp include/raynium/renderer.h
     src/terrain_residency.cpp include/raynium/terrain_residency.h
     src/terrain_draw.cpp include/raynium/terrain_draw.h
     src/solid_pipeline.cpp include/raynium/solid_pipeline.h
     src/render_resources.cpp include/raynium/render_resources.h
+    src/device_info.cpp
+    src/texture_resources.cpp include/raynium/texture_resources.h
+    src/gui_pass.cpp include/raynium/gui_pass.h
     src/mesh_pass.cpp include/raynium/mesh_pass.h
     src/shader_pack.cpp include/raynium/shader_pack.h)
 target_compile_features(rayniumruntime PRIVATE cxx_std_20)
 target_include_directories(rayniumruntime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_compile_definitions(rayniumruntime PRIVATE RAYNIUM_RUNTIME_EXPORTS)
 target_compile_options(rayniumruntime PRIVATE /W4 /permissive- /Zc:preprocessor /utf-8)
-target_link_libraries(rayniumruntime PRIVATE RadRay::runtime RadRay::shader)
+target_link_libraries(rayniumruntime PRIVATE RadRay::runtime RadRay::shader dxgi user32)
 set_target_properties(rayniumruntime PROPERTIES
     CXX_EXTENSIONS OFF
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"

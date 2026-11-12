@@ -5,13 +5,6 @@ import org.slf4j.Logger;
 
 /** Owns a device session; the parent environment must outlive it. */
 public final class NativeRuntime implements AutoCloseable {
-    public record HostGpu(byte[] luid, int nodeMask) {
-        public HostGpu {
-            if (luid.length != 8 || nodeMask != 1) throw new IllegalArgumentException("Expected 8-byte LUID and node mask 1");
-            luid = luid.clone();
-        }
-        @Override public byte[] luid() { return luid.clone(); }
-    }
     private final NativeEnvironment environment;
     private final Logger logger;
     private final NativeBindings bindings;
@@ -19,13 +12,13 @@ public final class NativeRuntime implements AutoCloseable {
     private boolean closed;
     private NativeRenderer renderer;
 
-    NativeRuntime(NativeEnvironment environment, NativeBindings bindings, Logger logger, HostGpu host) {
+    NativeRuntime(NativeEnvironment environment, NativeBindings bindings, Logger logger) {
         this.environment = environment;
         this.bindings = bindings;
         this.logger = logger;
         try {
-            handle = bindings.createRuntime(host);
-            logger.info("Raynium runtime created: owner={}; vanilla rendering remains active", Thread.currentThread().getName());
+            handle = bindings.createRuntime();
+            logger.info("Raynium runtime created: owner={}", Thread.currentThread().getName());
         } catch (RuntimeException | Error failure) {
             if (!handle.equals(MemorySegment.NULL)) bindings.destroyRuntime(handle);
             throw failure;
@@ -34,6 +27,14 @@ public final class NativeRuntime implements AutoCloseable {
 
     public NativeRenderer createRenderer(NativeShaderPack shaders) {
         return createRenderer(shaders,TerrainSubmission.fromProperty(System.getProperty("raynium.terrain.submission","auto")));
+    }
+    public NativeDeviceInfo deviceInfo() {
+        checkOpen();
+        try(var arena=java.lang.foreign.Arena.ofConfined()) {
+            var info=arena.allocate(NativeDeviceInfo.BYTE_SIZE,8);
+            NativeBindings.call(bindings.queryDeviceInfo,"query device info",handle,info,NativeDeviceInfo.BYTE_SIZE);
+            return NativeDeviceInfo.read(info);
+        }
     }
     public NativeRenderer createRenderer(NativeShaderPack shaders,TerrainSubmission submission) {
         checkOpen();

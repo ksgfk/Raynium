@@ -13,7 +13,7 @@ public final class SectionPayload {
         long bytes=0;
         for(var layer:layers) if(layer!=null) {
             if(layer.epoch!=epoch || this.layers[layer.mode]!=null) throw new IllegalArgumentException("Invalid section layers");
-            this.layers[layer.mode]=layer; bytes+=layer.vertices.length;
+            this.layers[layer.mode]=layer; bytes+=layer.vertexCount*28L;
         }
         vertexBytes=bytes;
     }

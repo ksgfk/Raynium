@@ -18,6 +18,7 @@
 | 2026-11-05 | [帧内 GPU 资源持久化与几何分配计划](2026-11-05-persistent-gpu-resources-plan.md)：帧内 D3D12 资源创建/销毁的实测归因，每槽持久帧资源与 staging、GeometryArena 方案，以及块暂不回收、一次实施的用户决定 |
 | 2026-11-09 | [Java 渲染准备与 Native 可见批次开销重构计划](2026-11-09-java-native-overhead-refactoring-plan.md)：基于 26,831 帧 JFR + Tracy 联合采样的分配/GC 与 TimSort 归因，确认 C ABI `element_mask` 直传、稳态零排序与堆外直写重构方案 |
 | 2026-11-10 | [原版渲染切断与 Raynium 完全接管：执行计划](2026-11-10-vanilla-render-cutover-plan.md)：放弃渐进替换与 RenderPearl 后端方案，`RenderSystem` 设备保持为空；面向执行者的硬约束与停止条件、身份句柄与改写配方、阶段 1 的 S0–S8 步骤与逐步验收、总验收、风险规避表，以及后续逐项接入顺序（2026-11-11 提交前修订） |
+| 2026-11-12 | [渲染接管、GUI 与纹理接入最终计划](2026-11-12-render-takeover-gui-texture-final-plan.md)：整合逐轮审查；正式帧入口获取前准备与窗口判断、BGRA8 输出及读回、CPU 图集与动画、GUI 和三层地形、N1–M6 阶段与逐项验收；归档时尚未实施 |
 
 ## 源码调查与早期上下文
 

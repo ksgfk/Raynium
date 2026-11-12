@@ -4,137 +4,109 @@
 
 # 互操作与加载
 
-Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 12。
-当前提交 SOLID/CUTOUT/TRANSLUCENT 地形场景帧，不保留旧 ABI 兼容层。
-设备、场景及完成序号见 [Native runtime](native-runtime.md)，操作与验证见[构建与测试](../guide/build-test.md)。
+Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 17，仅提供窗口交换链输出。
+设备、帧槽与完成序号见 [Native runtime](native-runtime.md)，操作入口见[构建与测试](../guide/build-test.md)。
 
 ## 当前 C ABI
 
 | 导出 | 契约 |
 | --- | --- |
-| `rn_get_abi_version` | 返回 12 |
-| `rn_query_abi` | 240 字节身份与布局；失败不改 info |
-| `rn_init_env` / `rn_destroy_env` | DLL 单例环境；重复初始化或有活跃 runtime 时销毁失败并保留所有者 |
-| `rn_create_runtime` / `rn_destroy_runtime` | 唯一设备会话；销毁前必须先关闭 renderer |
-| `rn_create_renderer` / `rn_destroy_renderer` | 唯一 renderer；持有场景、帧上下文与完成 fence；有共享子对象时拒绝关闭 |
-| `rn_create_render_target` / `rn_destroy_render_target` | 每 renderer 一个输出；返回句柄及 128 字节图像信息；创建不提交 GPU 工作 |
-| `rn_create_shared_textures` / `rn_destroy_shared_textures` | 按描述创建逻辑输入纹理与物理导出；创建提交初始 release，序号为 1 |
-| `rn_render_frame` | 一次提交资源/场景增量、删除项、可见项、实例、视图与输入输出序号；就地应用增量，成功提交才推进序号 |
+| `rn_get_abi_version` / `rn_query_abi` | 版本 17；240 字节身份结构，查询失败不改 info |
+| `rn_init_env` / `rn_destroy_env` | DLL 单例环境；重复初始化、有活跃 runtime 时拒绝；环境不创建设备 |
+| `rn_create_runtime` / `rn_destroy_runtime` | 唯一设备会话；销毁前先关闭 renderer；不接收宿主 GPU 身份 |
+| `rn_create_renderer` / `rn_destroy_renderer` | 唯一 renderer，持有驻留地形、上传纹理与帧调度；有交换链时拒绝关闭 |
+| `rn_query_device_info` | 当前 RHI 设备详情及能力；无需外部共享扩展，失败不改输出 |
+| `rn_create_swapchain` / `rn_resize_swapchain` / `rn_destroy_swapchain` | 每 renderer 一个 BGRA8 HWND 交换链；重建与销毁先回收槽再等待呈现队列 |
+| `rn_present_frame` | 一次同步传递网格、透明索引、移除、可见项、实例、相机及 GUI；OK 表示增量已消费 |
+| `rn_create_texture` / `rn_upload_texture` / `rn_destroy_texture` | 编号 >=16 的 RGBA8/R8 上传纹理；同步复制源字节，帧内提交 GPU 拷贝 |
 
-三类子 owner 的 destroy 返回状态，NULL 成功；超时保留 owner。runtime destroy 保持 void 契约，NULL 无操作。
-所有状态入口仅返回 `RN_STATUS_OK=0` / `RN_STATUS_FAILED=1`，具体原因写入调用方 UTF-8 字符串缓冲区。
-诊断容量大于零时截断并 NUL 终止；NULL 指针要求零容量。参数缓冲区不得重叠，调用方负责真实容量。
-创建失败清空有效输出句柄槽；信息输出在创建成功前不改写。
+状态仅为 `RN_STATUS_OK=0` / `RN_STATUS_FAILED=1`。C ABI 不接收错误缓冲区，native 在发现失败的位置记录日志；Java 只报告操作名与状态码。
+`rn_query_abi(info, capacity)` 和 `rn_query_device_info(runtime, info, capacity)` 中的容量仅指信息结构的字节容量。
+创建失败清空有效输出句柄槽；信息查询和 present 结果失败时不改输出。`rn_destroy_runtime` 为 void，NULL 无操作；错误 owner、错误线程或仍有 renderer 时记录 fatal 日志并 abort。
+所有生命周期和渲染调用在环境初始化线程串行执行；父 owner 拒绝在子 owner 存活时关闭。
+准备失败可能已应用部分增量，不回滚；调用方关闭 renderer。进入 RadRay 帧回调后的不可恢复失败不转换为可重试错误。异常保护和终止边界见[Native runtime](native-runtime.md#失败处理)。
+隐藏、最小化、零客户区、获取超时仍执行上传；OK 的 PRESENTED/SKIPPED/RECREATE 都可提交 Java 驻留事务。
 
-`bridge.h` 使用 C++ 固定宽度非作用域枚举与 `extern "C"` / `noexcept` 导出，不提供纯 C 编译分支。
-renderer、共享资源与帧入口通过统一异常转换层报告 FAILED；进入 RadRay 帧回调后的失败及底层 RHI 的不可恢复终止不转换为可恢复错误。
-没有 upcall、全局 last-error、跨语言共享队列或 GC/Cleaner 回收。
+## ABI 17 布局
 
-## ABI 13 布局
-
-renderer 创建时借用 shader pack 数据，native 拥有所需的解码 artifact；详细来源与寿命见[Shader pack](shader-pack.md)。
-所有指针仅在本次同步调用期间借用；保留的 submesh、材质、primitive 描述被复制，顶点和索引写入 native staging 后上传到 GPU。
-索引不保留 CPU 值副本；资源增删改按当帧增量数组直接应用，失败后不恢复场景，调用方关闭 renderer。
-ID 非零，属于 frame epoch；同 ID 更新替换资源，epoch 非零且不能倒退。
-顶点固定为 28 字节的 position/color/UV/light 布局；所有网格使用 uint32 索引。
-材质中的纹理编号指向当前共享集合的逻辑纹理；共享 quad 索引也通过普通索引 ID 上传。
+指针按 8 字节对齐，固定宽度枚举按 uint32 传递；无旧 ABI 兼容层。Java 与 native 均显式核对版本及布局。
 
 | 结构 | 字节数及关键布局 |
 | --- | --- |
-| `rn_env_desc` | 12，size/backend/flags；backend=1 D3D12 或 2 Vulkan，flags=1 driver validation |
-| `rn_runtime_desc` | 20，size/flags/node_mask/luid[8]，LUID 偏移 12；flags=1 匹配宿主 GPU |
-| `rn_renderer_desc` | 24，size/flags，偏移 8 为 shader_pack 指针，偏移 16 为 uint64 shader_pack_size；flags=0 自动、1 强制 direct、2 强制 indirect；拒绝未知位及同时强制两种模式 |
-| `rn_render_target_desc` | 16，size/width/height/reserved |
-| `rn_texture_desc` | 16，width/height/mip_levels/split_mips |
-| `rn_shared_textures_desc` | 16，size/count/textures 指针；最多 16 个逻辑纹理 |
-| `rn_shared_image_export` | 144，前 128 字节图像信息，随后 texture_index/mip_level/mip_count/reserved；capacity 按记录数 |
-| `rn_index_update` | 24，ID/indices 指针/count/reserved |
-| `rn_submesh` | 16，first/count/base_vertex/reserved |
-| `rn_mesh_update` | 40，ID/vertices 指针/index ID/submeshes 指针，随后偏移 32/36 的 vertex_count/submesh_count |
-| `rn_material_update` | 24，ID/albedo_texture/light_texture/anisotropy/render_mode；纹理字段偏移 8/12，偏移 20 的 mode=0 Opaque、1 Cutout、2 Translucent |
-| `rn_primitive_update` | 24，ID/mesh ID/material ID |
-| `rn_instance` | 16，int3 origin/float visibility |
-| `rn_visible_item` | 24，primitive ID/element_mask/sort_key/first_instance/instance_count；偏移 0/8/12/16/20 |
-| `rn_render_frame_desc` | 344，布局见下表 |
+| `rn_abi_info` | 240；身份 flags 的 bit 1/2 为静态 CRT/mimalloc |
+| `rn_env_desc` | 12；size/backend/flags，backend=1 D3D12、2 Vulkan；flags=1 driver validation |
+| `rn_runtime_desc` | 8；size/reserved，reserved 必须为 0 |
+| `rn_renderer_desc` | 24；size/flags、偏移 8 的 shader pack 指针、偏移 16 的 uint64 长度；flags=0 auto、1 direct、2 indirect |
+| `rn_swapchain_desc` | 24；size/width/height/present_mode，偏移 16 的 HWND；mode=0 Immediate、1 FIFO |
+| `rn_present_result` | 16；size/outcome、偏移 8 的累计 acquire_timeouts；outcome=0 Presented、1 Skipped、2 Recreate |
+| `rn_device_info` | 488；名称/厂商/驱动字符串偏移 40/296/360；驱动版本格式由后端决定 |
+| `rn_uploaded_texture_desc` | 24；size/id/width/height/mip_levels/format，format=0 RGBA8、1 R8 |
+| `rn_texture_upload_desc` | 48；像素指针偏移 32、uint64 byte_size 偏移 40；row_pitch=0 为紧密行 |
+| `rn_mesh_update` | 24；ID/vertices 指针、偏移 16 的 vertex_count、偏移 20 的 layer |
+| `rn_index_update` | 24；透明 mesh ID/uint32 索引指针/count/reserved |
+| `rn_instance` | 16；int3 origin/float visibility |
+| `rn_visible_item` | 24；mesh ID、element_mask/sort_key/first_instance/instance_count，偏移 0/8/12/16/20 |
+| `rn_gui_vertex` | 24；float3 position/float2 UV/RGBA8 color |
+| `rn_gui_draw` | 40；pipeline/texture/sampler_bits/first_vertex/vertex_count、偏移 20 的 int4 scissor、偏移 36 的 reserved |
+| `rn_render_frame_desc` | 328；见下表 |
 
 | frame 字段组 | 字节偏移 |
 | --- | --- |
-| struct_size / flags / epoch / output_sequence / input_sequence | 0 / 4 / 8 / 16 / 24 |
-| indices / meshes / materials / primitives 指针 | 32 / 40 / 48 / 56 |
-| removed_meshes / removed_primitives / removed_materials / removed_indices 指针 | 64 / 72 / 80 / 88 |
-| visible / instances 指针 | 96 / 104 |
-| 上述十个数组的 count | 112..148，每项 4 字节 |
-| changed_textures / reserved | 152 / 156 |
-| projection[16] / view[16] | 160 / 224 |
-| camera_block[3] / camera_fraction[3] | 288 / 300 |
-| fog_color[4] / fog_distances[4] | 312 / 328 |
+| struct_size / flags / epoch / output_sequence | 0 / 4 / 8 / 16 |
+| indices / meshes / removed_meshes / visible / instances 指针 | 24 / 32 / 40 / 48 / 56 |
+| 上述五个数组的 count | 64 / 68 / 72 / 76 / 80 |
+| terrain_albedo_texture / terrain_light_texture / terrain_anisotropy | 84 / 88 / 92 |
+| projection[16] / view[16] | 96 / 160 |
+| camera_block[3] / camera_fraction[3] | 224 / 236 |
+| fog_color[4] / fog_distances[4] | 248 / 264 |
+| gui_vertices / gui_draws 指针 | 280 / 288 |
+| gui_vertex_count / gui_draw_count | 296 / 300 |
+| gui_width / gui_height / clear_color[4] | 304 / 308 / 312 |
 
-frame flags 位值 1/2/4 为 RGSS/profile/improved transparency，其他位必须为 0；changed_textures 的第 i 位表示第 i 个逻辑纹理已更新。
-首次输入使用须初始化全部纹理。每帧资源更新各最多 65,536 项，可见项与实例各最多 1,048,576 项。
-mesh 最多 1,048,576 顶点，submesh 最多 32 项（对应 RadRay batch 的 32 位元素掩码，包含空项）；索引资源最多 16,777,216 个 uint32。
-Java 调用方保证 submesh/索引的几何范围有效、删除后资源引用完整，同类增量 ID 不重复且更新与删除集合不相交；
-native 不做逐索引检查或驻留资源引用全表扫描。可见项检查 primitive 存在，instance_count 非零且范围落在当帧实例数组中；
-element_mask 为非零 32 位子网格掩码，bit k 选择第 k 个 submesh，UINT32_MAX 选择全部；零掩码及超出元素数量的置位返回 FAILED。
+IDs 非零且属于 epoch；epoch 非零且不可倒退。顶点固定 28 字节，完整 quad、最多 1,048,576 顶点。
+layer=0/1/2 为 SOLID/CUTOUT/TRANSLUCENT。前两层使用 Native 共享 Quad 索引，透明索引按 mesh ID 更新并随 mesh 删除。
+数组指针只借用到同步调用返回；字节已复制到 staging，native 保存的帧标量清除全部借用数组指针。
+每帧 mesh/index 更新最多 65,536 项，可见项及实例最多 1,048,576 项；透明索引最多 16,777,216 个 uint32。
+Java 检查透明索引值；native 检查描述、层、数量及范围，不逐值扫描索引。调用方保证同类 ID 不重复、更新/删除不相交。
 
-| `rn_shared_image_info` 字段组（共 128 字节） | 字节偏移 |
-| --- | --- |
-| struct_size、handle_type、width、height | 0、4、8、12 |
-| memory_handle、ready_handle、consumed_handle、allocation_size | 16、24、32、40 |
-| memory_type_index、node_mask、luid[8] | 48、52、56 |
-| device_uuid[16]、driver_uuid[16] | 64、80 |
-| native_format、native_usage、native_flags、native_tiling | 96、100、104、108 |
-| allocation_offset、dedicated、reserved | 112、120、124 |
+可见项直接引用 mesh；instance_count 非零且范围完整。element_mask=UINT32_MAX 请求全部紧凑面组，显式非零掩码不得含越界位。
+掩码与 Native 保守朝向剔除求交，多实例使用各实例可见组的并集；计算结果为零正常跳过。
+全局地形纹理只在有可见地形时解析；新帧引用已销毁编号失败，在途资源仍由 owner 保活。
 
-handle_type=1 表示 D3D12Resource/D3D12Fence，2 表示 OpaqueWin32。输入图像的 ready/consumed 分别表示 native 释放与 MC 写入完成。
-输出信息 capacity 按字节；输入导出 capacity 按 144 字节记录数量。native 静态断言校验尺寸和关键偏移，Java `SharedImageInfo.read` 显式读取。
-查询结构为 240 字节；Java、构建 manifest、stage 和分发校验都只接受 ABI 13。
+frame flags 的 1/2/4/8 为 RGSS/profile/improved transparency/Y 反射。GUI 管线编号 0–11 及采样器位值保持现有 shader 契约。
+GUI 顶点和绘制范围须为完整 quad，裁剪使用逻辑尺寸；clearColor 为 null 时沿用雾色 RGB、alpha=0。
+纹理编号 0–15 保留，所需区域和 mip 必须由调用方初始化。
 
 ## Java 包装与所有权
 
-调用链为 `MC adapter → NativeRenderer → NativeBindings/FFM → C ABI → MC native 适配 → RadRay runtime 静态库 → RadRay RHI`。
-`NativeRenderer` 持有 `NativeFrameBuffer`：344 字节帧描述与 1024 字节诊断缓冲固定分配，可见项、实例、删除项、上传描述和字节暂存按需翻倍扩容。
-容量增长先准备新 confined arena，再释放旧段；每帧开始复位计数，提交时将零数量数组的指针和计数显式写零。
-上传暂存按实际顶点、索引及 8 字节对齐计算容量，不受地形上传选择的 8 MiB 预算限制；容量充足的帧复用所有堆外存储。
-MC 路径直接写实例、元素掩码和资源描述，再调用 `renderPrepared`；兼容的 `render(target, Frame)` 将记录列表写入同一缓冲。
-Java 检查数组长度，native 检查可见掩码及实例范围；所有指针仍只借用到同步调用返回。
-`NativeBindings` 缓存 MethodHandle；查询/环境/runtime 与五参数 `rn_render_frame` 使用 invokeExact，其他生命周期入口使用 invokeWithArguments，均无 critical 选项。
-FFM 使用 ADDRESS 表示不透明指针、JAVA_LONG 表示 ID/句柄/序号、JAVA_INT 表示 uint32/枚举，数组按固定偏移编排。
+`NativeRenderer` 通过 `NativeFrameBuffer` 持有 328 字节描述及可扩容的堆外数组/上传暂存，不分配诊断缓冲。
+容量增长先创建新 confined arena，再释放旧 arena；空数组显式写 NULL/0。`presentPrepared` 使用直接写入的帧缓冲，`present` 负责列表编排。
+Java 上传预算与 FFM 实际暂存容量相互独立。FFM 使用 ADDRESS 表示指针，JAVA_LONG 表示 ID/序号，JAVA_INT 表示 uint32/枚举。
+设备查询、创建与帧调用缓存 MethodHandle；不使用 critical downcall、upcall、GC/Cleaner 或跨语言异步队列。
+`MemorySegment` 边界检查不验证 C++ 裸指针真实容量；native owner 只能由同一 DLL 的 destroy 释放。
 
-| 所有者 | 直接持有 | 关闭顺序/条件 |
-| --- | --- | --- |
-| `NativeEnvironment` | `NativeLibrary`、唯一 runtime | runtime 成功关闭后销毁环境，再关闭 library arena |
-| `NativeRuntime` | 唯一 renderer | renderer 成功关闭后销毁设备会话 |
-| `NativeRenderer` | 场景、唯一 target/shared textures 和持久帧缓冲 | 子 owner 关闭、native renderer 成功销毁后释放帧缓冲 |
-| `NativeRenderTarget` | 输出共享颜色、导出与输出 timeline（深度归 native 帧槽） | 宿主完成消费并关闭导入后销毁 |
-| `NativeSharedTextures` | 输入纹理、物理导出映射和输入 timeline | 宿主完成写入并关闭导入后销毁 |
-| `VulkanPreviewImage` | VkImage/VkDeviceMemory/semaphore | 显式排空后关闭；不拥有导出 Win32 句柄 |
-| 生命周期调用 scratch arena | 创建/销毁描述、返回槽与诊断缓冲 | 同步调用结束关闭，不释放返回槽中指向的 native owner |
-
-所有生命周期和渲染调用都在环境初始化线程串行执行，Java 与 native 均检查 owner/thread。
-父 owner 拒绝在子 owner 存活时关闭；子对象解析失败尝试清理，清理失败保留在父对象中，禁止继续卸载 DLL。
-资源等待失败保留句柄和所有者，不把超时当完成。library 的 shared arena 不使 RHI 自动线程安全。
-
-`MemorySegment` 的边界检查不能验证 C++ 裸指针容量。所有 native 对象只能由同一 DLL 的 destroy 释放。
-JDK linker 按 FunctionDescriptor 建立调用，不推断 C++ 类型；MemoryLayout 不自动插入 C padding。
-参见 [JDK 25 Linker](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/foreign/Linker.html) 和
-[MemoryLayout](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/foreign/MemoryLayout.html)。
-Fabric 使用 unnamed module，游戏 JVM 显式设置 `--enable-native-access=ALL-UNNAMED`；只设置 Gradle daemon 不生效。
+关闭顺序为 swapchain → renderer → runtime → environment → library；纹理编号和在途资源由 renderer 管理。
+交换链借用 HWND，必须早于宿主窗口关闭。失败清理保留仍存活的 owner，不在 GPU 尚未完成时卸载 DLL。
+游戏 JVM 使用 `--enable-native-access=ALL-UNNAMED`；Gradle daemon 的选项不能代替游戏 JVM 配置。
 
 ## 构建身份与 payload
 
-`native/CMakeLists.txt` 用独立 binary 目录将锁定 RadRay 作为源码子工程引入，DLL 链接上游 `RadRay::runtime` 静态库，另静态链接 `RadRay::shader` decoder；依赖传递到 render/core，只导出 bridge 的十三个 C 入口。
+`native/CMakeLists.txt` 用独立 binary 目录将锁定 RadRay 作为源码子工程引入，DLL 链接上游 `RadRay::runtime` 静态库，另静态链接 `RadRay::shader` decoder；依赖传递到 render/core，只导出 bridge 的十六个 C 入口。
 Windows x86_64 的 Debug 固定 `/MTd`，Release 固定 `/MT`，bridge、RadRay 和所有链接的依赖必须匹配对应配置的 CRT。
 Debug 使用 Raynium 显式准备的独立依赖前缀，Release 使用 RadRay 的 `windows-x64-msvc-staticcrt` 三元组。默认受管源码的版本由锁文件约束，本地覆盖和 dirty 源码可用于开发；分发要求锁定版本的干净源码。
 CMake 拒绝不匹配的 CRT/依赖配置，bridge 编译期拒绝动态 CRT并断言 Debug/Release 的 STL iterator 等级分别为 2/0。
 两配置都通过 whole-archive 链接静态 mimalloc，payload 只有 `rayniumruntime.dll`。Debug 的 mimalloc 使用 `MI_OVERRIDE=OFF`，
 保留显式 `mi_*` 分配，普通 CRT/new/delete 使用 Debug CRT；Release 保留 `MI_OVERRIDE=ON` 静态覆盖。
 bridge 不包含重复的 new/delete 替换头。
-`radray::string`、`radray::vector` 等动态容器通过 `radray::allocator` 使用 `mi_stl_allocator`；适配层的标准容器遵循当前 CRT 与静态覆盖配置。
+Native 运行库、工具和测试直接使用锁定 RadRay 的 `radray/types.h` 导出的容器及相关类型。
+`radray::string`、`radray::vector`、map/set 及哈希容器通过 `radray::allocator` 使用 `mi_stl_allocator`。
+`radray::array`、智能指针及 `make_shared` / `make_unique` 是标准库的重导出，不额外指定 allocator；其动态分配遵循当前 CRT 与静态覆盖配置。
+没有对应导出的 `std::span`、`std::string_view`、`std::pair`、`std::tuple` 等类型及标准算法继续使用标准库。
 配置阶段不恢复依赖，发布要求锁定提交的干净 Release 源码。当前未实现 RadRay 安装包消费模式。
 
-stage 使用 `dumpbin /exports` 核对十三个 ABI 13 入口，再用 `/dependents` 拒绝动态 CRT 和未分类的私有 DLL，收集上游许可证，并先验证完整快照再发布 `current.json`。
+stage 使用 `dumpbin /exports` 核对十六个 ABI 17 入口，再用 `/dependents` 拒绝动态 CRT 和未分类的私有 DLL，收集上游许可证，并先验证完整快照再发布 `current.json`。
 schema 1 manifest 包含平台、ABI/布局、构建配置、CRT、工具链、build ID、RadRay commit/dirty、DLL/许可证大小与 SHA-256、系统依赖分类。
-ABI 13 的身份 flags 中 bit 1（static CRT）和 bit 2（mimalloc）均为 1，布局不变。loader 只接受 Debug/MTd 或 Release/MT 的单 DLL 清单，拒绝错配和 MD 的 schema 2 payload。
+ABI 17 的身份 flags 中 bit 1（static CRT）和 bit 2（mimalloc）均为 1。loader 只接受 Debug/MTd 或 Release/MT 的单 DLL 清单，拒绝错配和 MD 的 schema 2 payload。
 build ID 来自 native/RadRay（含 `modules/runtime/`）源码及配置/工具链指纹；DLL SHA-256 标识实际二进制，manifest SHA-256 标识内容快照，三者用途不同。
 哈希用于一致性检查，不等于来源认证。
 
@@ -161,9 +133,9 @@ loader 的选择顺序为：显式开发目录 `-Draynium.native.dir=...`，否�
 2. 将实际 payload 发布到游戏目录下 `.raynium/natives/windows-x86_64/<content-hash>/`。
 3. 检查已有完整副本，或写入独立 staging 目录，校验后再发布；多进程使用文件锁协调解包。
 4. 客户端初始化入口检查游戏 JVM native access 权限，以绝对路径调用 `SymbolLookup.libraryLookup` 加载 bridge。
-5. 先调用版本入口核对 ABI 13，再用带诊断缓冲区的 `rn_query_abi` 检查布局与构建身份。
-6. 随后调用 `rn_init_env` 创建环境；CLIENT_STARTED 再通过 `rn_create_runtime` 创建 RHI 设备/Direct 队列。
-   早期准备失败由 Fabric 初始化失败路径报告，设备创建失败清理并输出 MC 崩溃报告，仍不接管 MC 绘制。
+5. 先调用版本入口核对 ABI 17，再用 `rn_query_abi` 检查布局与构建身份。
+6. Fabric 入口调用 `rn_init_env` 创建环境；首次设备信息查询通过 `rn_create_runtime` 创建 RHI 设备/Direct 队列，窗口 surface 创建时建立 renderer 与交换链。
+   缺少 payload 或早期准备失败使 Fabric 初始化失败；帧准备失败关闭 renderer 并向上传播。
 
 所有内容路径落在 loader 自己的根目录内，只接受固定 DLL 文件名并验证大小和哈希。已有损坏缓存直接报错，不覆盖、不删除；暂未实现旧缓存自动清理。
 

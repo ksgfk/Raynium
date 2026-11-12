@@ -18,7 +18,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULTS = {
-    'outputDir': str(ROOT / 'build/benchmarks'), 'backend': 'd3d12', 'terrainProfile': True,
+    'outputDir': str(ROOT / 'build/benchmarks'), 'backend': 'd3d12',
     'warmupSeconds': 20, 'startupTimeoutSeconds': 180, 'shutdownTimeoutSeconds': 60,
     'captureTimeoutSeconds': 120, 'width': 1280, 'height': 720,
     'renderDistance': 32, 'simulationDistance': 8, 'jfrEnabled': False, 'terrainSubmission': 'auto',
@@ -69,7 +69,7 @@ def load_config(path, capture_override=None):
         raise ValueError('backend must be d3d12 or vulkan')
     if config['terrainSubmission'] not in ('auto','direct','indirect'):
         raise ValueError('terrainSubmission must be auto, direct or indirect')
-    for key in ('terrainProfile', 'jfrEnabled'):
+    for key in ('jfrEnabled',):
         if type(config[key]) is not bool:
             raise ValueError(f'{key} must be a boolean')
     for key in ('warmupSeconds', 'startupTimeoutSeconds', 'shutdownTimeoutSeconds', 'captureTimeoutSeconds'):
@@ -121,9 +121,8 @@ def gradle_command(*arguments):
 
 def gradle_properties(config):
     return ['-PnativeConfig=Release', '-PnativeProfiler=true', '-PrhiValidation=false',
-            '-PvulkanValidation=false', '-PpreviewEnabled=true', '-PterrainDisableFaceCull=false',
-            '-PterrainTextureTransfer=auto', '-PrhiBackend=' + config['backend'],
-            '-PterrainProfile=' + str(config['terrainProfile']).lower(), '-PterrainSubmission=' + config['terrainSubmission'],
+            '-PrhiBackend=' + config['backend'],
+            '-PterrainSubmission=' + config['terrainSubmission'],
             '-PnativePython=' + sys.executable]
 
 
@@ -200,7 +199,7 @@ def prepare_run(config, session):
             if separator:
                 options[key] = value
     options.update({
-        'preferredGraphicsBackend': '"vulkan"', 'enableVsync': 'false', 'maxFps': '260',
+        'enableVsync': 'false', 'maxFps': '260',
         'pauseOnLostFocus': 'false', 'inactivityFpsLimit': '"minimized"',
         'fullscreen': 'false', 'exclusiveFullscreen': 'false', 'onboardAccessibility': 'false',
         'tutorialStep': 'none', 'startedCleanly': 'true', 'glDebugVerbosity': '0',
@@ -241,12 +240,11 @@ def check_result(session, game_code, capture_code, jfr_enabled):
     if client.get('status') != 'completed' or client.get('routeNativeFrames', 0) <= 0:
         raise RuntimeError('Client did not complete native benchmark: ' + client.get('message', 'missing completion'))
     game_log = (session / 'game/logs/latest.log').read_text(encoding='utf-8', errors='replace')
-    for marker in ('Raynium shared preview ready:', 'Raynium terrain inputs ready',
-                   'Raynium runtime destroyed', 'Raynium native environment destroyed', 'Raynium native library closed'):
+    for marker in ('Raynium runtime destroyed', 'Raynium native environment destroyed', 'Raynium native library closed'):
         if marker not in game_log:
             raise RuntimeError(f'Game log is missing required evidence: {marker}')
-    if 'preview disabled' in game_log or 'Shutdown failure!' in game_log:
-        raise RuntimeError('Native preview was disabled or shutdown failed; inspect game log')
+    if 'Shutdown failure!' in game_log:
+        raise RuntimeError('Native shutdown failed; inspect game log')
     trace = session / 'session.tracy'
     if not trace.is_file() or trace.stat().st_size < 16:
         raise RuntimeError('Tracy did not save a nonempty trace')
@@ -273,7 +271,7 @@ def run_benchmark(config):
     session.mkdir(parents=True, exist_ok=False)
     print(f'Session: {session}', flush=True)
     summary = {'status': 'running', 'tracyVersion': version, 'configuration': 'Release',
-               'nativeProfiler': True, 'rhiValidation': False, 'vulkanValidation': False,
+               'nativeProfiler': True, 'rhiValidation': False,
                'jfrEnabled': config['jfrEnabled'], 'terrainSubmission': config['terrainSubmission']}
     game = capture = build = None
     try:

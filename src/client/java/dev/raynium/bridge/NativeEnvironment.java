@@ -54,10 +54,10 @@ public final class NativeEnvironment implements AutoCloseable {
         logger.info("Raynium native environment initialized: backend={} driver validation={}", backend.propertyValue(), validation);
     }
 
-    public NativeRuntime createRuntime(NativeRuntime.HostGpu host) {
+    public NativeRuntime createRuntime() {
         checkOpen();
         if (runtime != null) throw new IllegalStateException("Native environment already has a runtime");
-        runtime = new NativeRuntime(this, library.bindings(), logger, host);
+        runtime = new NativeRuntime(this, library.bindings(), logger);
         return runtime;
     }
 

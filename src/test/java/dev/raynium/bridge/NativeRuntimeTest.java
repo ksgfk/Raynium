@@ -1,6 +1,5 @@
 package dev.raynium.bridge;
 
-import dev.raynium.client.preview.VulkanPreviewImage;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.file.Path;
@@ -38,7 +37,7 @@ class NativeRuntimeTest {
                 events.clear();
                 environment.close();
                 environment.close();
-                assertThrows(IllegalStateException.class, () -> environment.createRuntime(null));
+                assertThrows(IllegalStateException.class, () -> environment.createRuntime());
             }
             assertEquals(List.of("Raynium native environment destroyed", "Raynium native library closed"), events);
         }
@@ -48,9 +47,9 @@ class NativeRuntimeTest {
     void runtimeRecreationKeepsEnvironmentAlive(NativeEnvironment.Backend backend) {
         try (var environment = new NativeEnvironment(payload, backend, logger)) {
             for (int iteration = 0; iteration < 2; iteration++) {
-                try (var runtime = environment.createRuntime(null)) {
+                try (var runtime = environment.createRuntime()) {
                     assertThrows(IllegalStateException.class, environment::close);
-                    assertThrows(IllegalStateException.class, () -> environment.createRuntime(null));
+                    assertThrows(IllegalStateException.class, () -> environment.createRuntime());
                     events.clear();
                     runtime.close();
                     runtime.close();
@@ -66,10 +65,10 @@ class NativeRuntimeTest {
     void rejectsLifecycleCallsFromAnotherThread(NativeEnvironment.Backend backend) throws InterruptedException {
         try (var environment = new NativeEnvironment(payload, backend, logger);
              var library = new NativeLibrary(payload, logger);
-             var runtime = environment.createRuntime(null)) {
+             var runtime = environment.createRuntime()) {
             for (Runnable operation : List.<Runnable>of(runtime::close, environment::close,
-                    () -> environment.createRuntime(null), library.bindings()::destroyEnvironment,
-                    () -> library.bindings().createRuntime(null))) {
+                    () -> environment.createRuntime(), library.bindings()::destroyEnvironment,
+                    () -> library.bindings().createRuntime())) {
                 var rejection = new AtomicReference<Throwable>();
                 var thread = new Thread(() -> {
                     try { operation.run(); }
@@ -89,30 +88,23 @@ class NativeRuntimeTest {
             for (var requested : NativeEnvironment.Backend.values()) {
                 var failure = assertThrows(IllegalStateException.class,
                         () -> new NativeEnvironment(payload, requested, logger));
-                assertTrue(failure.getMessage().contains("already initialized"));
+                assertTrue(failure.getMessage().contains("rn_init_env"));
             }
-            try (var runtime = environment.createRuntime(null);
-                 var renderer = runtime.createRenderer(NativeTestSupport.shaders());
-                     var preview = renderer.createTarget(1, 1)) {
-                assertEquals(1, preview.info().width());
+            try (var runtime = environment.createRuntime();
+                 var renderer = runtime.createRenderer(NativeTestSupport.shaders())) {
+                assertTrue(runtime.deviceInfo().maxTextureSize()>0);
             }
         }
     }
 
     @ParameterizedTest @ValueSource(booleans = {false, true})
-    void earlyD3D12EnvironmentSupportsHostAndRuntimeRecreation(boolean validation) {
-        try (var environment = new NativeEnvironment(payload, NativeEnvironment.Backend.D3D12, validation, logger);
-             var consumer = new VulkanConsumer()) {
-            for (int iteration = 0; iteration < 2; iteration++) {
-                try (var runtime = environment.createRuntime(VulkanPreviewImage.hostGpu(consumer.device.getPhysicalDevice()));
-                     var renderer = runtime.createRenderer(NativeTestSupport.shaders());
-                     var preview = renderer.createTarget(17, 9);
-                     var image = VulkanPreviewImage.create(consumer.device, consumer.family, preview.info())) {
-                    for (long frame = 1; frame <= 2; frame++) {
-                        renderer.render(preview,NativeTestSupport.solidFrame(frame));
-                        consumer.copyAndCheckSolid(image, frame, 17, 9,NativeTestSupport.SOLID_COLOR);
-                    }
-                }
+    void earlyD3D12EnvironmentSupportsRuntimeRecreation(boolean validation) {
+        try(var environment=new NativeEnvironment(payload,NativeEnvironment.Backend.D3D12,validation,logger);
+            var window=new NativeSwapchainTest.Window()) {
+            for(int i=0;i<2;i++) try(var runtime=environment.createRuntime();
+                var renderer=runtime.createRenderer(NativeTestSupport.shaders());
+                var chain=renderer.createSwapchain(window.hwnd,640,360,NativeSwapchain.PresentMode.IMMEDIATE)) {
+                assertEquals(NativeSwapchain.Presentation.PRESENTED,renderer.present(chain,NativeTestSupport.solidFrame(1)));
             }
         }
     }
@@ -121,22 +113,22 @@ class NativeRuntimeTest {
     void nativeGuardsPreserveEnvironmentAndRuntime(NativeEnvironment.Backend backend) throws Throwable {
         try (var abi = new NativeTestSupport(gameDirectory)) {
             abi.envDesc.set(ValueLayout.JAVA_INT, 4, backend.nativeValue());
-            assertEquals(0, abi.initEnv(abi.envDesc, abi.error, 256), abi.error.getString(0));
-            assertEquals(1, abi.initEnv(abi.envDesc, abi.error, 256));
-            assertTrue(abi.error.getString(0).contains("already initialized"));
+            assertEquals(0, abi.initEnv(abi.envDesc));
+            assertEquals(1, abi.initEnv(abi.envDesc));
+
             abi.desc.set(ValueLayout.JAVA_INT, 4, 2);
-            assertEquals(1, abi.create(abi.desc, abi.output, abi.error, 256));
+            assertEquals(1, abi.create(abi.desc, abi.output));
             abi.desc.set(ValueLayout.JAVA_INT, 4, 0);
-            assertEquals(0, abi.create(abi.desc, abi.output, abi.error, 256), abi.error.getString(0));
+            assertEquals(0, abi.create(abi.desc, abi.output));
             MemorySegment first = abi.output.get(ValueLayout.ADDRESS, 0);
-            assertEquals(1, abi.destroyEnv(abi.error, 256));
-            assertTrue(abi.error.getString(0).contains("active runtime"));
-            assertEquals(1, abi.create(abi.desc, abi.output, abi.error, 256));
+            assertEquals(1, abi.destroyEnv());
+
+            assertEquals(1, abi.create(abi.desc, abi.output));
             assertEquals(MemorySegment.NULL, abi.output.get(ValueLayout.ADDRESS, 0));
             abi.destroy(first);
-            assertEquals(0, abi.create(abi.desc, abi.output, abi.error, 256), abi.error.getString(0));
+            assertEquals(0, abi.create(abi.desc, abi.output));
             abi.destroy(abi.output.get(ValueLayout.ADDRESS, 0));
-            assertEquals(0, abi.destroyEnv(abi.error, 256));
+            assertEquals(0, abi.destroyEnv());
         }
     }
 }

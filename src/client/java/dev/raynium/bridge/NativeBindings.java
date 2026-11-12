@@ -20,40 +20,42 @@ final class NativeBindings {
             MemoryLayout.sequenceLayout(24, ValueLayout.JAVA_BYTE).withName("platform"),
             MemoryLayout.sequenceLayout(64, ValueLayout.JAVA_BYTE).withName("toolchain"));
     private final StructLayout runtimeDescLayout = MemoryLayout.structLayout(
-            ValueLayout.JAVA_INT.withName("struct_size"), ValueLayout.JAVA_INT.withName("flags"),
-            ValueLayout.JAVA_INT.withName("node_mask"),
-            MemoryLayout.sequenceLayout(8, ValueLayout.JAVA_BYTE).withName("luid"));
+            ValueLayout.JAVA_INT.withName("struct_size"), ValueLayout.JAVA_INT.withName("reserved"));
     private final MethodHandle version;
     private final MethodHandle query;
     private final MethodHandle initEnvironment;
     private final MethodHandle destroyEnvironment;
     private final MethodHandle create;
     private final MethodHandle destroy;
-    final MethodHandle createRenderer, destroyRenderer, createRenderTarget, destroyRenderTarget,
-            createSharedTextures, destroySharedTextures, renderFrame;
+    final MethodHandle createRenderer, destroyRenderer;
+    final MethodHandle queryDeviceInfo,createSwapchain,resizeSwapchain,destroySwapchain,presentFrame;
+    final MethodHandle createTexture,uploadTexture,destroyTexture;
 
     NativeBindings(SymbolLookup library) {
         Linker linker = Linker.nativeLinker();
         FunctionDescriptor scalar = FunctionDescriptor.of(ValueLayout.JAVA_INT);
         version = bind(linker, library, "rn_get_abi_version", scalar);
         query = bind(linker, library, "rn_query_abi", FunctionDescriptor.of(ValueLayout.JAVA_INT,
-                ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+                ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
         initEnvironment = bind(linker, library, "rn_init_env",
-                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
         destroyEnvironment = bind(linker, library, "rn_destroy_env",
-                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+                scalar);
         create = bind(linker, library, "rn_create_runtime", FunctionDescriptor.of(ValueLayout.JAVA_INT,
-                ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+                ValueLayout.ADDRESS, ValueLayout.ADDRESS));
         destroy = bind(linker, library, "rn_destroy_runtime", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
         createRenderer = bind(linker,library,"rn_create_renderer", signature(3));
         destroyRenderer = bind(linker,library,"rn_destroy_renderer", signature(1));
-        createRenderTarget = bind(linker,library,"rn_create_render_target", FunctionDescriptor.of(ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
-        destroyRenderTarget = bind(linker,library,"rn_destroy_render_target", signature(1));
-        createSharedTextures = bind(linker,library,"rn_create_shared_textures", FunctionDescriptor.of(ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
-        destroySharedTextures = bind(linker,library,"rn_destroy_shared_textures", signature(1));
-        renderFrame = bind(linker,library,"rn_render_frame", signature(3));
+        queryDeviceInfo=bind(linker,library,"rn_query_device_info",FunctionDescriptor.of(ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
+        createSwapchain=bind(linker,library,"rn_create_swapchain",signature(3));
+        resizeSwapchain=bind(linker,library,"rn_resize_swapchain",signature(2));
+        destroySwapchain=bind(linker,library,"rn_destroy_swapchain",signature(1));
+        presentFrame=bind(linker,library,"rn_present_frame",signature(4));
+        createTexture=bind(linker,library,"rn_create_texture",signature(2));
+        uploadTexture=bind(linker,library,"rn_upload_texture",signature(2));
+        destroyTexture=bind(linker,library,"rn_destroy_texture",FunctionDescriptor.of(ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
     }
 
     int inspect(NativeManifest expected) {
@@ -63,9 +65,8 @@ final class NativeBindings {
                 throw new IllegalStateException("Native ABI version mismatch: " + abi);
             }
             MemorySegment info = scratch.allocate(abiLayout);
-            MemorySegment error = scratch.allocate(1024);
-            int status = (int) query.invokeExact(info, (int) abiLayout.byteSize(), error, 1024);
-            if (status != 0) throw new IllegalStateException("rn_query_abi failed: " + error.getString(0));
+            int status = (int) query.invokeExact(info, (int) abiLayout.byteSize());
+            checkStatus("rn_query_abi",status);
             int flags = 6 | (expected.radrayDirty() ? 1 : 0);
             if (number(info, "struct_size") != expected.abiInfoSize()
                     || number(info, "abi_version") != abi
@@ -93,9 +94,8 @@ final class NativeBindings {
             desc.set(ValueLayout.JAVA_INT, 0, 12);
             desc.set(ValueLayout.JAVA_INT, 4, backend.nativeValue());
             desc.set(ValueLayout.JAVA_INT, 8, validation ? 1 : 0);
-            MemorySegment error = scratch.allocate(1024);
-            int status = (int) initEnvironment.invokeExact(desc, error, 1024);
-            if (status != 0) throw new IllegalStateException("rn_init_env failed: " + error.getString(0));
+            int status = (int) initEnvironment.invokeExact(desc);
+            checkStatus("rn_init_env",status);
         } catch (RuntimeException | Error failure) {
             throw failure;
         } catch (Throwable failure) {
@@ -104,10 +104,9 @@ final class NativeBindings {
     }
 
     void destroyEnvironment() {
-        try (Arena scratch = Arena.ofConfined()) {
-            MemorySegment error = scratch.allocate(1024);
-            int status = (int) destroyEnvironment.invokeExact(error, 1024);
-            if (status != 0) throw new IllegalStateException("rn_destroy_env failed: " + error.getString(0));
+        try {
+            int status = (int) destroyEnvironment.invokeExact();
+            checkStatus("rn_destroy_env",status);
         } catch (RuntimeException | Error failure) {
             throw failure;
         } catch (Throwable failure) {
@@ -115,23 +114,14 @@ final class NativeBindings {
         }
     }
 
-    MemorySegment createRuntime(NativeRuntime.HostGpu host) {
+    MemorySegment createRuntime() {
         try (Arena scratch = Arena.ofConfined()) {
             MemorySegment desc = scratch.allocate(runtimeDescLayout);
             desc.set(ValueLayout.JAVA_INT, runtimeDescLayout.byteOffset(MemoryLayout.PathElement.groupElement("struct_size")),
                     (int) runtimeDescLayout.byteSize());
-            desc.set(ValueLayout.JAVA_INT, 4, host == null ? 0 : 1);
-            if (host != null) {
-                desc.set(ValueLayout.JAVA_INT, 8, host.nodeMask());
-                MemorySegment.copy(MemorySegment.ofArray(host.luid()), 0, desc, 12, 8);
-            }
             MemorySegment output = scratch.allocate(ValueLayout.ADDRESS);
-            MemorySegment error = scratch.allocate(1024);
-            int status = (int) create.invokeExact(desc, output, error, 1024);
-            if (status != 0) {
-                throw new IllegalStateException("rn_create_runtime failed, status="
-                        + status + ": " + error.getString(0));
-            }
+            int status = (int) create.invokeExact(desc, output);
+            checkStatus("rn_create_runtime",status);
             MemorySegment handle = output.get(ValueLayout.ADDRESS, 0);
             if (handle.equals(MemorySegment.NULL)) throw new IllegalStateException("Native runtime returned a null handle on success");
             // The address is owned by the DLL, not by the temporary output slot's arena.
@@ -154,28 +144,27 @@ final class NativeBindings {
     }
 
     private static FunctionDescriptor signature(int pointers) {
-        var layouts=new java.lang.foreign.MemoryLayout[pointers+2];
-        java.util.Arrays.fill(layouts,ValueLayout.ADDRESS); layouts[pointers+1]=ValueLayout.JAVA_INT;
+        var layouts=new MemoryLayout[pointers];
+        java.util.Arrays.fill(layouts,ValueLayout.ADDRESS);
         return FunctionDescriptor.of(ValueLayout.JAVA_INT,layouts);
     }
-    static void callRenderFrame(MethodHandle method,MemorySegment renderer,MemorySegment target,
-                                MemorySegment frame,MemorySegment error,int errorCapacity) {
-        try {
-            error.set(ValueLayout.JAVA_BYTE,0,(byte)0);
-            int status=(int)method.invokeExact(renderer,target,frame,error,errorCapacity);
-            if(status!=0) throw new IllegalStateException("render frame: "+error.getString(0));
-        } catch(RuntimeException | Error failure) { throw failure; }
-        catch(Throwable failure) { throw new IllegalStateException("render frame",failure); }
+    private static void checkStatus(String operation,int status) {
+        if(status!=0) throw new IllegalStateException(operation+" failed, status="+status);
     }
-    static void call(MethodHandle method, String operation, Object... arguments) {
-        try(var arena=Arena.ofConfined()) {
-            var error=arena.allocate(1024);
-            var args=new java.util.ArrayList<Object>(java.util.Arrays.asList(arguments));
-            args.add(error); args.add(1024);
-            int status=(int)method.invokeWithArguments(args);
-            if(status!=0) throw new IllegalStateException(operation+": "+error.getString(0));
+    static void call(MethodHandle method,String operation,Object... arguments) {
+        try {
+            int status=(int)method.invokeWithArguments(arguments);
+            checkStatus(operation,status);
         } catch(RuntimeException | Error failure) { throw failure; }
         catch(Throwable failure) { throw new IllegalStateException(operation,failure); }
+    }
+    static void callPresentFrame(MethodHandle method,MemorySegment renderer,MemorySegment target,
+                                 MemorySegment frame,MemorySegment result) {
+        try {
+            int status=(int)method.invokeExact(renderer,target,frame,result);
+            checkStatus("present frame",status);
+        } catch(RuntimeException | Error failure) { throw failure; }
+        catch(Throwable failure) { throw new IllegalStateException("present frame",failure); }
     }
 
     private MethodHandle bind(Linker linker, SymbolLookup library, String name, FunctionDescriptor descriptor) {

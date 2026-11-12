@@ -3,21 +3,26 @@ package dev.raynium.client.terrain;
 import dev.raynium.bridge.NativeShaderPack;
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import net.fabricmc.fabric.api.resource.v1.pack.ModPackResources;
-import net.minecraft.resources.Identifier;
-import net.minecraft.server.packs.PackType;
-import net.minecraft.server.packs.resources.ResourceManager;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.util.stream.Stream;
+import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.server.packs.resources.IoSupplier;
 
 public final class BuiltinShaderPack {
-    public static final Identifier DEFAULT = Identifier.fromNamespaceAndPath("raynium", "shaderpacks/default.rnsp");
+    public static final String DEFAULT = "assets/raynium/shaderpacks/default.rnsp";
+    record Source(String modId,IoSupplier<InputStream> input) {}
     private BuiltinShaderPack() {}
 
-    public static NativeShaderPack load(ResourceManager manager) {
-        try (var packs = manager.listPacks()) {
-            var own = packs.filter(pack -> pack instanceof ModPackResources mod
-                && mod.getFabricModMetadata().getId().equals("raynium")).toList();
-            for (var pack : own) {
-                var supplier = pack.getResource(PackType.CLIENT_RESOURCES, DEFAULT);
+    public static NativeShaderPack load() {
+        return load(FabricLoader.getInstance().getAllMods().stream().map(mod -> new Source(mod.getMetadata().getId(),
+            () -> Files.newInputStream(mod.findPath(DEFAULT).orElseThrow(
+                () -> new IllegalStateException("Missing Raynium built-in shader pack " + DEFAULT))))));
+    }
+    static NativeShaderPack load(Stream<Source> sources) {
+        try (sources) {
+            for (var source : sources.filter(entry -> entry.modId().equals("raynium")).toList()) {
+                var supplier = source.input();
                 if (supplier == null) continue;
                 try (var input = supplier.get()) {
                     return NativeShaderPack.read(input);

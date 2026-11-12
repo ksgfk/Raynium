@@ -27,4 +27,5 @@
 - 实现事实以源码、配置和锁文件为准，不把未执行的检查写成通过；第三方源码调查不等于本项目已实现。
 - 代码注释写 API 契约与局部不变量，设计说明放文档；代码文件至多保留一处指向所属文档的文件头入口。
 - C++ 层禁止默认构造后再调用 `Init` / `Initialize` 的二段式构造。可失败的创建使用 `static Create` 返回成功/失败，准备完全部资源后才构造并交付有效对象；失败由局部 RAII 清理。
-- 当前 C ABI 状态只使用 `RN_STATUS_OK` / `RN_STATUS_FAILED`，具体失败原因写入调用方提供的字符串缓冲区。
+- Native（含工具与测试）优先直接使用 `radray/types.h` 已导出的容器、字符串、数组、智能指针及其创建函数，显式写 `radray::`；没有对应导出的类型继续使用 `std::`，不为这些导出类型新增本地别名或引入 `using namespace radray`。
+- 当前 C ABI 状态只使用 `RN_STATUS_OK` / `RN_STATUS_FAILED`；错误详情在 native 发现处记录，不跨层传递错误字符串。不可恢复错误记录后 abort，边界见[Native runtime](doc/architecture/native-runtime.md#失败处理)。

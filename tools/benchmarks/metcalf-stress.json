@@ -4,7 +4,6 @@
   "optionsFile": "stress-options.txt",
   "outputDir": "../../build/benchmarks/metcalf-stress",
   "backend": "d3d12",
-  "terrainProfile": true,
   "jfrEnabled": true,
   "warmupSeconds": 60,
   "startupTimeoutSeconds": 600,

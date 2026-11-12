@@ -1,90 +1,60 @@
-> - 适用: 修改 Fabric 生命周期、共享预览显示和原版命令流接入
+> - 适用: 修改 Fabric 生命周期、接管帧循环、CPU 纹理与 GUI、窗口呈现
 > - 权威: 本文记录 Raynium 已有的 MC 接入；原版源码事实归渲染流程，设备和加载契约归各自页面
-> - 锚点: `src/client/java/dev/raynium/client/RayniumClient.java`, `src/client/java/dev/raynium/client/preview/*.java`, `src/client/java/dev/raynium/client/mixin/*.java`, `src/client/resources/raynium.client.mixins.json`, `build.gradle`
+> - 锚点: `src/client/java/dev/raynium/client/RayniumClient.java`, `src/client/java/dev/raynium/client/takeover/*.java`, `src/client/java/dev/raynium/client/mixin/*.java`, `src/client/java/dev/raynium/client/mixin/takeover/*.java`, `src/client/resources/raynium.client.mixins.json`, `build.gradle`
 
 # Minecraft 接入
 
 ## 生命周期与入口
 
-`RayniumClient.onInitializeClient` 定位 native payload、读取后端与校验配置并注册生命周期事件。
+`RayniumClient.onInitializeClient` 定位 native payload、读取后端与校验配置并安装 TakeoverRuntime。
 选定 payload 后，在此加载 DLL 并创建 `NativeEnvironment`，准备所选后端的 factory/instance 与诊断；失败报告 Fabric 初始化失败。
 MC 26.3 / Fabric Loader 0.20.1 的 `EntrypointPatch` 在 Minecraft 构造函数中、设置 gameThread 的
 `Thread.currentThread()` 调用前插入 `Hooks.startClient`，早于 `RenderSystem.initBackendSystem`、设备和窗口创建。
 该入口不访问尚未初始化的 MC 图形对象。对应 MC 源码获取见[开发环境](../guide/dev-environment.md#阅读-minecraft-源码)。
 
-CLIENT_STARTED 在渲染线程取得 MC Vulkan GPU 的 LUID/node mask 并创建 `NativeRuntime`；
-通过已初始化环境的 `createRuntime` 创建设备，环境和 DLL 所有权始终由 `NativeEnvironment` 持有。
-随后创建 `PreviewOverlay`，通过 `PreviewHost` 附到 Minecraft；预览资源在首次有效帧创建。
-CLIENT_STOPPING 先关闭预览和取消挂接，再依次关闭 runtime、环境和 bridge DLL（包含静态分配器）。启动失败执行相同清理顺序；清理失败保留剩余所有者并记录为附带异常。
-资源重载、切换世界不重建设备。
-首次 renderer 创建通过 ResourceManager 读取内置 [shader pack](shader-pack.md)，CPU 快照在世界切换后复用，F3+T 不替换 shader。
+首次设备信息查询在初始化线程创建 `NativeRuntime`，不指定宿主 GPU；环境与 DLL 所有权由 `NativeEnvironment` 持有。
+窗口 surface 创建时建立 renderer 和交换链，renderer 从自身 Fabric 模组容器提前读取内置 [shader pack](shader-pack.md)。
+缺少 native payload 时明确失败。资源重载、切换世界保留设备与 renderer；F3+T 不替换内置 shader。
+关闭放在 `Minecraft.close()` 的原表面关闭位置，排空后依次关闭交换链、renderer、runtime、环境和 DLL。
+等待失败保留仍活跃的 owner，不记录虚假的关闭成功。
 
 显式设置 `raynium.benchmark.config` 时，`BenchmarkSession` 注册客户端 tick 控制并通过
 `MinecraftBenchmarkMixin` 在帧提取前驱动旁观玩家路线；正常启动不注册控制。
 路线完成使用 `Minecraft.stop()` 进入既有退出流程。独立存档副本、采集与参数说明见
 [自动跑图与保存 Tracy](../guide/build-test.md#自动跑图与保存-tracy)。
 
-未选择 payload 且非 required 模式时记录提示并继续游戏；无效 payload、ABI 不匹配、runtime 创建失败
-仍由入口转为 MC 崩溃报告。CLIENT_STARTED 早于 Minecraft.run 的异常处理，入口显式调用 emergencySaveAndCrash。
-预览不可用属于单独的降级路径，不改变原有加载错误处理。
+## 接管路径
 
-## 开发预览模块
+`raynium.client.mixins.json` 直接登记接管与公共 Mixin。关卡失效并入 LevelRendererTakeoverMixin，编译结果及透明索引快照由公共组提供。
+接管路径的 Fabric 入口只准备环境，首次设备信息查询创建 runtime；SDL 窗口不带原版图形 API 标志。
+`TakeoverRuntime` 从模组容器提前读取内置 shader pack，以 HWND 创建 renderer 和 BGRA8 交换链。
+MC 的 `RenderSystem` 没有设备；只使用 RenderPearl API 接口的纹理、视图、采样器和 Buffer 身份句柄。Buffer 不保存临时创建数据，`map()` 明确抛错。
 
-共享显示位于 `client/preview`、对应 Mixin 和 通用 renderer bridge 入口。
-`VulkanFeatureSetsMixin` 为 MC 设备的可选 FeatureSet 增加 Win32 external memory/semaphore 扩展，
-不强制设备支持；`raynium.preview.enabled=false` 时不添加。
-`VulkanCommandEncoderAccessor` 暴露 encoder 所属设备。
-`MinecraftPreviewMixin` 在 MC 26.3 `Minecraft.renderFrame()` 中 `GameRenderer.render()` 返回之后、
-原有 surface blit 之前调用预览。
+`Minecraft.renderFrame` 保留更新、拾取、抽取、限帧和统计，替换绘制与提交调用点。表面查询由接管状态提供；
+VSync 的 FIFO/Immediate 请求交给 native 重建。准备完上传和所有可恢复工作后才获取后备缓冲，已获取帧必调用 Present；跳过窗口绘制时仍提交上传。
+关闭位于 `Minecraft.close` 原表面关闭处，在 Java 渲染对象之后，按交换链、renderer、runtime、环境、DLL 的顺序释放。
 
-`VulkanPreviewImage` 直接管理导入的 VkImage/VkDeviceMemory 和两条 timeline semaphore，
-不包装 GpuTexture，不创建 image view 或 MC shader。导入检查扩展、GPU 身份、支持位和内存要求。
-D3D12Resource 用 handle properties 与 image requirements 选择内存类型；OpaqueWin32 使用
-导出端的 allocation size/type，并检查 device/driver UUID、format/usage/flags/tiling。
-所有 Win32 句柄仍由 native 持有，Java 不 CloseHandle。
+`TakeoverHandles` 在原版关闭位置之前复制 NativeImage 像素。独立纹理、mipmap、动态贴图、调色板和四类字形上传进入 native 纹理注册表；
+Bitmap 字形直接读取 CPU 图像的子矩形。`TakeoverAtlas` 按原布局拼接全部 mip，边距取最近边缘像素，另存 CPU 动画帧、子帧和千分位插值进度。
+图集 `upload` 的返回钩子继续执行。GUI 依次准备文字、排序、遍历模糊前后节点，由自有 VertexConsumer 写入复用的堆外帧缓冲，最后重置 GUI 状态。
 
-MC 26.3 使用的 LWJGL 3.4.3-snapshot 对 `VkImportSemaphoreWin32HandleInfoKHR` 错误地同时要求
-handle 和 name 非空。导入函数检查函数地址和句柄后，通过 LWJGL JNI 调用该 Vulkan 入口，
-保持 name=NULL 的句柄导入契约；未关闭全局 LWJGL 检查。
+仅 `gameRenderState.shouldRenderLevel` 为真时执行相机重定位、gizmo 排空、临时方块移除和过期清理、区块编译、持锁排空、遮挡更新、编译回调、世界投影和采集。
+CPU staging 保留线程模型与原接纳回调，不创建原版 GPU heap；Uploader 关闭后重置写入位置。采集继续检查 uploaded 标记与透明索引快照。
+世界投影保留受伤、视角摇晃和反胃变换；CPU 光照图逐像素使用 MC 26.3 `core/lightmap` 公式。
+驻留增量仅在 native 成功消费后提交；强制 GUI 帧不带地形可见项或驻留增量。
 
-小 RT 每轴为主 RT 的四分之一（最小 1），显示在右上角，边距为 16 个 framebuffer 像素，
-小窗口按剩余空间缩小边距。MC 26.3 `VulkanGpuSurface.blitFromTexture` 的 dstOffsets 翻转 Y，
-因此复制坐标为 `(W−w−marginX, H−h−marginY)`。
-源码命名基线与生成入口见 [Minecraft 渲染流程](minecraft-rendering.md)。
+当前接管范围是三层地形和十二种 GUI 管线；物品和画中画准备、标题全景、模糊、实体、粒子、天空、云、手持物及世界后处理不绘制。
+原版世界绘制事件和 GUI mesh 钩子随其绘制路径不执行。截图与全景截图入口记录一次不支持并返回；线框能力为 false。未知 GUI 管线跳过并按 Identifier 只记录一次。
 
-## 地形接入
+## 地形与帧事件
 
-内容由 `client/terrain` 和地形 Mixin 提供，采集 SOLID、CUTOUT 和 TRANSLUCENT；透明模式跟随原版当前帧。
-`SectionCompilerMixin` 在 worker 返回时复制顶点，`CompiledSectionMeshMixin` 绑定同一结果和关闭事件；
-`LevelTerrainMixin` 在原版准备地形 draw 时在原版 draw 提取锁释放前冻结已采用的可见 mesh 和透明索引快照；`GameTerrainMixin` 捕获最终世界投影。
-图集动画与 lightmap 的脏标记在原版写入时更新。lightmap 创建增加 COPY_SRC 用途。
-`Lightmap.render` 返回后录制输入复制和 signal；原版 `GameRenderer.render` 返回后提交 native 绘制，再复制输出 RT。
-数据、输入同步和 fallback 的权威说明见[地形预览](terrain-preview.md)。
+`SectionCompilerMixin` 在 worker 返回时复制顶点，`CompiledSectionMeshMixin` 绑定同一结果和关闭事件。
+`RenderSectionIndicesMixin` 在 CPU staging 被接纳后发布透明索引快照；正常维护和追加失败后的直接排空都执行原回调。
+`TakeoverTerrain` 使用当前可见列表与透明模式，重算最终世界投影；世界 Y 反射同时调整 native 正面绕序。
+图集重载与世界重置推进资源 epoch，重新创建带当前 epoch 的编译器。已上传顶点数组在成功消费后释放，Native 承担面组与 AABB 处理。驻留选择、回退与上传寿命见[地形渲染](terrain-rendering.md)。
 
-## 逐帧交接
+`MinecraftTakeoverMixin` 在真实 renderFrame 入口清理采集状态，以调用局部引用记录 `ClientFrameEvent`，支持递归加载帧。
+`TerrainFrameEvent` 记录接管准备及 FFM 包络；benchmark 只在成功消费世界帧后推进 native 帧计数。
+统计默认每 5 秒包含呈现、跳过、重建、获取超时、可见区块、编译队列、临时方块、Java 堆和 BufferPool 占用。
 
-```text
-renderer: 复用帧槽时等待该槽自身 completion → GPU wait consumed(n−1) → acquire → 绘制 → release → ready(n)
-MC:      原版绘制 → wait ready(n) → acquire → copy → release → consumed(n) → 原有 blit/submit/present
-```
-
-首帧不等待 consumed。MC 使用原有 transient command buffer，通过 encoder.execute 接入，
-wait/signal 添加到同一提交构建器，不增加正常帧中途 submit。
-小 RT acquire/release 只改变外部所有权；源和主 RT 在复制时均为 GENERAL。
-复制前后使用 ALL_COMMANDS / MEMORY_READ|WRITE 内存屏障衔接原版绘制和最终读取。
-renderer 的双槽复用与独立完成序号见 [Native runtime](native-runtime.md#上传帧槽与资源退役)。
-
-尺寸改变时，先调用 backend encoder.submit 排出待执行工作，通过原有 MC 提交 fence 确认整次提交完成，再等待最后 consumed 和 ready，
-销毁 Java 导入对象及 native render target，再以新尺寸创建，输出序号归零；renderer 提交序号继续递增。backend submit 不触发 frontend 的 endFrame。
-最小化或无效尺寸暂停预览。退出执行相同排空顺序，随后关闭 runtime/DLL。
-输出 resize 保留 renderer 场景、图集和几何，后续帧复用缓存命令并绑定当前槽的帧常量与实例流；地形版本与退役协议见[地形预览](terrain-preview.md)。
-
-MC 非 Vulkan、显式关闭、能力不足、创建或导入失败时记录原因，本会话禁用预览并继续原版游戏。
-清理只在完成等待成功后释放资源；超时或 device lost 导致清理失败向上传播，保留活跃所有者，
-不把失败当作完成或继续卸载 DLL。
-
-## 当前接入范围
-
-原版世界、手持物、后处理、GUI 和呈现继续执行。预览仅覆盖指定矩形，内容是 native GPU 绘制的三层地形。
-复用 MC 区块编译、采用和可见性，native 使用通用场景描述和统一提交，没有窗口接管；运行路径不经过 CPU 像素读回。
-开关、启动参数与现有测试覆盖见[构建与测试](../guide/build-test.md)。
+游戏路径不读回像素。交换链和上传所有权见[Native runtime](native-runtime.md)，诊断与测试覆盖见[构建与测试](../guide/build-test.md)。

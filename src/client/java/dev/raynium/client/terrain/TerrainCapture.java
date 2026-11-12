@@ -6,24 +6,19 @@ import net.minecraft.client.renderer.state.OptionsRenderState;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.util.Util;
 import org.joml.Matrix4f;
-import org.joml.Vector4f;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class TerrainCapture {
-    public static final boolean ENABLED=Boolean.parseBoolean(System.getProperty("raynium.preview.enabled","true"));
     private static final net.minecraft.client.renderer.chunk.ChunkSectionLayer[] LAYERS=net.minecraft.client.renderer.chunk.ChunkSectionLayer.values();
     private static final AtomicLong EPOCH=new AtomicLong(1);
     private static final ConcurrentLinkedQueue<SectionPayload> REMOVED=new ConcurrentLinkedQueue<>();
     private static final Buffer BUFFER=new Buffer();
-    private static final Matrix4f capturedProjection=new Matrix4f(),inverseView=new Matrix4f();
-    private static final Vector4f eye=new Vector4f();
+    private static final Matrix4f capturedProjection=new Matrix4f();
     private static boolean hasProjection,hasSnapshot;
     private static volatile boolean active;
-    private static final double[] captureTimes=new double[120];
-    private static int sampleCount;
 
     /** Borrowed on the render thread until beginFrame, invalidation or the next capture. */
     static final class Buffer {
@@ -51,12 +46,12 @@ public final class TerrainCapture {
         void finish(int size) { if(size<count) { Arrays.fill(payloads,size,count,null); Arrays.fill(indices,size,count,null); } count=size; }
         void clear() { finish(0); }
     }
-    public static boolean active() { return ENABLED && active; }
+    public static boolean active() { return active; }
     public static void activate(boolean value) { active=value; if(!value) { clear(); REMOVED.clear(); } }
     public static long epoch() { return EPOCH.get(); }
     private static void clear() { BUFFER.clear(); hasSnapshot=hasProjection=false; }
     public static void invalidate() { EPOCH.incrementAndGet(); clear(); REMOVED.clear(); }
-    public static void beginFrame() { clear(); TerrainReference.beginFrame(); }
+    public static void beginFrame() { clear(); }
     public static void projection(Matrix4f value) { if(active()) { capturedProjection.set(value); hasProjection=true; } }
     public static void removed(SectionPayload payload) { if(active() && payload!=null) REMOVED.add(payload); }
     public static void drainRemoved(Collection<SectionPayload> target) {
@@ -66,12 +61,7 @@ public final class TerrainCapture {
     static Buffer snapshot() { return hasSnapshot?BUFFER:null; }
     public static void capture(LevelRenderer renderer,CameraRenderState camera,OptionsRenderState options,boolean improvedTransparency) {
         if(!active() || !hasProjection) return;
-        long started=System.nanoTime();
         long epoch=epoch(),now=Util.getMillis(),fade=Util.toMillis(options.chunkSectionFadeInTime);
-        eye.set(0,0,1,0);
-        inverseView.set(capturedProjection).mul(camera.viewRotationMatrix).invert().transform(eye);
-        boolean cull=!Boolean.getBoolean("raynium.terrain.disableFaceCull") && Float.isFinite(eye.w) && Math.abs(eye.w)>1e-8f;
-        if(cull) eye.div(eye.w);
         var dispatcher=renderer.sectionRenderDispatcher();
         if(dispatcher==null) return;
         int count=0;
@@ -90,8 +80,7 @@ public final class TerrainCapture {
                     var draw=mesh.getSectionDraw(LAYERS[layer]);
                     if(draw==null || !(mesh instanceof CompiledSectionMesh compiled) ||
                         !compiled.isVertexBufferUploaded(LAYERS[layer]) || !compiled.isIndexBufferUploaded(LAYERS[layer])) continue;
-                    int visible=layer==2?1:cull?part.visibleElementMask(camera.pos.x-x+eye.x,camera.pos.y-y+eye.y,camera.pos.z-z+eye.z):part.allElementMask;
-                    mask|=visible<<(layer*8);
+                    mask|=1<<(layer*8);
                 }
                 double dx=x+8.0-camera.pos.x,dy=y+8.0-camera.pos.y,dz=z+8.0-camera.pos.z;
                 int distance=distanceKey(dx*dx+dy*dy+dz*dz);
@@ -109,13 +98,6 @@ public final class TerrainCapture {
         BUFFER.rgss=options.textureFiltering==net.minecraft.client.TextureFilteringMethod.RGSS;
         BUFFER.anisotropy=options.textureFiltering==net.minecraft.client.TextureFilteringMethod.ANISOTROPIC?options.maxAnisotropyValue:1;
         hasSnapshot=true;
-        if(Boolean.getBoolean("raynium.terrain.profile")) {
-            captureTimes[sampleCount++]=(System.nanoTime()-started)/1e6;
-            if(sampleCount==120) {
-                Arrays.sort(captureTimes); sampleCount=0;
-                org.slf4j.LoggerFactory.getLogger("raynium.terrain").info("Terrain capture samples=120 ms_p50={} p95={} p99={}",captureTimes[60],captureTimes[114],captureTimes[118]);
-            }
-        }
     }
     static int distanceKey(double squared) {
         float distance=(float)squared;

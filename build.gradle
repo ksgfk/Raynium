@@ -6,8 +6,11 @@ base {
     archivesName = 'raynium'
 }
 
+def gameRunDir = providers.gradleProperty('gameRunDir').getOrElse('run')
+
 loom {
     splitEnvironmentSourceSets()
+    accessWidenerPath = file('src/client/resources/raynium.accesswidener')
 
     mods {
         raynium {
@@ -21,7 +24,13 @@ loom {
             client()
             configName = 'Minecraft Client (Raynium)'
             ideConfigGenerated = true
-            runDir = 'run'
+            runDir = gameRunDir
+            programArg '--gameDir'
+            programArg file(gameRunDir).absolutePath
+            if (providers.gradleProperty('quickPlayWorld').isPresent()) {
+                programArg '--quickPlaySingleplayer'
+                programArg providers.gradleProperty('quickPlayWorld').get()
+            }
             vmArg '--enable-native-access=ALL-UNNAMED'
             if (providers.gradleProperty('jfrFile').isPresent()) {
                 vmArg '-XX:StartFlightRecording=name=Raynium,settings=profile,disk=true,dumponexit=true,maxsize=1g,filename=' +
@@ -29,20 +38,18 @@ loom {
             }
             property 'raynium.rhi.backend', providers.gradleProperty('rhiBackend').getOrElse('d3d12')
             property 'raynium.rhi.validation', providers.gradleProperty('rhiValidation').getOrElse('false')
-            property 'raynium.terrain.textureTransfer', providers.gradleProperty('terrainTextureTransfer').getOrElse('auto')
             property 'raynium.terrain.submission', providers.gradleProperty('terrainSubmission').getOrElse('auto')
-            if (providers.gradleProperty('terrainCompareDir').isPresent()) property 'raynium.terrain.compareDir', file(providers.gradleProperty('terrainCompareDir').get()).absolutePath
-            property 'raynium.terrain.compareInterval', providers.gradleProperty('terrainCompareInterval').getOrElse('120')
-            property 'raynium.terrain.profile', providers.gradleProperty('terrainProfile').getOrElse('false')
-            property 'raynium.terrain.disableFaceCull', providers.gradleProperty('terrainDisableFaceCull').getOrElse('false')
-            property 'raynium.preview.enabled', providers.gradleProperty('previewEnabled').getOrElse('true')
-            if (providers.gradleProperty('vulkanValidation').getOrElse('false').toBoolean()) {
-                programArg '--vulkanValidation'
-            }
         }
         clientNative {
             inherit client
             getJvmArguments().set(client.getJvmArguments())
+            runDir = gameRunDir
+            programArg '--gameDir'
+            programArg file(gameRunDir).absolutePath
+            if (providers.gradleProperty('quickPlayWorld').isPresent()) {
+                programArg '--quickPlaySingleplayer'
+                programArg providers.gradleProperty('quickPlayWorld').get()
+            }
             if (providers.gradleProperty('benchmarkConfig').isPresent()) {
                 if (!providers.gradleProperty('benchmarkRunDir').isPresent()) {
                     throw new GradleException('benchmarkConfig requires benchmarkRunDir')
@@ -56,7 +63,6 @@ loom {
             }
             configName = 'Minecraft Client (Raynium Native)'
             ideConfigGenerated = true
-            property 'raynium.native.required', 'true'
             property 'raynium.native.dir', layout.buildDirectory.dir(
                 "native/stage/windows-x86_64/${providers.gradleProperty('nativeConfig').getOrElse('Debug')}"
             ).get().asFile.absolutePath

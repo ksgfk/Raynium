@@ -1,238 +1,171 @@
 #include <raynium/terrain_residency.h>
+#include <radray/types.h>
+#include <raynium/exception.h>
+#include <radray/logger.h>
 #include <radray/profiler.h>
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <span>
+#include <utility>
 
 namespace raynium {
 using namespace radray::render;
 namespace {
 template<class T> bool Array(const T* p,uint32_t n,uint32_t limit=1048576) { return n<=limit && (!n || p); }
-void RemoveReference(std::unordered_map<uint64_t,std::unordered_set<uint64_t>>& map,uint64_t key,uint64_t id) {
-    auto it=map.find(key); if(it==map.end()) return;
-    it->second.erase(id); if(it->second.empty()) map.erase(it);
-}
-bool ResolveMesh(TerrainMesh& mesh,const TerrainState& state,radray::string& error) {
-    const auto found=state.indices.find(mesh.indexId);
-    if(found==state.indices.end()) { error="Terrain mesh references missing index resource"; return false; }
-    auto draws=std::make_shared<TerrainDrawTemplate>();
-    draws->ranges.resize(mesh.ranges.size());
-    const auto& stream=mesh.geometry.GetVertexInput().Streams.front();
-    draws->vertices={stream.Buffer.Get(),stream.Offset,stream.Size};
-    const auto& index=*found->second;
-    draws->indices=index.GetIndexBufferView();
-    draws->fullMask=mesh.ranges.size()==32?UINT32_MAX:((1u<<mesh.ranges.size())-1u);
-    uint64_t runCount=0;
-    for(uint32_t n=0;n<mesh.ranges.size();++n) {
-        const auto& range=mesh.ranges[n];
-        const int64_t vertex=int64_t(range.base_vertex)+mesh.geometry.GetFirstVertex();
-        const uint64_t first=uint64_t(index.GetFirstIndex())+range.first;
-        if(range.reserved || uint64_t(range.first)+range.count>index.GetIndexCount() || first>UINT32_MAX ||
-           vertex<std::numeric_limits<int32_t>::min() || vertex>std::numeric_limits<int32_t>::max()) {
-            error="Invalid terrain index range or vertex offset"; return false;
+bool ResolveMesh(TerrainMesh& mesh,TerrainState& state) {
+    auto index=mesh.layout.layer==RN_MATERIAL_TRANSLUCENT?mesh.indices:state.quadIndices;
+    if(!index) { RADRAY_ERR_LOG("Terrain mesh references missing indices"); return false; }
+    auto draws=radray::make_shared<TerrainDrawTemplate>();
+    const auto& streams=mesh.geometry.GetVertexInput().Streams;
+    if(streams.empty() || mesh.layout.ranges.size()>=32) RADRAY_ABORT("Invalid terrain geometry stream or range layout");
+    const auto& stream=streams.front();
+    draws->vertices={stream.Buffer.Get(),stream.Offset,stream.Size}; draws->indices=index->GetIndexBufferView();
+    draws->fullMask=(1u<<mesh.layout.ranges.size())-1;
+    for(uint32_t n=0;n<mesh.layout.ranges.size();++n) {
+        const auto& range=mesh.layout.ranges[n];
+        const uint64_t first=uint64_t(index->GetFirstIndex())+range.first;
+        const uint64_t vertex=mesh.geometry.GetFirstVertex();
+        if(uint64_t(range.first)+range.count>index->GetIndexCount() || first>UINT32_MAX || vertex>INT32_MAX) {
+            RADRAY_ERR_LOG("Invalid terrain index range or vertex offset"); return false;
         }
-        draws->ranges[n]={uint32_t(first),range.count,int32_t(vertex)};
+        draws->ranges.push_back({uint32_t(first),range.count,int32_t(vertex)});
         if(range.count) draws->validMask|=1u<<n;
-        if(n) {
-            const auto& previous=draws->ranges[n-1];
-            if(previous.count && range.count && previous.count%3==0 && range.count%3==0 &&
-               previous.vertex==vertex && uint64_t(previous.first)+previous.count==first && runCount+range.count<=UINT32_MAX) {
-                draws->mergeMask|=1u<<(n-1); runCount+=range.count;
-            } else runCount=range.count;
-        } else runCount=range.count;
+        if(n && mesh.layout.layer!=RN_MATERIAL_TRANSLUCENT) draws->mergeMask|=1u<<(n-1);
     }
-    mesh.draws=std::move(draws); return true;
-}
-bool ResolvePrimitive(uint32_t index,TerrainState& state,radray::string& error) {
-    auto& primitive=state.primitiveOwners[index]; auto& hot=state.primitiveHot[index];
-    const auto mesh=state.meshes.find(primitive.desc.mesh),end=state.meshes.end();
-    const auto material=state.materials.find(primitive.desc.material);
-    if(mesh==end || material==state.materials.end() || !mesh->second->draws || !material->second->binding) {
-        error="Terrain primitive references missing mesh or material"; return false;
-    }
-    const auto& draws=*mesh->second->draws;
-    uint32_t stateId=0;
-    if(!state.bindings.Acquire(draws,*material->second->binding,stateId,error)) return false;
-    state.bindings.Release(hot.stateId);
-    primitive.draws=mesh->second->draws; primitive.binding=material->second->binding;
-    hot={draws.ranges.data(),draws.fullMask,draws.validMask,draws.mergeMask,stateId,material->second->desc.render_mode}; return true;
+    state.bindings.Release(mesh.stateId); mesh.stateId=0; mesh.draws=std::move(draws);
+    if(state.material && !state.bindings.Acquire(*mesh.draws,*state.material,mesh.stateId)) return false;
+    return true;
 }
 }
-TerrainResidency::TerrainResidency(RayniumRuntime& device,radray::unique_ptr<radray::VertexBufferPool> vertices,
+TerrainResidency::TerrainResidency(radray::DeviceContext& device,radray::unique_ptr<radray::VertexBufferPool> vertices,
     radray::unique_ptr<radray::IndexBufferPool> indices)
-    :_device(device),_vertices(std::move(vertices)),_indices(std::move(indices)) {
-    _state.meshes.reserve(4096); _state.primitives.Reserve(4096); _state.primitiveOwners.reserve(4096); _state.primitiveHot.reserve(4096);
-}
-bool TerrainResidency::PrepareFrame(RenderTarget& target,SharedTextures* textures,const rn_render_frame_desc& f,
-    const MeshPassResources& resources,SlotUploads slot,TerrainFrame& frame,radray::string& error) {
+    :_device(device),_vertices(std::move(vertices)),_indices(std::move(indices)) { _state.meshes.reserve(4096); }
+bool TerrainResidency::PrepareFrame(const UploadedTextures& uploaded,const rn_render_frame_desc& f,
+    const MeshPassResources& resources,SlotUploads slot,TerrainFrame& frame) {
     RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.Prepare");
-    const auto fail=[&](const char* message) { error=message; return false; };
-    if(f.struct_size!=sizeof(f) || f.reserved || (f.flags&~7u) || !f.epoch || f.epoch<_state.epoch ||
-       !Array(f.indices,f.index_count,65536) || !Array(f.meshes,f.mesh_count,65536) || !Array(f.materials,f.material_count,65536) ||
-       !Array(f.primitives,f.primitive_count,65536) || !Array(f.removed_indices,f.removed_index_count) ||
-       !Array(f.removed_meshes,f.removed_mesh_count) || !Array(f.removed_materials,f.removed_material_count) ||
-       !Array(f.removed_primitives,f.removed_primitive_count) || !Array(f.visible,f.visible_count) || !Array(f.instances,f.instance_count))
-        return fail("Invalid frame layout, epoch or array");
+
+    if(f.struct_size!=sizeof(f) || (f.flags&~15u) || !f.epoch || f.epoch<_state.epoch ||
+       !Array(f.indices,f.index_count,65536) || !Array(f.meshes,f.mesh_count,65536) ||
+       !Array(f.removed_meshes,f.removed_mesh_count) || !Array(f.visible,f.visible_count) || !Array(f.instances,f.instance_count))
+        { RADRAY_ERR_LOG("Invalid frame layout, epoch or array: sequence={} epoch={} resident_epoch={}",f.output_sequence,f.epoch,_state.epoch); return false; }
     auto& state=_state; auto& device=_device.GetDevice();
-    frame.target=&target; frame.textures=textures; frame.parameters=f; frame.lists=&slot.lists;
-    frame.vertices=_vertices.get(); frame.indices=_indices.get();
+    frame.parameters=f; frame.lists=&slot.lists; frame.vertices=_vertices.get(); frame.indices=_indices.get();
     auto& scalar=frame.parameters;
-    scalar.indices=nullptr; scalar.meshes=nullptr; scalar.materials=nullptr; scalar.primitives=nullptr;
-    scalar.removed_indices=scalar.removed_meshes=scalar.removed_materials=scalar.removed_primitives=nullptr;
-    scalar.visible=nullptr; scalar.instances=nullptr;
+    scalar.indices=nullptr; scalar.meshes=nullptr; scalar.removed_meshes=nullptr; scalar.visible=nullptr; scalar.instances=nullptr;
+    scalar.gui_vertices=nullptr; scalar.gui_draws=nullptr;
     if(f.epoch!=state.epoch) {
-        for(const auto& [id,owner]:state.indices) slot.frame.RetireResource(owner);
         for(const auto& [id,owner]:state.meshes) slot.frame.RetireResource(owner);
-        for(const auto& [id,owner]:state.materials) slot.frame.RetireResource(owner);
-        state=TerrainState{}; state.meshes.reserve(4096); state.primitives.Reserve(4096);
-        state.primitiveOwners.reserve(4096); state.primitiveHot.reserve(4096);
+        if(state.quadIndices) slot.frame.RetireResource(state.quadIndices);
+        if(state.material) slot.frame.RetireResource(state.material);
+        state=TerrainState{}; state.meshes.reserve(4096);
     }
-    const bool texturesChanged=textures!=state.boundTextures;
-    state.epoch=f.epoch; state.boundTextures=textures;
-    std::unordered_set<uint64_t> changedMeshes,changedIndices,changedMaterials,changedPrimitives;
-    {
-        RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.UpdateResources");
-        for(uint32_t i=0;i<f.removed_primitive_count;++i) {
-            const auto id=f.removed_primitives[i]; const auto index=state.primitives.Find(id);
-            if(index==TerrainPrimitiveIndex::Missing) continue;
-            RemoveReference(state.primitivesByMesh,state.primitiveOwners[index].desc.mesh,id);
-            RemoveReference(state.primitivesByMaterial,state.primitiveOwners[index].desc.material,id);
-            state.bindings.Release(state.primitiveHot[index].stateId);
-            const auto last=uint32_t(state.primitiveOwners.size()-1);
-            if(index!=last) {
-                state.primitiveOwners[index]=std::move(state.primitiveOwners[last]); state.primitiveHot[index]=state.primitiveHot[last];
-                state.primitives.Set(state.primitiveOwners[index].desc.id,index);
-            }
-            state.primitiveOwners.pop_back(); state.primitiveHot.pop_back(); state.primitives.Erase(id);
-        }
-        for(uint32_t i=0;i<f.primitive_count;++i) {
-            const auto& x=f.primitives[i]; if(!x.id || !x.mesh || !x.material) return fail("Invalid primitive");
-            auto index=state.primitives.Find(x.id);
-            if(index!=TerrainPrimitiveIndex::Missing) {
-                RemoveReference(state.primitivesByMesh,state.primitiveOwners[index].desc.mesh,x.id);
-                RemoveReference(state.primitivesByMaterial,state.primitiveOwners[index].desc.material,x.id);
-                state.bindings.Release(state.primitiveHot[index].stateId);
-                state.primitiveOwners[index]=TerrainPrimitive{.desc=x}; state.primitiveHot[index]={};
-            } else {
-                if(state.primitiveOwners.size()>=UINT32_MAX) return fail("Terrain primitive table exhausted");
-                index=uint32_t(state.primitiveOwners.size());
-                state.primitiveOwners.push_back(TerrainPrimitive{.desc=x}); state.primitiveHot.emplace_back(); state.primitives.Insert(x.id,index);
-            }
-            state.primitivesByMesh[x.mesh].insert(x.id); state.primitivesByMaterial[x.material].insert(x.id);
-            changedPrimitives.insert(x.id);
-        }
-        for(uint32_t i=0;i<f.removed_mesh_count;++i) {
-            auto it=state.meshes.find(f.removed_meshes[i]); if(it==state.meshes.end()) continue;
-            RemoveReference(state.meshesByIndex,it->second->indexId,it->first);
-            slot.frame.RetireResource(it->second); changedMeshes.insert(it->first); state.meshes.erase(it);
-        }
-        for(uint32_t i=0;i<f.removed_index_count;++i) {
-            auto it=state.indices.find(f.removed_indices[i]); if(it==state.indices.end()) continue;
-            slot.frame.RetireResource(it->second); changedIndices.insert(it->first); state.indices.erase(it);
-        }
-        for(uint32_t i=0;i<f.removed_material_count;++i) {
-            auto it=state.materials.find(f.removed_materials[i]); if(it==state.materials.end()) continue;
-            slot.frame.RetireResource(it->second); changedMaterials.insert(it->first); state.materials.erase(it);
-        }
+    state.epoch=f.epoch;
+    radray::unordered_set<uint64_t> changedMeshes;
+    for(uint32_t i=0;i<f.removed_mesh_count;++i) {
+        auto it=state.meshes.find(f.removed_meshes[i]); if(it==state.meshes.end()) continue;
+        state.bindings.Release(it->second->stateId); slot.frame.RetireResource(it->second); state.meshes.erase(it);
     }
-    {
-        RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.StageGeometry");
-        for(uint32_t i=0;i<f.index_count;++i) {
-            const auto& x=f.indices[i];
-            if(!x.id || x.reserved || !x.count || !Array(x.indices,x.count,16u<<20)) return fail("Invalid index resource");
-            auto allocation=_indices->Allocate(x.count); if(!allocation) return fail("Cannot allocate terrain indices");
-            auto index=std::make_shared<radray::IndexBufferSubAllocation>(std::move(*allocation));
-            if(_indexPages.insert(index->GetBuffer()).second) _indexReservedBytes+=index->GetBuffer()->GetDesc().Size;
-            if(!slot.staging.Stage(index->GetBuffer(),index->GetByteOffset(),x.indices,index->GetByteSize())) return fail("Cannot upload index resource");
-            auto& old=state.indices[x.id]; if(old) slot.frame.RetireResource(old);
-            old=std::move(index); changedIndices.insert(x.id);
-        }
-        for(uint32_t i=0;i<f.mesh_count;++i) {
-            const auto& x=f.meshes[i];
-            if(!x.id || !x.vertices || !x.index_buffer || !x.vertex_count || x.vertex_count>(1u<<20) || !x.submesh_count ||
-               !Array(x.submeshes,x.submesh_count,32)) return fail("Invalid terrain mesh");
-            auto mesh=std::make_shared<TerrainMesh>(); mesh->indexId=x.index_buffer; mesh->vertexCount=x.vertex_count;
-            mesh->ranges.assign(x.submeshes,x.submeshes+x.submesh_count);
-            auto allocation=_vertices->Allocate(x.vertex_count); if(!allocation) return fail("Cannot allocate terrain vertices");
-            mesh->geometry=std::move(*allocation);
-            if(_vertexPages.insert(mesh->geometry.GetBuffer()).second) _vertexReservedBytes+=mesh->geometry.GetBuffer()->GetDesc().Size;
-            if(!slot.staging.Stage(mesh->geometry.GetBuffer(),mesh->geometry.GetByteOffset(),x.vertices,mesh->geometry.GetByteSize())) return fail("Cannot upload terrain vertices");
-            auto& old=state.meshes[x.id];
-            if(old) { RemoveReference(state.meshesByIndex,old->indexId,x.id); slot.frame.RetireResource(old); }
-            old=std::move(mesh); state.meshesByIndex[x.index_buffer].insert(x.id); changedMeshes.insert(x.id);
-        }
+    uint32_t needed=state.quadVertexCapacity;
+    for(const auto& x:std::span{f.meshes,f.mesh_count}) {
+        if(!x.id || !x.vertices || !x.vertex_count || x.vertex_count%4 || x.vertex_count>1048576 || x.layer>RN_MATERIAL_TRANSLUCENT)
+            { RADRAY_ERR_LOG("Invalid terrain mesh: id={} vertices={} layer={}",x.id,x.vertex_count,uint32_t(x.layer)); return false; }
+        if(x.layer!=RN_MATERIAL_TRANSLUCENT) needed=std::max(needed,x.vertex_count);
     }
-    {
-        RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.MaterialBindings");
-        for(uint32_t i=0;i<f.material_count;++i) {
-            const auto& x=f.materials[i];
-            if(!x.id || x.render_mode>RN_MATERIAL_TRANSLUCENT || x.anisotropy>16) return fail("Invalid terrain material");
-            auto material=std::make_shared<TerrainMaterial>(); material->desc=x;
-            auto& old=state.materials[x.id]; if(old) slot.frame.RetireResource(old);
-            old=std::move(material); changedMaterials.insert(x.id);
+    if(needed>state.quadVertexCapacity) {
+        uint32_t capacity=65536; while(capacity<needed) capacity*=2;
+        radray::vector<uint32_t> values(size_t(capacity)/4*6);
+        for(uint32_t q=0;q<capacity/4;++q) {
+            const uint32_t v=q*4; const radray::array<uint32_t,6> quad{v,v+1,v+2,v+2,v+3,v};
+            std::copy(quad.begin(),quad.end(),values.begin()+size_t(q)*6);
         }
-        for(auto& [id,material]:state.materials) if(texturesChanged || !material->binding || changedMaterials.contains(id)) {
-            if(!textures) return fail("Material requires shared textures");
-            auto binding=std::make_shared<MeshMaterialBinding>();
-            if(!resources.CreateMaterialBinding(device,material->desc,*textures,*binding,error)) return false;
-            if(state.nextMaterialKey==UINT64_MAX) return fail("Terrain material sort key exhausted");
+        auto allocation=_indices->Allocate(uint32_t(values.size())); if(!allocation) { RADRAY_ERR_LOG("Cannot allocate shared quad indices"); return false; }
+        auto owner=radray::make_shared<radray::IndexBufferSubAllocation>(std::move(*allocation));
+        if(!slot.staging.Stage(owner->GetBuffer(),owner->GetByteOffset(),values.data(),owner->GetByteSize())) { RADRAY_ERR_LOG("Cannot upload shared quad indices"); return false; }
+        if(_indexPages.insert(owner->GetBuffer()).second) _indexReservedBytes+=owner->GetBuffer()->GetDesc().Size;
+        if(state.quadIndices) slot.frame.RetireResource(state.quadIndices);
+        state.quadIndices=std::move(owner); state.quadVertexCapacity=capacity;
+        for(const auto& [id,mesh]:state.meshes) if(mesh->layout.layer!=RN_MATERIAL_TRANSLUCENT) changedMeshes.insert(id);
+    }
+    for(const auto& x:std::span{f.meshes,f.mesh_count}) {
+        auto mesh=radray::make_shared<TerrainMesh>(); radray::vector<radray::byte> reordered;
+        if(!AnalyzeTerrainMesh({static_cast<const radray::byte*>(x.vertices),size_t(x.vertex_count)*28},x.layer,mesh->layout,reordered)) return false;
+        auto allocation=_vertices->Allocate(x.vertex_count); if(!allocation) { RADRAY_ERR_LOG("Cannot allocate terrain vertices"); return false; }
+        mesh->geometry=std::move(*allocation);
+        if(_vertexPages.insert(mesh->geometry.GetBuffer()).second) _vertexReservedBytes+=mesh->geometry.GetBuffer()->GetDesc().Size;
+        if(!slot.staging.Stage(mesh->geometry.GetBuffer(),mesh->geometry.GetByteOffset(),reordered.data(),reordered.size())) { RADRAY_ERR_LOG("Cannot upload terrain vertices"); return false; }
+        auto& previous=state.meshes[x.id];
+        if(previous) {
+            if(x.layer==RN_MATERIAL_TRANSLUCENT && previous->layout.layer==x.layer) mesh->indices=previous->indices;
+            state.bindings.Release(previous->stateId); slot.frame.RetireResource(previous);
+        }
+        previous=std::move(mesh); changedMeshes.insert(x.id);
+    }
+    for(const auto& x:std::span{f.indices,f.index_count}) {
+        auto found=state.meshes.find(x.mesh_id);
+        if(!x.mesh_id || found==state.meshes.end() || found->second->layout.layer!=RN_MATERIAL_TRANSLUCENT || x.reserved ||
+           !Array(x.indices,x.count,16u<<20) || x.count!=found->second->layout.vertexCount/4*6)
+            { RADRAY_ERR_LOG("Invalid transparent index update: mesh={} count={}",x.mesh_id,x.count); return false; }
+        auto allocation=_indices->Allocate(x.count); if(!allocation) { RADRAY_ERR_LOG("Cannot allocate terrain indices"); return false; }
+        auto owner=radray::make_shared<radray::IndexBufferSubAllocation>(std::move(*allocation));
+        if(_indexPages.insert(owner->GetBuffer()).second) _indexReservedBytes+=owner->GetBuffer()->GetDesc().Size;
+        if(!slot.staging.Stage(owner->GetBuffer(),owner->GetByteOffset(),x.indices,owner->GetByteSize())) { RADRAY_ERR_LOG("Cannot upload terrain indices"); return false; }
+        auto& mesh=*found->second; if(mesh.indices) slot.frame.RetireResource(mesh.indices);
+        mesh.indices=std::move(owner); changedMeshes.insert(x.mesh_id);
+    }
+    bool materialChanged=false;
+    if(f.visible_count) {
+        if(f.terrain_anisotropy>16 || f.terrain_albedo_texture<16 || f.terrain_light_texture<16 ||
+           !uploaded.Find(f.terrain_albedo_texture) || !uploaded.Find(f.terrain_light_texture)) { RADRAY_ERR_LOG("Invalid terrain texture binding: albedo={} light={} anisotropy={}",f.terrain_albedo_texture,f.terrain_light_texture,f.terrain_anisotropy); return false; }
+        materialChanged=!state.material || state.albedo!=f.terrain_albedo_texture || state.light!=f.terrain_light_texture || state.anisotropy!=f.terrain_anisotropy;
+        if(materialChanged) {
+            auto binding=radray::make_shared<MeshMaterialBinding>();
+            if(!resources.CreateMaterialBinding(device,f,uploaded,*binding)) return false;
+            if(state.nextMaterialKey==UINT64_MAX) { RADRAY_ERR_LOG("Terrain material sort key exhausted"); return false; }
             binding->sortKey=++state.nextMaterialKey;
-            if(material->binding) slot.frame.RetireResource(material->binding);
-            material->binding=std::move(binding); changedMaterials.insert(id);
+            if(state.material) slot.frame.RetireResource(state.material);
+            state.material=std::move(binding); state.albedo=f.terrain_albedo_texture; state.light=f.terrain_light_texture; state.anisotropy=f.terrain_anisotropy;
         }
     }
-    {
-        RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.ResolveTemplates");
-        for(auto id:changedIndices) {
-            auto refs=state.meshesByIndex.find(id);
-            if(refs!=state.meshesByIndex.end()) changedMeshes.insert(refs->second.begin(),refs->second.end());
-        }
-        for(auto id:changedMeshes) {
-            auto mesh=state.meshes.find(id);
-            if(mesh!=state.meshes.end() && !ResolveMesh(*mesh->second,state,error)) return false;
-            auto refs=state.primitivesByMesh.find(id);
-            if(refs!=state.primitivesByMesh.end()) changedPrimitives.insert(refs->second.begin(),refs->second.end());
-        }
-        for(auto id:changedMaterials) {
-            auto refs=state.primitivesByMaterial.find(id);
-            if(refs!=state.primitivesByMaterial.end()) changedPrimitives.insert(refs->second.begin(),refs->second.end());
-        }
-        for(auto id:changedPrimitives) if(!ResolvePrimitive(state.primitives.Find(id),state,error)) return false;
+    for(auto id:changedMeshes) if(!ResolveMesh(*state.meshes.at(id),state)) return false;
+    if(materialChanged) for(auto& [id,mesh]:state.meshes) if(!changedMeshes.contains(id)) {
+        state.bindings.Release(mesh->stateId); mesh->stateId=0;
+        if(!state.bindings.Acquire(*mesh->draws,*state.material,mesh->stateId)) return false;
     }
     for(auto& layer:slot.lists.visible) layer.clear();
     for(auto& layer:slot.lists.order) layer.clear();
-    {
-        RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.ResolveVisible");
-        for(const auto& item:std::span{f.visible,f.visible_count}) {
-            const auto index=state.primitives.Find(item.primitive);
-            if(index==TerrainPrimitiveIndex::Missing || !item.instance_count || uint64_t(item.first_instance)+item.instance_count>f.instance_count)
-                return fail("Invalid visible primitive or instance range");
-            const auto primitive=state.primitiveHot[index];
-            if(!primitive.ranges || !primitive.stateId || !item.element_mask ||
-               (item.element_mask!=UINT32_MAX && (item.element_mask&~primitive.fullMask))) return fail("Invalid visible terrain submesh");
-            auto& visible=slot.lists.visible[primitive.renderMode]; auto& order=slot.lists.order[primitive.renderMode];
-            order.push_back({(uint64_t(primitive.stateId)<<32)|item.sort_key,uint32_t(visible.size())});
-            visible.push_back({primitive.ranges,(item.element_mask==UINT32_MAX?primitive.fullMask:item.element_mask)&primitive.validMask,
-                primitive.mergeMask,item.first_instance,item.instance_count,primitive.stateId});
-        }
+    const auto eye=ComputeTerrainEye(f);
+    for(const auto& item:std::span{f.visible,f.visible_count}) {
+        auto found=state.meshes.find(item.mesh);
+        if(found==state.meshes.end() || !item.instance_count || uint64_t(item.first_instance)+item.instance_count>f.instance_count)
+            { RADRAY_ERR_LOG("Invalid visible mesh or instance range: mesh={} first={} count={}",item.mesh,item.first_instance,item.instance_count); return false; }
+        const auto& mesh=*found->second; const auto& draws=*mesh.draws;
+        if(!mesh.stateId || !item.element_mask || (item.element_mask!=UINT32_MAX && (item.element_mask&~draws.fullMask)))
+            { RADRAY_ERR_LOG("Invalid visible terrain submesh: mesh={} mask={}",item.mesh,item.element_mask); return false; }
+        const uint32_t requested=item.element_mask==UINT32_MAX?draws.fullMask:item.element_mask;
+        const uint32_t mask=requested&draws.validMask&TerrainVisibleMask(mesh.layout,eye,f,{f.instances+item.first_instance,item.instance_count});
+        if(!mask) continue;
+        auto& visible=slot.lists.visible[mesh.layout.layer]; auto& order=slot.lists.order[mesh.layout.layer];
+        order.push_back({(uint64_t(mesh.stateId)<<32)|item.sort_key,uint32_t(visible.size())});
+        visible.push_back({draws.ranges.data(),mask,draws.mergeMask,item.first_instance,item.instance_count,mesh.stateId});
     }
-    if(!BuildTerrainDraws(slot.lists,state.bindings.States(),(f.flags&RN_FRAME_IMPROVED_TRANSPARENCY)!=0,error)) return false;
+    if(!BuildTerrainDraws(slot.lists,state.bindings.States(),(f.flags&RN_FRAME_IMPROVED_TRANSPARENCY)!=0)) return false;
     frame.hasTranslucent=!slot.lists.visible[RN_MATERIAL_TRANSLUCENT].empty();
     {
         RADRAY_PROFILE_SCOPE_N("Raynium.Frame.StageInstances");
         const uint64_t size=uint64_t(f.instance_count)*sizeof(rn_instance);
         if(size) {
-            if(!slot.instances.Reserve(device,size)) return fail("Cannot grow terrain instances");
+            if(!slot.instances.Reserve(device,size)) { RADRAY_ERR_LOG("Cannot grow terrain instances"); return false; }
             std::memcpy(slot.instances.GetData(),f.instances,size_t(size));
-            if(!slot.instances.Flush(0,size)) return fail("Cannot flush terrain instances");
+            if(!slot.instances.Flush(0,size)) { RADRAY_ERR_LOG("Cannot flush terrain instances"); return false; }
         }
     }
     if(slot.useIndirect && !slot.lists.arguments.empty()) {
         RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.UploadArguments");
         const uint64_t bytes=slot.lists.arguments.size()*sizeof(DrawIndexedIndirectArguments);
-        if(!slot.indirect.Reserve(device,bytes)) return fail("Cannot allocate or map terrain indirect arguments");
+        if(!slot.indirect.Reserve(device,bytes)) { RADRAY_ERR_LOG("Cannot allocate or map terrain indirect arguments"); return false; }
         std::memcpy(slot.indirect.GetData(),slot.lists.arguments.data(),size_t(bytes));
-        if(!slot.indirect.Flush(0,bytes)) return fail("Cannot flush terrain indirect arguments");
+        if(!slot.indirect.Flush(0,bytes)) { RADRAY_ERR_LOG("Cannot flush terrain indirect arguments"); return false; }
     }
     RADRAY_PROFILE_PLOT("Raynium.Visible.Solid",double(slot.lists.visible[0].size()));
     RADRAY_PROFILE_PLOT("Raynium.Visible.Cutout",double(slot.lists.visible[1].size()));
@@ -243,9 +176,9 @@ bool TerrainResidency::PrepareFrame(RenderTarget& target,SharedTextures* texture
     RADRAY_PROFILE_PLOT("Raynium.Terrain.BuiltBatches",double(slot.lists.batches.size()));
     RADRAY_PROFILE_PLOT("Raynium.Terrain.OitParameterBuilds",double(frame.hasTranslucent && (f.flags&RN_FRAME_IMPROVED_TRANSPARENCY)?1:0));
 #ifdef RADRAY_ENABLE_PROFILER
-    const std::array<const char*,3> groups{"Raynium.Terrain.Solid.SelectedGroups","Raynium.Terrain.Cutout.SelectedGroups","Raynium.Terrain.Translucent.SelectedGroups"};
-    const std::array<const char*,3> records{"Raynium.Terrain.Solid.Records","Raynium.Terrain.Cutout.Records","Raynium.Terrain.Translucent.Records"};
-    const std::array<const char*,3> batches{"Raynium.Terrain.Solid.Batches","Raynium.Terrain.Cutout.Batches","Raynium.Terrain.Translucent.Batches"};
+    const radray::array<const char*,3> groups{"Raynium.Terrain.Solid.SelectedGroups","Raynium.Terrain.Cutout.SelectedGroups","Raynium.Terrain.Translucent.SelectedGroups"};
+    const radray::array<const char*,3> records{"Raynium.Terrain.Solid.Records","Raynium.Terrain.Cutout.Records","Raynium.Terrain.Translucent.Records"};
+    const radray::array<const char*,3> batches{"Raynium.Terrain.Solid.Batches","Raynium.Terrain.Cutout.Batches","Raynium.Terrain.Translucent.Batches"};
     for(size_t layer=0;layer<3;++layer) {
         RADRAY_PROFILE_PLOT(groups[layer],double(slot.lists.layers[layer].selectedGroups));
         RADRAY_PROFILE_PLOT(records[layer],double(slot.lists.layers[layer].recordCount));
@@ -253,8 +186,6 @@ bool TerrainResidency::PrepareFrame(RenderTarget& target,SharedTextures* texture
     }
 #endif
     RADRAY_PROFILE_PLOT("Raynium.Resident.Meshes",double(state.meshes.size()));
-    RADRAY_PROFILE_PLOT("Raynium.Resident.Primitives",double(state.primitives.Size()));
-    RADRAY_PROFILE_PLOT("Raynium.Resident.Materials",double(state.materials.size()));
     RADRAY_PROFILE_PLOT("Raynium.Geometry.VertexPages",double(_vertices->GetPageCount()));
     RADRAY_PROFILE_PLOT("Raynium.Geometry.IndexPages",double(_indices->GetPageCount()));
     RADRAY_PROFILE_PLOT("Raynium.Terrain.BindingStates",double(state.bindings.Count()));
@@ -272,19 +203,13 @@ bool TerrainResidency::PrepareFrame(RenderTarget& target,SharedTextures* texture
     RADRAY_PROFILE_PLOT("Raynium.Uploads.Bytes",double(slot.staging.GetStagedByteSize()));
     return true;
 }
-void TerrainResidency::DetachTextures() noexcept {
-    for(size_t i=0;i<_state.primitiveOwners.size();++i) {
-        _state.bindings.Release(_state.primitiveHot[i].stateId); _state.primitiveHot[i].stateId=0;
-        _state.primitiveOwners[i].binding.reset();
-    }
-    for(auto& [id,material]:_state.materials) material->binding.reset();
-    _state.boundTextures=nullptr;
-}
-void TerrainResidency::Reset() noexcept { _state=TerrainState{}; }
+void TerrainResidency::Reset() noexcept try { _state=TerrainState{}; }
+catch(...) { AbortUnexpectedException("TerrainResidency::Reset"); }
 uint64_t TerrainResidency::ResidentBytes() const noexcept {
-    uint64_t bytes=0;
-    for(const auto& [id,index]:_state.indices) bytes+=index->GetByteSize();
-    for(const auto& [id,mesh]:_state.meshes) bytes+=mesh->geometry.GetByteSize();
+    uint64_t bytes=_state.quadIndices?_state.quadIndices->GetByteSize():0;
+    for(const auto& [id,mesh]:_state.meshes) {
+        bytes+=mesh->geometry.GetByteSize(); if(mesh->indices) bytes+=mesh->indices->GetByteSize();
+    }
     return bytes;
 }
 }

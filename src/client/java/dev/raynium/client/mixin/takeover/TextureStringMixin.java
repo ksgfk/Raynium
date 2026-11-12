@@ -1,0 +1,20 @@
+package dev.raynium.client.mixin.takeover;
+import com.llamalad7.mixinextras.injector.wrapoperation.*;
+import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.platform.NativeImage;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.device.*;
+import com.mojang.renderpearl.api.textures.*;
+import com.mojang.renderpearl.api.buffers.*;
+import com.mojang.renderpearl.api.commands.CommandEncoder;
+import dev.raynium.client.takeover.*;
+import java.nio.ByteBuffer;
+import java.util.OptionalDouble;
+import java.util.function.Supplier;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+@Mixin(targets={"net.minecraft.client.renderer.Lightmap","net.minecraft.client.renderer.texture.DynamicTexture"})
+abstract class TextureStringMixin {
+    @WrapOperation(method={"<init>","*"},at=@At(value="INVOKE",target="Lcom/mojang/renderpearl/api/device/GpuDevice;createTexture(Ljava/lang/String;ILcom/mojang/renderpearl/api/GpuFormat;IIII)Lcom/mojang/renderpearl/api/textures/GpuTexture;"))
+    private static GpuTexture raynium$texture(GpuDevice device,String label,int usage,GpuFormat format,int width,int height,int layers,int mips,Operation<GpuTexture> original) { return TakeoverHandles.texture(label,usage,format,width,height,layers,mips); }
+}
