@@ -13,7 +13,7 @@ Debug/MTd、Release/MT、静态 mimalloc 和加载契约见[互操作与加载](
 管线继承 `RenderGraphFramePipeline`，不登记 mesh pass，不调用 `UseMeshPass`，也不依赖 Scene、handle、processor、缓存 MeshDrawCommand 或 runtime Material。
 RadRay 保留通用 Scene/Mesh Drawing Pipeline；调度器只提供无参数 `RunFrame()`，输入由具体管线设置。
 
-`TerrainState` 以资源 ID 索引 index、mesh、material 和按值 primitive。mesh 拥有顶点子分配、submesh 描述和预解析绘制模板：完整 VB/IB view、全掩码/有效位、全局 FirstIndex、VertexOffset 及相邻面组合并条件。
+`TerrainState` 以资源 ID 索引 index、mesh、material；primitive ID 通过连续存储的开放寻址表映射到稠密下标；查找表以非零 ID 为键、负载不超过一半，删除时回移探测链，支持完整 uint64 ID。连续热表保存范围入口、掩码、层和绑定状态编号，冷表保存描述及资源 owner。删除 primitive 时用末项填补并修正 ID 映射。mesh 拥有顶点子分配、submesh 描述和不可变绘制模板：完整 VB/IB view、按实际 submesh 数量存储的范围数组、全掩码/有效位、全局 FirstIndex、VertexOffset 及相邻面组合并条件。
 局部索引范围不能超过对应子分配；加子分配起点后的索引和顶点偏移必须分别可由 uint32/int32 表示。native 不保留索引 CPU 值，也不逐个扫描索引值。
 primitive 缓存模板与材质绑定引用、完整掩码和层。反向索引 index→mesh、mesh→primitive、material→primitive 定位更新影响范围。
 索引或网格更新刷新相关模板与 primitive 引用；材质更新刷新相关参数引用与层。纹理重建按保留的材质描述重新绑定。
@@ -28,12 +28,13 @@ PrepareFrame 失败不回滚已应用的驻留增量，宿主关闭 renderer 并
 Java 枚举与配置入口见[地形预览](terrain-preview.md#绘制与-oit)，ABI flags 布局归[互操作与加载](interop.md#abi-13-布局)。
 
 每帧每层使用紧凑可见记录。SOLID、CUTOUT、小波 OIT 使用 StateFirst，普通透明使用 DepthFirst；均稳定排序，相同完整排序键保留输入顺序。
-primitive 缓存由材质版本与完整顶点 view 产生的 32 位压缩状态键，可见记录组合状态键和原始深度/顺序键。StateFirst 先比较状态，DepthFirst 先比较原始深度；索引 view 不作为附加排序键。
-小列表使用稳定插入排序，大列表使用稳定基数排序并复用每槽 scratch。压缩键冲突保留输入顺序，批次兼容性仍检查完整 view 与参数组。
+绑定状态表对材质参数组身份及版本、完整 VB view（buffer/offset/size）和完整 IB view（buffer/offset/stride）做精确相等比较，并分配无截断的 32 位状态编号。编号在 primitive 或关联资源更新时缓存，最后一个活跃引用移除后可复用；编号不编码材质或物理页的大小顺序，耗尽时准备失败。表中的原始指针不拥有 GPU 资源，所有权仍由驻留资源及帧槽退役承担。
+每槽将可见 payload 与排序数组分离：payload 保存范围入口、有效掩码、实例参数和状态编号；16 字节排序项仅保存状态编号/宿主顺序组成的 64 位键及 payload 下标。StateFirst 先比较状态，DepthFirst 先比较原始深度；相同完整键保持输入顺序。小列表使用稳定插入排序，大列表使用稳定基数排序并复用 scratch，不搬运完整 payload。参数生成通过下标访问 payload 和连续绑定状态表，批次兼容性仍检查完整 view 与参数组。
 掩码按面组位序展开。只有连续、被选中、索引范围相接、顶点偏移兼容、三角形完整且单实例的面组可合并；普通透明禁用合并，多实例逐面组展开。
 合并计数使用宽整数检查并在 uint32 上限前拆开；提交索引数乘实例数的总和溢出则准备失败。
 
 参数构建输出一个连续 `DrawIndexedIndirectArguments` CPU 数组和指向区间的批次表。只有排序后相邻且材质参数组、完整 VB view、完整 IB view 均相同的记录才归为一批，不跨排序边界重排。
+范围入口及绑定状态表仅在本轮 PrepareFrame 与同步 RunFrame 期间借用；批次复制实际 VB/IB view，录制后不再回查热表或状态编号。
 direct 遍历同一普通 CPU 参数数组调用 `DrawIndexed`；indirect 绑定批次状态，按原生上限拆分 `DrawIndexedIndirect`，参数字节偏移为记录下标乘 20。
 OIT 的三次几何 pass 共用同一份透明排序、参数区间和批次；各自绑定对应 PSO 和 Group 2。普通透明使用自己的 DepthFirst/不合并规则。
 
@@ -48,12 +49,12 @@ Group 0 为每槽 256 字节 Upload CBuffer 与参数集。Group 1 为每个材�
 | 管线、shader、布局、PSO | FrameScheduler 拥有管线；先回收所有槽的命令及退役资源，再销毁管线 |
 | 驻留资源及模板/绑定引用 | TerrainResidency 持有；替换/删除时把旧 owner 交给当前 FrameSlot::RetireResource |
 | 顶点/索引池与子分配 | 两池晚于驻留状态析构；页在 renderer 寿命内保留，子区间在 owner 退役后归还 |
-| 可见记录、CPU 参数数组、批次表 | 每槽独立、清空后保留容量，仅在该槽 BeginFrame 完成等待和重置后写入 |
+| 可见记录、CPU 参数数组、批次表 | payload、键/下标、排序 scratch、参数和批次均每槽独立；清空后保留容量，仅在该槽 BeginFrame 完成等待和重置后写入 |
 | staging、实例、indirect 上传缓冲、常量、OIT 参数和计时资源 | 每槽独立；GPU 完成且命令存储重置后才复用、扩容或释放 |
 | 深度及 OIT 附件/view | RDG 每槽瞬态池按完整描述符复用，保留实际终态 |
 | 共享输出/输入 | C bridge 子句柄持有，提交期间借用；关闭前完成宿主交接并排空槽 |
 
-顶点池使用 28 字节 stride，默认页容量 `(32 MiB)/28`；索引池使用 uint32，默认页容量 300,000。整页 view 配合子分配起点与 submesh 偏移绘制，BestFitAllocator 复用连续空闲区间，超大请求使用大页。
+顶点池使用 28 字节 stride，默认页容量 `(32 MiB)/28`；索引池使用 uint32，默认页容量 `(32 MiB)/4`，即 8,388,608 个索引。整页 view 配合子分配起点与 submesh 偏移绘制，BestFitAllocator 复用连续空闲区间，超大请求使用大页。
 新资源版本分配新区间，不覆写在途版本。旧 owner 在当前槽完整轮转或 WaitIdle 后释放；GPU 资源必须跨越 GPU 完成和全部相关命令 epoch 重置边界。
 
 Renderer 先调用 BeginFrame，再 PrepareFrame，完成 ABI 复制、排序、参数构建、扩容、写入和 flush 后，才 SetInput 并调用 RunFrame；作用域清理 ClearInput。

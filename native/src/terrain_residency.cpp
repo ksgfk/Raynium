@@ -16,6 +16,7 @@ bool ResolveMesh(TerrainMesh& mesh,const TerrainState& state,radray::string& err
     const auto found=state.indices.find(mesh.indexId);
     if(found==state.indices.end()) { error="Terrain mesh references missing index resource"; return false; }
     auto draws=std::make_shared<TerrainDrawTemplate>();
+    draws->ranges.resize(mesh.ranges.size());
     const auto& stream=mesh.geometry.GetVertexInput().Streams.front();
     draws->vertices={stream.Buffer.Get(),stream.Offset,stream.Size};
     const auto& index=*found->second;
@@ -42,20 +43,26 @@ bool ResolveMesh(TerrainMesh& mesh,const TerrainState& state,radray::string& err
     }
     mesh.draws=std::move(draws); return true;
 }
-bool ResolvePrimitive(TerrainPrimitive& primitive,const TerrainState& state,radray::string& error) {
+bool ResolvePrimitive(uint32_t index,TerrainState& state,radray::string& error) {
+    auto& primitive=state.primitiveOwners[index]; auto& hot=state.primitiveHot[index];
     const auto mesh=state.meshes.find(primitive.desc.mesh),end=state.meshes.end();
     const auto material=state.materials.find(primitive.desc.material);
     if(mesh==end || material==state.materials.end() || !mesh->second->draws || !material->second->binding) {
         error="Terrain primitive references missing mesh or material"; return false;
     }
+    const auto& draws=*mesh->second->draws;
+    uint32_t stateId=0;
+    if(!state.bindings.Acquire(draws,*material->second->binding,stateId,error)) return false;
+    state.bindings.Release(hot.stateId);
     primitive.draws=mesh->second->draws; primitive.binding=material->second->binding;
-    primitive.stateSortKey=TerrainStateSortKey(*primitive.draws,*primitive.binding);
-    primitive.fullMask=primitive.draws->fullMask; primitive.renderMode=material->second->desc.render_mode; return true;
+    hot={draws.ranges.data(),draws.fullMask,draws.validMask,draws.mergeMask,stateId,material->second->desc.render_mode}; return true;
 }
 }
 TerrainResidency::TerrainResidency(RayniumRuntime& device,radray::unique_ptr<radray::VertexBufferPool> vertices,
     radray::unique_ptr<radray::IndexBufferPool> indices)
-    :_device(device),_vertices(std::move(vertices)),_indices(std::move(indices)) { _state.meshes.reserve(4096); _state.primitives.reserve(4096); }
+    :_device(device),_vertices(std::move(vertices)),_indices(std::move(indices)) {
+    _state.meshes.reserve(4096); _state.primitives.Reserve(4096); _state.primitiveOwners.reserve(4096); _state.primitiveHot.reserve(4096);
+}
 bool TerrainResidency::PrepareFrame(RenderTarget& target,SharedTextures* textures,const rn_render_frame_desc& f,
     const MeshPassResources& resources,SlotUploads slot,TerrainFrame& frame,radray::string& error) {
     RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.Prepare");
@@ -77,7 +84,8 @@ bool TerrainResidency::PrepareFrame(RenderTarget& target,SharedTextures* texture
         for(const auto& [id,owner]:state.indices) slot.frame.RetireResource(owner);
         for(const auto& [id,owner]:state.meshes) slot.frame.RetireResource(owner);
         for(const auto& [id,owner]:state.materials) slot.frame.RetireResource(owner);
-        state=TerrainState{}; state.meshes.reserve(4096); state.primitives.reserve(4096);
+        state=TerrainState{}; state.meshes.reserve(4096); state.primitives.Reserve(4096);
+        state.primitiveOwners.reserve(4096); state.primitiveHot.reserve(4096);
     }
     const bool texturesChanged=textures!=state.boundTextures;
     state.epoch=f.epoch; state.boundTextures=textures;
@@ -85,18 +93,31 @@ bool TerrainResidency::PrepareFrame(RenderTarget& target,SharedTextures* texture
     {
         RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.UpdateResources");
         for(uint32_t i=0;i<f.removed_primitive_count;++i) {
-            auto it=state.primitives.find(f.removed_primitives[i]); if(it==state.primitives.end()) continue;
-            RemoveReference(state.primitivesByMesh,it->second.desc.mesh,it->first);
-            RemoveReference(state.primitivesByMaterial,it->second.desc.material,it->first); state.primitives.erase(it);
+            const auto id=f.removed_primitives[i]; const auto index=state.primitives.Find(id);
+            if(index==TerrainPrimitiveIndex::Missing) continue;
+            RemoveReference(state.primitivesByMesh,state.primitiveOwners[index].desc.mesh,id);
+            RemoveReference(state.primitivesByMaterial,state.primitiveOwners[index].desc.material,id);
+            state.bindings.Release(state.primitiveHot[index].stateId);
+            const auto last=uint32_t(state.primitiveOwners.size()-1);
+            if(index!=last) {
+                state.primitiveOwners[index]=std::move(state.primitiveOwners[last]); state.primitiveHot[index]=state.primitiveHot[last];
+                state.primitives.Set(state.primitiveOwners[index].desc.id,index);
+            }
+            state.primitiveOwners.pop_back(); state.primitiveHot.pop_back(); state.primitives.Erase(id);
         }
         for(uint32_t i=0;i<f.primitive_count;++i) {
             const auto& x=f.primitives[i]; if(!x.id || !x.mesh || !x.material) return fail("Invalid primitive");
-            const auto it=state.primitives.find(x.id);
-            if(it!=state.primitives.end()) {
-                RemoveReference(state.primitivesByMesh,it->second.desc.mesh,x.id);
-                RemoveReference(state.primitivesByMaterial,it->second.desc.material,x.id);
+            auto index=state.primitives.Find(x.id);
+            if(index!=TerrainPrimitiveIndex::Missing) {
+                RemoveReference(state.primitivesByMesh,state.primitiveOwners[index].desc.mesh,x.id);
+                RemoveReference(state.primitivesByMaterial,state.primitiveOwners[index].desc.material,x.id);
+                state.bindings.Release(state.primitiveHot[index].stateId);
+                state.primitiveOwners[index]=TerrainPrimitive{.desc=x}; state.primitiveHot[index]={};
+            } else {
+                if(state.primitiveOwners.size()>=UINT32_MAX) return fail("Terrain primitive table exhausted");
+                index=uint32_t(state.primitiveOwners.size());
+                state.primitiveOwners.push_back(TerrainPrimitive{.desc=x}); state.primitiveHot.emplace_back(); state.primitives.Insert(x.id,index);
             }
-            state.primitives[x.id]=TerrainPrimitive{.desc=x};
             state.primitivesByMesh[x.mesh].insert(x.id); state.primitivesByMaterial[x.material].insert(x.id);
             changedPrimitives.insert(x.id);
         }
@@ -121,6 +142,7 @@ bool TerrainResidency::PrepareFrame(RenderTarget& target,SharedTextures* texture
             if(!x.id || x.reserved || !x.count || !Array(x.indices,x.count,16u<<20)) return fail("Invalid index resource");
             auto allocation=_indices->Allocate(x.count); if(!allocation) return fail("Cannot allocate terrain indices");
             auto index=std::make_shared<radray::IndexBufferSubAllocation>(std::move(*allocation));
+            if(_indexPages.insert(index->GetBuffer()).second) _indexReservedBytes+=index->GetBuffer()->GetDesc().Size;
             if(!slot.staging.Stage(index->GetBuffer(),index->GetByteOffset(),x.indices,index->GetByteSize())) return fail("Cannot upload index resource");
             auto& old=state.indices[x.id]; if(old) slot.frame.RetireResource(old);
             old=std::move(index); changedIndices.insert(x.id);
@@ -133,6 +155,7 @@ bool TerrainResidency::PrepareFrame(RenderTarget& target,SharedTextures* texture
             mesh->ranges.assign(x.submeshes,x.submeshes+x.submesh_count);
             auto allocation=_vertices->Allocate(x.vertex_count); if(!allocation) return fail("Cannot allocate terrain vertices");
             mesh->geometry=std::move(*allocation);
+            if(_vertexPages.insert(mesh->geometry.GetBuffer()).second) _vertexReservedBytes+=mesh->geometry.GetBuffer()->GetDesc().Size;
             if(!slot.staging.Stage(mesh->geometry.GetBuffer(),mesh->geometry.GetByteOffset(),x.vertices,mesh->geometry.GetByteSize())) return fail("Cannot upload terrain vertices");
             auto& old=state.meshes[x.id];
             if(old) { RemoveReference(state.meshesByIndex,old->indexId,x.id); slot.frame.RetireResource(old); }
@@ -174,24 +197,26 @@ bool TerrainResidency::PrepareFrame(RenderTarget& target,SharedTextures* texture
             auto refs=state.primitivesByMaterial.find(id);
             if(refs!=state.primitivesByMaterial.end()) changedPrimitives.insert(refs->second.begin(),refs->second.end());
         }
-        for(auto id:changedPrimitives) if(!ResolvePrimitive(state.primitives.at(id),state,error)) return false;
+        for(auto id:changedPrimitives) if(!ResolvePrimitive(state.primitives.Find(id),state,error)) return false;
     }
     for(auto& layer:slot.lists.visible) layer.clear();
+    for(auto& layer:slot.lists.order) layer.clear();
     {
         RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.ResolveVisible");
         for(const auto& item:std::span{f.visible,f.visible_count}) {
-            const auto it=state.primitives.find(item.primitive);
-            if(it==state.primitives.end() || !item.instance_count || uint64_t(item.first_instance)+item.instance_count>f.instance_count)
+            const auto index=state.primitives.Find(item.primitive);
+            if(index==TerrainPrimitiveIndex::Missing || !item.instance_count || uint64_t(item.first_instance)+item.instance_count>f.instance_count)
                 return fail("Invalid visible primitive or instance range");
-            const auto& primitive=it->second;
-            if(!primitive.draws || !primitive.binding || !item.element_mask ||
+            const auto primitive=state.primitiveHot[index];
+            if(!primitive.ranges || !primitive.stateId || !item.element_mask ||
                (item.element_mask!=UINT32_MAX && (item.element_mask&~primitive.fullMask))) return fail("Invalid visible terrain submesh");
-            slot.lists.visible[primitive.renderMode].push_back({primitive.draws.get(),primitive.binding.get(),
-                (uint64_t(primitive.stateSortKey)<<32)|item.sort_key,
-                item.element_mask==UINT32_MAX?primitive.fullMask:item.element_mask,item.first_instance,item.instance_count});
+            auto& visible=slot.lists.visible[primitive.renderMode]; auto& order=slot.lists.order[primitive.renderMode];
+            order.push_back({(uint64_t(primitive.stateId)<<32)|item.sort_key,uint32_t(visible.size())});
+            visible.push_back({primitive.ranges,(item.element_mask==UINT32_MAX?primitive.fullMask:item.element_mask)&primitive.validMask,
+                primitive.mergeMask,item.first_instance,item.instance_count,primitive.stateId});
         }
     }
-    if(!BuildTerrainDraws(slot.lists,(f.flags&RN_FRAME_IMPROVED_TRANSPARENCY)!=0,error)) return false;
+    if(!BuildTerrainDraws(slot.lists,state.bindings.States(),(f.flags&RN_FRAME_IMPROVED_TRANSPARENCY)!=0,error)) return false;
     frame.hasTranslucent=!slot.lists.visible[RN_MATERIAL_TRANSLUCENT].empty();
     {
         RADRAY_PROFILE_SCOPE_N("Raynium.Frame.StageInstances");
@@ -228,15 +253,30 @@ bool TerrainResidency::PrepareFrame(RenderTarget& target,SharedTextures* texture
     }
 #endif
     RADRAY_PROFILE_PLOT("Raynium.Resident.Meshes",double(state.meshes.size()));
-    RADRAY_PROFILE_PLOT("Raynium.Resident.Primitives",double(state.primitives.size()));
+    RADRAY_PROFILE_PLOT("Raynium.Resident.Primitives",double(state.primitives.Size()));
     RADRAY_PROFILE_PLOT("Raynium.Resident.Materials",double(state.materials.size()));
     RADRAY_PROFILE_PLOT("Raynium.Geometry.VertexPages",double(_vertices->GetPageCount()));
     RADRAY_PROFILE_PLOT("Raynium.Geometry.IndexPages",double(_indices->GetPageCount()));
+    RADRAY_PROFILE_PLOT("Raynium.Terrain.BindingStates",double(state.bindings.Count()));
+#ifdef RADRAY_ENABLE_PROFILER
+    if(f.output_sequence%120==0) {
+        const auto vertexFree=_vertices->GetFreeBytes(),indexFree=_indices->GetFreeBytes();
+        RADRAY_PROFILE_PLOT("Raynium.Geometry.VertexReservedBytes",double(_vertexReservedBytes));
+        RADRAY_PROFILE_PLOT("Raynium.Geometry.IndexReservedBytes",double(_indexReservedBytes));
+        RADRAY_PROFILE_PLOT("Raynium.Geometry.VertexFreeBytes",double(vertexFree));
+        RADRAY_PROFILE_PLOT("Raynium.Geometry.IndexFreeBytes",double(indexFree));
+        RADRAY_PROFILE_PLOT("Raynium.Geometry.VertexAllocatedBytes",double(_vertexReservedBytes-vertexFree));
+        RADRAY_PROFILE_PLOT("Raynium.Geometry.IndexAllocatedBytes",double(_indexReservedBytes-indexFree));
+    }
+#endif
     RADRAY_PROFILE_PLOT("Raynium.Uploads.Bytes",double(slot.staging.GetStagedByteSize()));
     return true;
 }
 void TerrainResidency::DetachTextures() noexcept {
-    for(auto& [id,primitive]:_state.primitives) primitive.binding.reset();
+    for(size_t i=0;i<_state.primitiveOwners.size();++i) {
+        _state.bindings.Release(_state.primitiveHot[i].stateId); _state.primitiveHot[i].stateId=0;
+        _state.primitiveOwners[i].binding.reset();
+    }
     for(auto& [id,material]:_state.materials) material->binding.reset();
     _state.boundTextures=nullptr;
 }

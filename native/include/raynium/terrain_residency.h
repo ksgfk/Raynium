@@ -1,6 +1,7 @@
 #pragma once
 #include <raynium/mesh_pass.h>
 #include <raynium/terrain_draw.h>
+#include <raynium/terrain_lookup.h>
 #include <radray/runtime/frame_slot.h>
 #include <radray/runtime/geometry_buffer_pool.h>
 #include <radray/runtime/upload_buffer.h>
@@ -21,8 +22,10 @@ struct TerrainPrimitive {
     rn_primitive_update desc{};
     std::shared_ptr<const TerrainDrawTemplate> draws;
     std::shared_ptr<const MeshMaterialBinding> binding;
-    uint32_t fullMask{};
-    uint32_t stateSortKey{};
+};
+struct TerrainPrimitiveHot {
+    const TerrainDrawRange* ranges{};
+    uint32_t fullMask{},validMask{},mergeMask{},stateId{};
     rn_material_mode renderMode{};
 };
 struct TerrainState {
@@ -31,7 +34,10 @@ struct TerrainState {
     std::unordered_map<uint64_t,std::shared_ptr<radray::IndexBufferSubAllocation>> indices;
     std::unordered_map<uint64_t,std::shared_ptr<TerrainMesh>> meshes;
     std::unordered_map<uint64_t,std::shared_ptr<TerrainMaterial>> materials;
-    std::unordered_map<uint64_t,TerrainPrimitive> primitives;
+    TerrainPrimitiveIndex primitives;
+    std::vector<TerrainPrimitive> primitiveOwners;
+    std::vector<TerrainPrimitiveHot> primitiveHot;
+    TerrainBindingStates bindings{};
     std::unordered_map<uint64_t,std::unordered_set<uint64_t>> meshesByIndex,primitivesByMesh,primitivesByMaterial;
 };
 struct SlotUploads {
@@ -65,5 +71,7 @@ private:
     radray::unique_ptr<radray::VertexBufferPool> _vertices;
     radray::unique_ptr<radray::IndexBufferPool> _indices;
     TerrainState _state;
+    std::unordered_set<radray::render::Buffer*> _vertexPages,_indexPages;
+    uint64_t _vertexReservedBytes{},_indexReservedBytes{};
 };
 }

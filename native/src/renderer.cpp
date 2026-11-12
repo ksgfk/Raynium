@@ -24,7 +24,8 @@ bool Renderer::Create(RayniumRuntime& device,std::span<const radray::byte> shade
         radray::VertexInputAttribute{1,12,"TEXCOORD",3,VertexFormat::FLOAT32,5}};
     auto vertices=radray::VertexBufferPool::Create(device.GetDevice(),{.VertexStride=28,.PageVertexCapacity=(32u<<20)/28,
         .Layouts=layouts,.Attributes=attributes,.DebugNamePrefix="TerrainVertices"}).Release();
-    auto indices=radray::IndexBufferPool::Create(device.GetDevice(),{.DebugNamePrefix="TerrainIndices"}).Release();
+    auto indices=radray::IndexBufferPool::Create(device.GetDevice(),{.PageIndexCapacity=(32u<<20)/sizeof(uint32_t),
+        .DebugNamePrefix="TerrainIndices"}).Release();
     if(!vertices || !indices) { error="Cannot create terrain geometry pools"; return false; }
     radray::unique_ptr<SolidFramePipeline> pipeline;
     if(!SolidFramePipeline::Create(device,shaders,indirect,pipeline,error)) return false;

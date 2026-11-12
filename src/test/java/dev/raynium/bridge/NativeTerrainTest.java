@@ -21,6 +21,45 @@ class NativeTerrainTest {
         return Arrays.stream(NativeEnvironment.Backend.values()).flatMap(b->Stream.of(
             Arguments.of(b,TerrainSubmission.DIRECT),Arguments.of(b,TerrainSubmission.INDIRECT)));
     }
+    static Stream<Arguments> hotPaths() {
+        return Arrays.stream(NativeEnvironment.Backend.values()).flatMap(b->Stream.of(false,true).flatMap(split->
+            Stream.of(TerrainSubmission.DIRECT,TerrainSubmission.INDIRECT).map(mode->Arguments.of(b,split,mode))));
+    }
+    @ParameterizedTest @MethodSource("submissionPaths")
+    void largeIndexPagesKeepSeparateBuffersAndNonzeroFirstIndices(NativeEnvironment.Backend backend,TerrainSubmission mode) throws Exception {
+        try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var producer=new VulkanConsumer(backend.name());
+            var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders(),mode);
+            var textures=renderer.createSharedTextures(textures(false));
+            var target=renderer.createTarget(32,32);
+            var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {
+            var inputs=new ArrayList<VulkanPreviewImage>();
+            try {
+                for(var e:textures.exports()) inputs.add(VulkanPreviewImage.create(producer.device,producer.family,e.image(),e.mipCount(),true));
+                int[] fullPage=new int[(32<<20)/Integer.BYTES];
+                System.arraycopy(new int[]{0,1,2,2,3,0},0,fullPage,0,6);
+                int[] offsetIndices={0,0,0,0,0,0,0,1,2,2,3,0};
+                for(int sequence=1;sequence<=4;++sequence) {
+                    var packet=frame(1,sequence,sequence); packet.changedTextures=sequence==1?3:0;
+                    producer.writeTerrainInputs(inputs,false,17,9,5,sequence,true,packet.changedTextures);
+                    if(sequence==1) {
+                        packet.indices=List.of(new NativeRenderer.Index(1,fullPage),new NativeRenderer.Index(2,offsetIndices));
+                        packet.meshes=List.of(mesh(1,span(4,-.5f,.25f)),
+                            new NativeRenderer.Mesh(2,span(4,.5f,.25f),2,4,List.of(new NativeRenderer.Submesh(6,6,0))));
+                        packet.materials=List.of(material(1));
+                        packet.primitives=List.of(new NativeRenderer.Primitive(1,1,1),new NativeRenderer.Primitive(2,2,1));
+                    }
+                    if(sequence==2 || sequence==3) packet.indices=List.of(new NativeRenderer.Index(2,offsetIndices));
+                    packet.instances=List.of(new NativeRenderer.Instance(0,0,0,1));
+                    packet.visible=List.of(new NativeRenderer.Visible(1,1,1,0,1),new NativeRenderer.Visible(2,1,0,0,1));
+                    renderer.render(target,packet);
+                    producer.copyAndCheckImage(output,sequence,32,32,(x,y)->y>=12 && y<20 &&
+                        ((x>=4 && x<12) || (x>=20 && x<28))?atlas():clear());
+                }
+            } finally { for(var image:inputs) image.close(); }
+        }
+    }
     @ParameterizedTest @MethodSource("submissionPaths")
     void hostWrittenMultiRecordArgumentsKeepFirstInstanceAndNonzeroOffsets(NativeEnvironment.Backend backend,TerrainSubmission mode) throws Exception {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
@@ -220,12 +259,12 @@ class NativeTerrainTest {
             } finally { for(var image:inputs) image.close(); }
         }
     }
-    @ParameterizedTest @MethodSource("paths")
-    void cachedSubmeshesFollowMaterialIndexAndMeshUpdates(NativeEnvironment.Backend backend,boolean split) throws Exception {
+    @ParameterizedTest @MethodSource("hotPaths")
+    void cachedSubmeshesFollowMaterialIndexAndMeshUpdates(NativeEnvironment.Backend backend,boolean split,TerrainSubmission submission) throws Exception {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer(backend.name());
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders(),submission);
             var textures=renderer.createSharedTextures(textures(split));
             var target=renderer.createTarget(32,32);
             var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {
@@ -656,12 +695,12 @@ class NativeTerrainTest {
         }
     }
     // A removed mesh's range is reused only after both in-flight slots released it; the neighbour keeps its range.
-    @ParameterizedTest @MethodSource("paths")
-    void geometryRangeReuseAfterMeshRemoval(NativeEnvironment.Backend backend,boolean split) throws Exception {
+    @ParameterizedTest @MethodSource("hotPaths")
+    void geometryRangeReuseAfterMeshRemoval(NativeEnvironment.Backend backend,boolean split,TerrainSubmission submission) throws Exception {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer(backend.name());
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders(),submission);
             var textures=renderer.createSharedTextures(textures(split));
             var target=renderer.createTarget(32,32);
             var output=VulkanPreviewImage.create(producer.device,producer.family,target.info())) {

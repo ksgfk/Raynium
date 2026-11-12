@@ -197,7 +197,7 @@ ABI 参数检查及资源寿命保护仍然执行。`terrainProfile=true` 开启
 `Raynium.Frame.SubmittedRecords/SubmittedBatches/SubmittedIndicesInstances` 汇总实际几何 pass，OIT 透明部分计三次。
 `Raynium.Frame.DirectCalls/IndirectCalls/BindingChanges` 记录几何提交的实际 API 调用和绑定操作；记录数与原生 indirect 调用数分别观察。
 `Raynium.Frame.Sequence` 标识当前输入帧；`Raynium.GpuFrame.Sequence` 与同时发布的 `Raynium.GpuMilliseconds` 对应已完成的原始帧，不能归给发布时正在准备的帧。
-`Raynium.Geometry.VertexPages/IndexPages` 记录池保留页数；runtime 另提供几何池、上传、槽回收、RDG 编译/屏障/录制区间。
+`Raynium.Geometry.VertexPages/IndexPages` 记录池保留页数，`Raynium.Terrain.BindingStates` 记录活跃精确绑定状态数。启用 Tracy 时，每 120 帧发布 `Raynium.Geometry.Vertex/IndexReservedBytes`、`Vertex/IndexFreeBytes` 与 `Vertex/IndexAllocatedBytes`；Allocated 为保留容量减空闲量，包含等待退役的区间。这些稀疏样本不能把未发布帧当成零，也不表示最大连续空闲区间。runtime 另提供几何池、上传、槽回收、RDG 编译/屏障/录制区间。
 父 CPU 区间包含子区间，不直接相加；GPU 时间线独立读取。
 Tracy frame mark 在一次 native Render 调用结束时发出；间隔包含两次调用之间的宿主工作，不等同于 native CPU 用时。
 客户端是 on-demand，因此 native 库加载前、采集器连接前的工作不在 Tracy 中；它也不提供 Java 调用栈。
@@ -256,8 +256,8 @@ Raynium 自身无需动态 VC++ CRT 或额外 mimalloc DLL；系统与显卡驱�
 | `MeshPayloadTest` / `TextureTransferTest` | 保守面组、紧凑元素位、越界模型、ByteBuffer 顶点拥有权和失败降级 | `test` |
 | `TerrainCaptureTest` / `TerrainResidencyTest` | 采集引用释放、超预算近处优先与超大网格、关闭回退延迟回收、零掩码、提交边界与预览重建 | `test` |
 | `NativeFrameBufferTest` | 持久帧指针/数量复位、超过 8 MiB 的上传扩容、对齐及多实例掩码 | `test` |
-| `NativeTransparencyTest` | 双后端/两传输模式的镂空阈值、排序索引更新、OIT 顺序无关、高叠层、窄深度范围、模式切换与尺寸往返 | `nativeTest` |
-| `NativeTerrainTest` | 双后端 direct/indirect 的 host-written 多记录参数、非零参数偏移与 firstInstance，以及两传输模式的 mip、深度、大坐标、epoch、重建、双槽在途参数/资源隔离、驻留字典增长、多材质/多 submesh 缓存、索引扩容与局部增删改、多几何池页与 base vertex、分页 staging 增长后复用、删除后区间重用、空可见帧上传后跨槽及尺寸往返绘制 | `nativeTest` |
+| `NativeTransparencyTest` | 双后端、direct/indirect 与两传输模式的镂空阈值、排序索引更新、OIT 顺序无关、高叠层、窄深度范围、模式切换与尺寸往返 | `nativeTest` |
+| `NativeTerrainTest` | 双后端 direct/indirect 的 host-written 多记录参数、非零参数偏移与 firstInstance，以及两传输模式的 mip、深度、大坐标、epoch、重建、双槽在途参数/资源隔离、驻留字典增长、多材质/多 submesh 缓存、填满 32 MiB 索引页后的跨页绑定、非零 firstIndex、索引扩容与局部增删改、稠密 primitive 删除交换及资源更新、多几何池页与 base vertex、分页 staging 增长后复用、删除后区间重用、空可见帧上传后跨槽及尺寸往返绘制 | `nativeTest` |
 | `NativeRendererTest` | 双后端雾色清屏/区域外像素、连续交接、输出重建保留场景、错误线程、超时保留 owner 和导入失败清理 | `nativeTest` |
 
 `test` 排除 `native` 标签，随标准 `check/build` 运行，不加载 DLL、不构建 native；FFM 缓冲测试使用 JVM native access。`nativeTest` 是标准 Gradle `Test` 任务，只包含 `native` 标签；它复用 `testClasses`，依赖 `nativeStage`，在构建/stage 完成后启动测试 JVM。依赖仍须显式准备，执行需要 Windows x64 和 D3D12/Vulkan 驱动；缺少设备或 DLL 时明确失败，不跳过。
@@ -270,7 +270,7 @@ cmake --build build/native/windows-x64-msvc-mtd/Debug --target test_raynium_terr
 ctest --test-dir build/native/windows-x64-msvc-mtd/Debug -R Terrain --output-on-failure
 ```
 
-该目标覆盖不连续/最高位/全掩码、重复项、稳定排序、VB/IB 和顶点偏移、多实例、合并边界、计数溢出、小上限拆分及模式能力选择，不需要 GPU。
+该目标覆盖不连续/最高位/全掩码、重复项、稳定排序、完整 VB/IB 与材质版本身份、IB 交错合批、超过旧 12 位容量的状态集合、状态引用回收及编号耗尽、primitive 查找表的扩容/删除/下标更新与完整 uint64 ID、排序 payload 与独立展开结果比较、多实例、合并边界、计数溢出、小上限拆分及模式能力选择，不需要 GPU。
 像素对照可分别以 `-PterrainSubmission=direct` 保存 `testImages`，再以 `indirect` 和 `testBaseline` 使用相同输入与容差比较。
 
 通用 runtime 测试位于 RadRay 的 `modules/runtime/tests/`，由 `test_radray_runtime` / GTest 注册，

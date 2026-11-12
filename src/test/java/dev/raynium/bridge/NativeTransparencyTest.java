@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.*;
 @Tag("native")
 class NativeTransparencyTest {
     @TempDir Path gameDirectory;
-    static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> paths() { return NativeTerrainTest.paths(); }
+    static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> paths() { return NativeTerrainTest.hotPaths(); }
     private static byte[] quads(float[] distances,int[] colors) {
         var data=ByteBuffer.allocate(distances.length*112).order(ByteOrder.nativeOrder());
         for(int q=0;q<distances.length;q++) {
@@ -33,11 +33,11 @@ class NativeTransparencyTest {
         return values;
     }
     @ParameterizedTest @MethodSource("paths")
-    void cutoutSortedIndicesWaveletsAndModeSwitches(NativeEnvironment.Backend backend,boolean split) throws Exception {
+    void cutoutSortedIndicesWaveletsAndModeSwitches(NativeEnvironment.Backend backend,boolean split,TerrainSubmission submission) throws Exception {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var producer=new VulkanConsumer(backend.name());
             var runtime=environment.createRuntime(VulkanPreviewImage.hostGpu(producer.device.getPhysicalDevice()));
-            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders(),submission);
             var textures=renderer.createSharedTextures(NativeTerrainTest.textures(split))) {
             var inputs=new ArrayList<VulkanPreviewImage>(); long sequence=0;
             byte[] previousGeometry=null; int[] previousOrder=null; int previousMode=-1;
