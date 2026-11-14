@@ -1,6 +1,8 @@
 #include <raynium/solid_pipeline.h>
 #include <radray/types.h>
 #include <raynium/exception.h>
+#include <raynium/frame_upload.h>
+#include <raynium/frame_record.h>
 #include <radray/profiler.h>
 #include <radray/logger.h>
 #include <algorithm>
@@ -11,10 +13,6 @@
 
 namespace raynium {
 using namespace radray::render;
-namespace {
-constexpr uint64_t StagingCapacity=8u<<20;
-constexpr uint64_t InstanceCapacity=64u<<10;
-}
 bool SolidFramePipeline::Create(radray::DeviceContext& device,std::span<const radray::byte> shaders,bool indirect,radray::unique_ptr<SolidFramePipeline>& out) {
     RADRAY_PROFILE_SCOPE_N("Raynium.Pipeline.Create");
     if(out) RADRAY_ABORT("Frame pipeline output occupied");
@@ -29,17 +27,8 @@ bool SolidFramePipeline::Create(radray::DeviceContext& device,std::span<const ra
     radray::array<SlotResources,2> slots;
     for(auto& slot:slots) {
         if(!gui->CreateSlot(d,slot.gui)) return false;
-        slot.passConstants=CreateBuffer(d,256,MemoryType::Upload,BufferUse::CBuffer);
         slot.passParameterSet=d.CreateShaderParameterSet({resources->PassGroupLayout()}).Release();
-        if(!slot.passConstants || !slot.passParameterSet ||
-           !slot.passParameterSet->Set(0,0,ShaderBufferBinding{slot.passConstants.get(),{0,256}}) || !slot.passParameterSet->FlushWrites()) {
-            RADRAY_ERR_LOG("Cannot create frame slot pass bindings"); return false;
-        }
-        slot.staging=radray::BatchedBufferUpload::Create(d,StagingCapacity).Release();
-        slot.instances=radray::MappedUploadBuffer::Create(d,InstanceCapacity,BufferUse::Vertex).Release();
-        slot.indirect=radray::MappedUploadBuffer::Create(d,64u<<10,BufferUse::Indirect).Release();
-        slot.textureStaging=radray::MappedUploadBuffer::Create(d,64u<<10).Release();
-        if(!slot.staging || !slot.instances || !slot.indirect || !slot.textureStaging) { RADRAY_ERR_LOG("Cannot create frame slot uploads"); return false; }
+        if(!slot.passParameterSet) { RADRAY_ERR_LOG("Cannot create frame slot pass bindings"); return false; }
         for(auto& parameters:slot.oitParameters) {
             parameters=d.CreateShaderParameterSet({resources->OitGroupLayout()}).Release();
             if(!parameters) { RADRAY_ERR_LOG("Cannot create OIT slot bindings"); return false; }
@@ -56,10 +45,9 @@ bool SolidFramePipeline::Create(radray::DeviceContext& device,std::span<const ra
 SlotUploads SolidFramePipeline::GetUploads(radray::FrameSlot& frame) noexcept try {
     if(frame.GetIndex()>=_slots.size()) RADRAY_ABORT("Invalid frame upload slot: {}",frame.GetIndex());
     auto& slot=_slots[frame.GetIndex()];
-    slot.staging->Reset();
-    for(auto& parameters:slot.oitParameters) parameters->ResetBindingsForReuse();
-    slot.textureCopies.clear();
-    return SlotUploads{frame,*slot.staging,*slot.instances,*slot.indirect,slot.lists,_indirect,*slot.textureStaging,slot.textureCopies};
+    slot.geometry.clear();
+    slot.gui.vertices={};
+    return SlotUploads{frame,slot.geometry,slot.lists,_indirect};
 } catch(...) {
     AbortUnexpectedException("SolidFramePipeline::GetUploads");
 }
@@ -70,7 +58,7 @@ void SolidFramePipeline::Finish() {
 void SolidFramePipeline::ExtractFrameData(radray::FrameSlot& slot) noexcept try {
     RADRAY_PROFILE_SCOPE_N("Raynium.Frame.Extract");
     if(!_pending || slot.GetIndex()>=_frames.size()) RADRAY_ABORT("Missing terrain frame extraction source");
-    auto* frame=slot.GetArena().Emplace<FrameData>(*_pending);
+    auto* frame=slot.Emplace<FrameData>(*_pending);
     _frames[slot.GetIndex()]=frame;
 } catch(...) {
     AbortUnexpectedException("SolidFramePipeline::ExtractFrameData");
@@ -79,217 +67,162 @@ void SolidFramePipeline::SetupGraph(radray::RDGBuilder& graph,radray::FrameSlot&
     RADRAY_PROFILE_SCOPE_N("Raynium.Frame.SetupGraph");
     const auto index=slot.GetIndex();
     if(index>=_frames.size() || !_frames[index]) RADRAY_ABORT("Missing terrain graph frame: slot={}",index);
-    auto& resources=_slots[index];
-    const auto& input=_frames[index]->input;
-    const auto& f=input.parameters;
-    const auto constants=graph.ImportBuffer(resources.passConstants.get(),BufferState::HostWrite,BufferState::HostWrite);
-    {
-        RADRAY_PROFILE_SCOPE_N("Raynium.Graph.PassConstants");
-        struct Constants { float projection[16],view[16]; int32_t block[4]; float fraction[4],fog[4],distances[4]; } data{};
-        static_assert(sizeof(Constants)==192);
-        std::copy_n(f.projection,16,data.projection); std::copy_n(f.view,16,data.view); std::copy_n(f.camera_block,3,data.block);
-        data.block[3]=(f.flags&RN_FRAME_RGSS)!=0; std::copy_n(f.camera_fraction,3,data.fraction);
-        data.fraction[3]=slot.GetDevice().GetBackend()==RenderBackend::Vulkan ? 1.f : -1.f;
-        if(f.flags&RN_FRAME_FLIP_Y) data.fraction[3]*=-1;
-        std::copy_n(f.fog_color,4,data.fog); std::copy_n(f.fog_distances,4,data.distances);
-        radray::array<radray::byte,256> bytes{}; std::memcpy(bytes.data(),&data,sizeof(data));
-        graph.UploadBuffer(constants,0,bytes);
+    auto& resources=_slots[index]; auto& frame=*_frames[index];
+    const auto& input=frame.input; const auto& f=input.parameters;
+    for(auto& upload:*input.geometry) {
+        const auto target=graph.ImportPersistentOwned(upload.target);
+        graph.UploadBuffer(target,upload.offset,std::move(upload.source)); graph.MarkOutput(target);
     }
-    const auto instances=graph.ImportBuffer(resources.instances->Get(),BufferState::HostWrite,BufferState::HostWrite);
-    const auto indirect=_indirect && !input.lists->arguments.empty()
-        ? graph.ImportBuffer(resources.indirect->Get(),BufferState::HostWrite,BufferState::HostWrite):radray::RDGBufferHandle{};
-    if(!resources.staging->CommitToGraph(graph,"Raynium GeometryUpload")) RADRAY_ABORT("Cannot commit terrain uploads");
-    radray::vector<radray::RDGTextureHandle> textures;
-    radray::unordered_map<UploadedTexture*,radray::RDGTextureHandle> uploaded;
-    const auto import=[&](UploadedTexture* texture) {
-        auto found=uploaded.find(texture);
-        if(found!=uploaded.end()) return found->second;
-        const auto handle=graph.ImportTexture(texture->texture.get(),texture->initialized?TextureState::ShaderRead:TextureState::Undefined,TextureState::ShaderRead);
-        uploaded.emplace(texture,handle); return handle;
-    };
-    if(input.textureCopies && !input.textureCopies->empty()) {
-        const auto staging=graph.ImportBuffer(input.textureStaging,BufferState::HostWrite,BufferState::HostWrite);
-        radray::vector<radray::RDGTextureHandle> destinations;
-        destinations.reserve(input.textureCopies->size());
-        for(const auto& copy:*input.textureCopies) { const auto handle=import(copy.owner.get()); graph.MarkOutput(handle); destinations.push_back(handle); }
-        graph.AddCopyPass("Raynium TextureUpload",[&](radray::RDGCopyPassBuilder& pass) {
-            pass.ReadBuffer(staging);
-            radray::unordered_set<uint32_t> written;
-            for(auto destination:destinations) if(written.insert(destination.Index).second) pass.WriteTexture(destination);
-        },[&input,destinations,staging](radray::RDGCopyPassContext& context) {
-            try {
-                auto& commands=context.GetCommandBuffer();
-                radray::unordered_set<uint32_t> written;
-                for(size_t i=0;i<destinations.size();++i) {
-                    auto* destination=&context.Resolve(destinations[i]);
-                    if(!written.insert(destinations[i].Index).second)
-                        TextureBarrier(commands,destination,TextureState::CopyDestination,TextureState::CopyDestination);
-                    if(!commands.CopyBufferToTextureRegion({.Source=&context.Resolve(staging),.Destination=destination,.Region=(*input.textureCopies)[i].region}))
-                        RADRAY_ABORT("Cannot record texture upload: id={}",(*input.textureCopies)[i].owner->desc.id);
-                }
-                return true;
-            } catch(...) {
-                AbortUnexpectedException("Raynium TextureUpload record");
-            }
-        });
-        for(const auto& copy:*input.textureCopies) copy.owner->initialized=true;
-    }
-    for(const auto& batch:input.lists->batches) for(const auto& owner:batch.material->textures)
-        if(owner) import(owner.get());
-    for(const auto& draw:resources.gui.draws) if(draw.texture) import(draw.texture.get());
-    for(const auto& [owner,handle]:uploaded) textures.push_back(handle);
+    input.geometry->clear();
+    input.textures->AddUploads(graph);
     if(!input.color) return;
     const auto color=graph.ImportTexture(input.color,TextureState::Undefined,TextureState::Present);
-    const auto colorDesc=input.color->GetDesc();
-    const uint32_t width=colorDesc.Width,height=colorDesc.Height;
-    const auto outputFormat=colorDesc.Format;
-    const auto gui=[&] { _gui->AddPass(graph,resources.gui,color,outputFormat,width,height,textures); };
+    const auto output=input.color->GetDesc();
+    const uint32_t width=output.Width,height=output.Height;
+    graph.MarkOutput(color);
+    struct Constants { float projection[16],view[16]; int32_t block[4]; float fraction[4],fog[4],distances[4]; } values{};
+    static_assert(sizeof(Constants)==192);
+    std::copy_n(f.projection,16,values.projection); std::copy_n(f.view,16,values.view); std::copy_n(f.camera_block,3,values.block);
+    values.block[3]=(f.flags&RN_FRAME_RGSS)!=0; std::copy_n(f.camera_fraction,3,values.fraction);
+    values.fraction[3]=slot.GetDevice().GetBackend()==RenderBackend::Vulkan?1.f:-1.f;
+    if(f.flags&RN_FRAME_FLIP_Y) values.fraction[3]*=-1;
+    std::copy_n(f.fog_color,4,values.fog); std::copy_n(f.fog_distances,4,values.distances);
+    const auto constants=graph.CreateBuffer({.MaxSize=256,.Usage=BufferUse::CBuffer},radray::RDGUploadSource::Generated(256,values,
+        +[](const Constants& values,radray::RDGUploadWriteContext& context) noexcept {
+            std::memset(context.Bytes.data(),0,context.Bytes.size()); std::memcpy(context.Bytes.data(),&values,sizeof(values)); return true;
+        }));
+    const auto instanceBytes=std::as_bytes(input.instances);
+    const auto instances=graph.CreateBuffer({.MaxSize=instanceBytes.size(),.Usage=BufferUse::Vertex},radray::RDGUploadSource::BorrowedBytes(instanceBytes));
+    const auto arguments=std::as_bytes(std::span{input.lists->arguments});
+    const auto indirect=_indirect?graph.CreateBuffer({.MaxSize=arguments.size(),.Usage=BufferUse::Indirect},radray::RDGUploadSource::BorrowedBytes(arguments)):radray::RDGBufferHandle{};
     const auto makeTexture=[&](TextureFormat format,TextureUses usage) {
         return graph.CreateTexture({.Dim=TextureDimension::Dim2D,.Width=width,.Height=height,.DepthOrArraySize=1,
             .MipLevels=1,.SampleCount=1,.Format=format,.Memory=MemoryType::Device,.Usage=usage});
     };
     const auto depth=makeTexture(TextureFormat::D32_FLOAT,TextureUse::DepthStencilWrite|TextureUse::DepthStencilRead);
-    graph.MarkOutput(color);
-    using Handle=radray::RDGTextureHandle;
-    using Handles=radray::array<Handle,4>;
-    const auto geometry=[&](uint32_t passId,Handle destination,Handle second,bool clear,bool writeDepth,Handles reads,int bindingIndex) {
-        _frames[index]->timingMask|=1u<<passId;
-        graph.AddRasterPass(TerrainPrograms[passId],[&](radray::RDGRasterPassBuilder& pass) {
-            pass.ReadBuffer(constants,BufferState::CBuffer);
-            if(indirect.IsValid()) pass.ReadBuffer(indirect,BufferState::Indirect);
-            pass.WriteColor(0,destination,clear?LoadAction::Clear:LoadAction::Load,StoreAction::Store,
-                passId==Solid?ColorClearValue{{f.clear_color[0],f.clear_color[1],f.clear_color[2],f.clear_color[3]}}:
-                passId==OitBounds?ColorClearValue{{-std::numeric_limits<float>::max(),0,0,0}}:ColorClearValue{});
-            if(second.IsValid()) pass.WriteColor(1,second,LoadAction::Clear,StoreAction::Store);
-            pass.SetDepthStencil(depth,writeDepth?TextureState::DepthWrite:TextureState::DepthRead,
-                passId==Solid?LoadAction::Clear:LoadAction::Load,StoreAction::Store,
-                LoadAction::DontCare,StoreAction::Discard,{0,0});
-            if(f.instance_count) pass.ReadBuffer(instances,BufferState::Vertex);
-            input.vertices->AddPassReadAccess(graph,pass); input.indices->AddPassReadAccess(graph,pass);
-            for(auto texture:textures) pass.ReadTexture(texture);
-            for(auto texture:reads) if(texture.IsValid()) pass.ReadTexture(texture);
-        },[this,index,passId,reads,bindingIndex,width,height,outputFormat](radray::RDGRasterPassContext& context) {
-            try {
-                auto& encoder=context.GetEncoder(); auto& slot=_slots[index];
-                const bool timing=(_frames[index]->input.parameters.flags&RN_FRAME_PROFILE) && slot.timestamps;
-                if(timing) encoder.GetCommandBuffer()->WriteTimestamp({slot.timestamps.get(),QueryPipelineStage::Top,2+passId*2});
-                encoder.SetViewport({0,0,float(width),float(height),0,1}); encoder.SetScissor({0,0,width,height});
-                RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.Record");
-                encoder.BindGraphicsPipelineState(_resources->Pipeline(passId,outputFormat,(_frames[index]->input.parameters.flags&RN_FRAME_FLIP_Y)!=0));
-                encoder.BindShaderParameterSet(0,slot.passParameterSet.get());
-                uint64_t bindingChanges=2,directCalls=0,indirectCalls=0;
-                if(bindingIndex>=0) {
-                    auto* parameters=slot.oitParameters[bindingIndex].get();
-                    for(uint32_t i=0;i<4;++i) if(!parameters->Set(i,0,context.ResolveView(reads[i].IsValid()?reads[i]:reads[0],TextureViewUsage::Resource).Get()))
-                        RADRAY_ABORT("Cannot bind OIT texture: pass={} binding={}",passId,i);
-                    if(!parameters->FlushWrites()) RADRAY_ABORT("Cannot flush OIT bindings: pass={}",passId);
-                    encoder.BindShaderParameterSet(2,parameters); ++bindingChanges;
-                }
-                const auto& input=_frames[index]->input;
-                const auto& lists=*input.lists;
-                const auto layer=passId<=Translucent?passId:uint32_t(Translucent);
-                const auto& draws=lists.layers[layer];
-                _frames[index]->visibleCommands[passId]=draws.recordCount;
-                const auto count=input.parameters.instance_count;
-                if(count) {
-                    const VertexBufferBinding instances{1,{slot.instances->Get(),0,uint64_t(count)*sizeof(rn_instance)}};
-                    encoder.BindVertexBuffers(std::span{&instances,1}); ++bindingChanges;
-                }
-                const TerrainDrawBatch* previous=nullptr;
-                for(const auto& batch:std::span{lists.batches}.subspan(draws.firstBatch,draws.batchCount)) {
-                    if(!previous || previous->material->parameters.get()!=batch.material->parameters.get()) {
-                        encoder.BindShaderParameterSet(1,batch.material->parameters.get()); ++bindingChanges;
-                    }
-                    if(!previous || previous->vertices.Target!=batch.vertices.Target || previous->vertices.Offset!=batch.vertices.Offset || previous->vertices.Size!=batch.vertices.Size) {
-                        const VertexBufferBinding vertices{0,batch.vertices};
-                        encoder.BindVertexBuffers(std::span{&vertices,1}); ++bindingChanges;
-                    }
-                    if(!previous || previous->indices.Target!=batch.indices.Target || previous->indices.Offset!=batch.indices.Offset || previous->indices.Stride!=batch.indices.Stride) {
-                        encoder.BindIndexBuffer(batch.indices); ++bindingChanges;
-                    }
-                    if(_indirect) {
-                        uint32_t offset=0;
-                        while(offset<batch.count) {
-                            const auto chunk=TerrainIndirectChunk(batch.count-offset,_nativeLimit);
-                            if(!chunk) RADRAY_ABORT("Invalid terrain indirect chunk: remaining={} limit={}",batch.count-offset,_nativeLimit);
-                            encoder.DrawIndexedIndirect(slot.indirect->Get(),uint64_t(batch.first+offset)*sizeof(DrawIndexedIndirectArguments),chunk);
-                            ++indirectCalls; offset+=chunk;
-                        }
-                    } else {
-                        for(const auto& argument:std::span{lists.arguments}.subspan(batch.first,batch.count)) {
-                            encoder.DrawIndexed(argument.IndexCount,argument.InstanceCount,argument.FirstIndex,argument.VertexOffset,argument.FirstInstance);
-                            ++directCalls;
-                        }
-                    }
-                    previous=&batch;
-                }
-                RADRAY_PROFILE_PLOT("Raynium.Submit.DirectCalls",double(directCalls));
-                RADRAY_PROFILE_PLOT("Raynium.Submit.IndirectCalls",double(indirectCalls));
-                RADRAY_PROFILE_PLOT("Raynium.Submit.BindingChanges",double(bindingChanges));
-                RADRAY_PROFILE_PLOT("Raynium.Submit.SelectedGroups",double(draws.selectedGroups));
-                RADRAY_PROFILE_PLOT("Raynium.Submit.IndicesInstances",double(draws.indicesInstances));
-                auto& stats=*_frames[index];
-                stats.directCalls+=directCalls; stats.indirectCalls+=indirectCalls; stats.bindingChanges+=bindingChanges;
-                stats.submittedIndices+=draws.indicesInstances; stats.submittedRecords+=draws.recordCount; stats.submittedBatches+=draws.batchCount;
-                if(!encoder.IsValid()) RADRAY_ABORT("Invalid terrain render encoder: pass={}",passId);
-                if(timing) encoder.GetCommandBuffer()->WriteTimestamp({slot.timestamps.get(),QueryPipelineStage::Bottom,3+passId*2});
-                return true;
-            } catch(...) {
-                AbortUnexpectedException("Raynium Terrain record");
-            }
-        });
+    struct LayerAccess {
+        explicit LayerAccess(std::pmr::memory_resource& memory):vertices(&memory),indices(&memory),textures(&memory) {}
+        std::pmr::vector<radray::RDGBufferHandle> vertices,indices;
+        std::pmr::vector<radray::RDGTextureHandle> textures;
     };
-    geometry(Solid,color,{},true,true,{},-1);
-    geometry(Cutout,color,{},false,true,{},-1);
-    if(!input.hasTranslucent) { gui(); return; }
-    if(!(f.flags&RN_FRAME_IMPROVED_TRANSPARENCY)) {
-        geometry(Translucent,color,{},false,true,{},-1); gui(); return;
+    radray::array<LayerAccess,3> accesses{LayerAccess{slot.GetScratchMemoryResource()},LayerAccess{slot.GetScratchMemoryResource()},LayerAccess{slot.GetScratchMemoryResource()}};
+    for(uint32_t layer=0;layer<3;++layer) {
+        auto& access=accesses[layer]; const auto& draws=input.lists->layers[layer];
+        std::pmr::unordered_set<radray::GpuBuffer*> vertexPages{&slot.GetScratchMemoryResource()},indexPages{&slot.GetScratchMemoryResource()};
+        std::pmr::unordered_set<radray::GpuTexture*> textures{&slot.GetScratchMemoryResource()};
+        for(const auto& batch:std::span{input.lists->batches}.subspan(draws.firstBatch,draws.batchCount)) {
+            if(!batch.vertexPage || !batch.indexPage) RADRAY_ABORT("Missing terrain physical page");
+            if(vertexPages.insert(batch.vertexPage).second) access.vertices.push_back(graph.ImportPersistentBorrowed(*batch.vertexPage));
+            if(indexPages.insert(batch.indexPage).second) access.indices.push_back(graph.ImportPersistentBorrowed(*batch.indexPage));
+            for(const auto& texture:batch.material->textures) if(texture && textures.insert(texture.Get()).second)
+                access.textures.push_back(graph.ImportPersistentOwned(texture));
+        }
     }
+    struct PassData {
+        SlotResources* resources;
+        GraphicsPipelineState* pipeline;
+        const TerrainFrameLists* lists;
+        uint32_t passId,width,height,nativeLimit;
+        int bindingIndex;
+        bool useIndirect,timing,screen;
+        radray::RDGBufferHandle constants,instances,indirect;
+        radray::array<radray::RDGTextureHandle,4> reads;
+        radray::RDGBufferSlice instanceSlice{},indirectSlice{};
+    };
+    const auto prepare=+[](PassData& data,radray::RDGPrepareContext& context) noexcept {
+        try {
+        if(!BindFrameConstants(*data.resources->passParameterSet,data.resources->boundConstants,context.ResolveBuffer(data.constants))) return false;
+        if(!data.screen) {
+            data.instanceSlice=context.ResolveBuffer(data.instances);
+            if(data.useIndirect) data.indirectSlice=context.ResolveBuffer(data.indirect);
+        }
+        if(data.bindingIndex>=0) {
+            auto* parameters=data.resources->oitParameters[data.bindingIndex].get();
+            // Registered after CompiledRDG: command reset precedes unbinding, which precedes view cleanup.
+            struct BindingCleanup {
+                ShaderParameterSet* parameters;
+                ~BindingCleanup() noexcept { parameters->ResetBindingsForReuse(); }
+            };
+            context.GetSlot().Emplace<BindingCleanup>(parameters);
+            for(uint32_t i=0;i<4;++i) {
+                const auto view=context.ResolveView(data.reads[i].IsValid()?data.reads[i]:data.reads[0],TextureViewUsage::Resource);
+                if(!view || !parameters->Set(i,0,view.Get())) return false;
+            }
+            if(!parameters->FlushWrites()) return false;
+        }
+        return true;
+        } catch(...) { AbortUnexpectedException("Raynium Terrain prepare"); }
+    };
+    const auto record=+[](const PassData& data,radray::RDGRasterPassContext& context) noexcept {
+        try {
+            RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.Record");
+            auto& encoder=context.GetEncoder(); const auto& resources=*data.resources;
+            if(data.timing) encoder.GetCommandBuffer()->WriteTimestamp({resources.timestamps.get(),QueryPipelineStage::Top,2+data.passId*2});
+            encoder.SetViewport({0,0,float(data.width),float(data.height),0,1}); encoder.SetScissor({0,0,data.width,data.height});
+            encoder.BindGraphicsPipelineState(data.pipeline);
+            if(data.passId!=OitComposite) encoder.BindShaderParameterSet(0,resources.passParameterSet.get());
+            if(data.bindingIndex>=0) encoder.BindShaderParameterSet(2,resources.oitParameters[data.bindingIndex].get());
+            if(data.screen) encoder.Draw(3,1,0,0);
+            else if(!RecordTerrainDraws({data.lists,data.passId<=Translucent?data.passId:uint32_t(Translucent),data.nativeLimit,
+                data.useIndirect,data.instanceSlice,data.indirectSlice},encoder)) return false;
+            if(data.timing) encoder.GetCommandBuffer()->WriteTimestamp({resources.timestamps.get(),QueryPipelineStage::Bottom,3+data.passId*2});
+            return encoder.IsValid();
+        } catch(...) { AbortUnexpectedException("Raynium Terrain record"); }
+    };
+    const bool timing=(f.flags&RN_FRAME_PROFILE) && resources.timestamps;
+    const auto geometry=[&](uint32_t passId,radray::RDGTextureHandle destination,radray::RDGTextureHandle second,bool clear,bool writeDepth,
+        radray::array<radray::RDGTextureHandle,4> reads,int bindingIndex) {
+        frame.timingMask|=1u<<passId;
+        const auto layer=passId<=Translucent?passId:uint32_t(Translucent); const auto& draws=input.lists->layers[layer];
+        frame.visibleCommands[passId]=draws.recordCount;
+        frame.submittedIndices+=draws.indicesInstances; frame.submittedRecords+=draws.recordCount; frame.submittedBatches+=draws.batchCount;
+        frame.bindingChanges+=2+(bindingIndex>=0?1:0)+(!input.instances.empty()?1:0);
+        const TerrainDrawBatch* previous=nullptr;
+        for(const auto& batch:std::span{input.lists->batches}.subspan(draws.firstBatch,draws.batchCount)) {
+            frame.bindingChanges+=!previous || previous->material->parameters.get()!=batch.material->parameters.get();
+            frame.bindingChanges+=!previous || previous->vertices.Target!=batch.vertices.Target || previous->vertices.Offset!=batch.vertices.Offset || previous->vertices.Size!=batch.vertices.Size;
+            frame.bindingChanges+=!previous || previous->indices.Target!=batch.indices.Target || previous->indices.Offset!=batch.indices.Offset || previous->indices.Stride!=batch.indices.Stride;
+            if(_indirect) frame.indirectCalls+=(uint64_t(batch.count)+_nativeLimit-1)/_nativeLimit; else frame.directCalls+=batch.count;
+            previous=&batch;
+        }
+        auto pass=graph.AddRasterPass(TerrainPrograms[passId],PassData{&resources,_resources->Pipeline(passId,output.Format,(f.flags&RN_FRAME_FLIP_Y)!=0),
+            input.lists,passId,width,height,_nativeLimit,bindingIndex,_indirect,timing,false,constants,instances,indirect,reads},record,prepare);
+        pass.ReadBuffer(constants,BufferState::CBuffer).ReadBuffer(instances,BufferState::Vertex);
+        if(_indirect) pass.ReadBuffer(indirect,BufferState::Indirect);
+        pass.WriteColor(0,destination,clear?LoadAction::Clear:LoadAction::Load,StoreAction::Store,
+            passId==Solid?ColorClearValue{{f.clear_color[0],f.clear_color[1],f.clear_color[2],f.clear_color[3]}}:
+            passId==OitBounds?ColorClearValue{{-std::numeric_limits<float>::max(),0,0,0}}:ColorClearValue{});
+        if(second.IsValid()) pass.WriteColor(1,second,LoadAction::Clear,StoreAction::Store);
+        pass.SetDepthStencil(depth,writeDepth?TextureState::DepthWrite:TextureState::DepthRead,passId==Solid?LoadAction::Clear:LoadAction::Load,
+            StoreAction::Store,LoadAction::DontCare,StoreAction::Discard,{0,0});
+        for(auto handle:accesses[layer].vertices) pass.ReadBuffer(handle,BufferState::Vertex);
+        for(auto handle:accesses[layer].indices) pass.ReadBuffer(handle,BufferState::Index);
+        for(auto handle:accesses[layer].textures) pass.ReadTexture(handle);
+        for(auto handle:reads) if(handle.IsValid()) pass.ReadTexture(handle);
+    };
+    const auto gui=[&] { _gui->AddPass(graph,slot,resources.gui,color,width,height); };
+    geometry(Solid,color,{},true,true,{},-1); geometry(Cutout,color,{},false,true,{},-1);
+    if(!input.hasTranslucent) { gui(); return; }
+    if(!(f.flags&RN_FRAME_IMPROVED_TRANSPARENCY)) { geometry(Translucent,color,{},false,true,{},-1); gui(); return; }
     const auto use=TextureUse::RenderTarget|TextureUse::Resource|TextureUse::CopySource|TextureUse::CopyDestination;
     const auto bounds=makeTexture(TextureFormat::RGBA32_FLOAT,use),culled=makeTexture(TextureFormat::RGBA32_FLOAT,use);
-    const auto coeff0=makeTexture(TextureFormat::RGBA16_FLOAT,use),coeff1=makeTexture(TextureFormat::RGBA16_FLOAT,use);
-    const auto accumulate=makeTexture(TextureFormat::RGBA16_FLOAT,use);
+    const auto coeff0=makeTexture(TextureFormat::RGBA16_FLOAT,use),coeff1=makeTexture(TextureFormat::RGBA16_FLOAT,use),accumulate=makeTexture(TextureFormat::RGBA16_FLOAT,use);
     geometry(OitBounds,bounds,{},true,false,{},-1);
-    graph.AddCopyPass("Raynium CopyDepthBounds",[&](radray::RDGCopyPassBuilder& pass) {
-        pass.ReadTexture(bounds).WriteTexture(culled);
-    },[bounds,culled,width,height](radray::RDGCopyPassContext& context) {
-        context.GetCommandBuffer().CopyTextureToTexture({.Destination=&context.Resolve(culled),.Source=&context.Resolve(bounds),.Width=width,.Height=height}); return true;
-    });
-    const auto screen=[&](uint32_t passId,Handle destination,Handles reads,int bindingIndex) {
-        _frames[index]->timingMask|=1u<<passId;
-        graph.AddRasterPass(TerrainPrograms[passId],[&](radray::RDGRasterPassBuilder& pass) {
-            pass.ReadBuffer(constants,BufferState::CBuffer).WriteColor(0,destination,LoadAction::Load,StoreAction::Store,{})
-                .SetDepthStencil(depth,TextureState::DepthWrite,LoadAction::Load,StoreAction::Store);
-            for(auto texture:reads) if(texture.IsValid()) pass.ReadTexture(texture);
-        },[this,index,passId,reads,bindingIndex,width,height,outputFormat](radray::RDGRasterPassContext& context) {
-            try {
-                auto& encoder=context.GetEncoder(); auto& slot=_slots[index]; auto* parameters=slot.oitParameters[bindingIndex].get();
-                for(uint32_t i=0;i<4;++i) if(!parameters->Set(i,0,context.ResolveView(reads[i].IsValid()?reads[i]:reads[0],TextureViewUsage::Resource).Get()))
-                        RADRAY_ABORT("Cannot bind OIT texture: pass={} binding={}",passId,i);
-                if(!parameters->FlushWrites()) RADRAY_ABORT("Cannot flush OIT bindings: pass={}",passId);
-                const bool timing=(_frames[index]->input.parameters.flags&RN_FRAME_PROFILE) && slot.timestamps;
-                if(timing) encoder.GetCommandBuffer()->WriteTimestamp({slot.timestamps.get(),QueryPipelineStage::Top,2+passId*2});
-                encoder.SetViewport({0,0,float(width),float(height),0,1}); encoder.SetScissor({0,0,width,height});
-                encoder.BindGraphicsPipelineState(_resources->Pipeline(passId,outputFormat));
-                if(passId!=OitComposite) encoder.BindShaderParameterSet(0,slot.passParameterSet.get());
-                encoder.BindShaderParameterSet(2,parameters);
-                encoder.Draw(3,1,0,0);
-                if(timing) encoder.GetCommandBuffer()->WriteTimestamp({slot.timestamps.get(),QueryPipelineStage::Bottom,3+passId*2});
-                if(!encoder.IsValid()) RADRAY_ABORT("Invalid OIT screen encoder: pass={}",passId);
-                return true;
-            } catch(...) {
-                AbortUnexpectedException("Raynium OIT record");
-            }
-        });
+    struct CopyData { radray::RDGTextureHandle source,destination; uint32_t width,height; };
+    graph.AddCopyPass("Raynium CopyDepthBounds",CopyData{bounds,culled,width,height},+[](const CopyData& data,radray::RDGCopyPassContext& context) noexcept {
+        context.GetCommandBuffer().CopyTextureToTexture({.Destination=&context.Resolve(data.destination),.Source=&context.Resolve(data.source),.Width=data.width,.Height=data.height}); return true;
+    }).ReadTexture(bounds).WriteTexture(culled);
+    const auto screen=[&](uint32_t passId,radray::RDGTextureHandle destination,radray::array<radray::RDGTextureHandle,4> reads,int bindingIndex) {
+        frame.timingMask|=1u<<passId;
+        auto pass=graph.AddRasterPass(TerrainPrograms[passId],PassData{&resources,_resources->Pipeline(passId,output.Format),input.lists,
+            passId,width,height,_nativeLimit,bindingIndex,false,timing,true,constants,{},{},reads},record,prepare);
+        pass.ReadBuffer(constants,BufferState::CBuffer).WriteColor(0,destination,LoadAction::Load,StoreAction::Store)
+            .SetDepthStencil(depth,TextureState::DepthWrite,LoadAction::Load,StoreAction::Store);
+        for(auto handle:reads) if(handle.IsValid()) pass.ReadTexture(handle);
     };
-    screen(OitCull,culled,{bounds},0);
-    geometry(OitTransmittance,coeff0,coeff1,true,false,{culled},1);
-    geometry(OitAccumulate,accumulate,{},true,false,{culled,coeff0,coeff1},2);
-    screen(OitComposite,color,{bounds,coeff0,coeff1,accumulate},3);
-    gui();
-} catch(...) {
-    AbortUnexpectedException("SolidFramePipeline::SetupGraph");
-}
+    screen(OitCull,culled,{bounds},0); geometry(OitTransmittance,coeff0,coeff1,true,false,{culled},1);
+    geometry(OitAccumulate,accumulate,{},true,false,{culled,coeff0,coeff1},2); screen(OitComposite,color,{bounds,coeff0,coeff1,accumulate},3); gui();
+} catch(...) { AbortUnexpectedException("SolidFramePipeline::SetupGraph"); }
 
 void SolidFramePipeline::SubmitFrame(radray::FrameSlot& slot,CommandBuffer& graphCommands) noexcept try {
     RADRAY_PROFILE_SCOPE_N("Raynium.Frame.SubmitHandoff");
@@ -334,6 +267,7 @@ void SolidFramePipeline::SubmitFrame(radray::FrameSlot& slot,CommandBuffer& grap
     RADRAY_PROFILE_PLOT("Raynium.Frame.SubmittedIndicesInstances",double(frame.submittedIndices));
     RADRAY_PROFILE_PLOT("Raynium.Frame.SubmittedRecords",double(frame.submittedRecords));
     RADRAY_PROFILE_PLOT("Raynium.Frame.SubmittedBatches",double(frame.submittedBatches));
+    resources.gui.vertices={};
     frame.input={};
 } catch(...) {
     AbortUnexpectedException("SolidFramePipeline::SubmitFrame");

@@ -10,7 +10,7 @@ namespace raynium {
 enum TerrainPass : uint32_t { Solid=0, Cutout=1, Translucent=2, OitBounds=3, OitTransmittance=4, OitAccumulate=5, OitCull=6, OitComposite=7 };
 struct MeshMaterialBinding {
     uint64_t sortKey{};
-    radray::array<radray::shared_ptr<UploadedTexture>,2> textures;
+    radray::array<radray::IntrusivePtr<radray::GpuTexture>,2> textures;
     radray::unique_ptr<radray::render::Sampler> albedoSampler,lightSampler;
     radray::unique_ptr<radray::render::ShaderParameterSet> parameters;
 };

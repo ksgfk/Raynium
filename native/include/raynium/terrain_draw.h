@@ -3,6 +3,8 @@
 #include <raynium/bridge.h>
 #include <radray/render/rhi.h>
 #include <span>
+#include <memory_resource>
+#include <radray/runtime/gpu_resource.h>
 
 namespace raynium {
 struct MeshMaterialBinding;
@@ -16,8 +18,15 @@ struct TerrainMeshLayout {
     bool finiteBounds{};
 };
 struct TerrainEye { radray::array<double,3> offset{}; bool valid{}; };
-bool AnalyzeTerrainMesh(std::span<const radray::byte>,rn_material_mode,TerrainMeshLayout&,
-                        radray::vector<radray::byte>& reordered);
+struct TerrainMeshUpload {
+    explicit TerrainMeshUpload(std::pmr::memory_resource& memory):groups(&memory) {}
+    std::span<const radray::byte> source;
+    std::pmr::vector<uint8_t> groups;
+    radray::array<uint32_t,7> offsets{};
+    bool Write(std::span<radray::byte>) const noexcept;
+};
+bool AnalyzeTerrainMesh(std::span<const radray::byte>,rn_material_mode,TerrainMeshLayout&,TerrainMeshUpload&);
+bool WriteQuadIndices(std::span<radray::byte>,uint32_t vertexCount) noexcept;
 TerrainEye ComputeTerrainEye(const rn_render_frame_desc&) noexcept;
 uint32_t TerrainVisibleMask(const TerrainMeshLayout&,const TerrainEye&,const rn_render_frame_desc&,
                             std::span<const rn_instance>) noexcept;
@@ -26,11 +35,15 @@ struct TerrainDrawTemplate {
     radray::render::IndexBufferView indices{};
     radray::vector<TerrainDrawRange> ranges;
     uint32_t fullMask{},validMask{},mergeMask{};
+    radray::GpuBuffer* vertexPage{};
+    radray::GpuBuffer* indexPage{};
 };
 struct TerrainBindingState {
     radray::render::VertexBufferView vertices{};
     radray::render::IndexBufferView indices{};
     const MeshMaterialBinding* material{};
+    radray::GpuBuffer* vertexPage{};
+    radray::GpuBuffer* indexPage{};
 };
 class TerrainBindingStates final {
 public:
@@ -70,6 +83,8 @@ struct TerrainDrawBatch {
     radray::render::IndexBufferView indices{};
     const MeshMaterialBinding* material{};
     uint32_t first{},count{};
+    radray::GpuBuffer* vertexPage{};
+    radray::GpuBuffer* indexPage{};
 };
 struct TerrainDrawLayer { uint32_t firstBatch{},batchCount{},firstRecord{},recordCount{}; uint64_t selectedGroups{},indicesInstances{}; };
 struct TerrainFrameLists {

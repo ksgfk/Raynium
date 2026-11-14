@@ -1,6 +1,8 @@
 #include <raynium/gui_pass.h>
 #include <radray/types.h>
 #include <raynium/exception.h>
+#include <raynium/terrain_draw.h>
+#include <raynium/frame_record.h>
 #include <radray/logger.h>
 #include <algorithm>
 #include <cmath>
@@ -75,43 +77,28 @@ bool GuiPassResources::PrepareOutput(Device& device,TextureFormat format) {
     return true;
 }
 bool GuiPassResources::CreateSlot(Device& device,GuiFrameSlot& slot) {
-    slot.constantStride=(256+device.GetCapabilities().Limits.CBufferOffsetAlignment-1)/device.GetCapabilities().Limits.CBufferOffsetAlignment*device.GetCapabilities().Limits.CBufferOffsetAlignment;
-    slot.vertices=radray::MappedUploadBuffer::Create(device,64u<<10,BufferUse::Vertex).Release();
-    slot.indices=radray::MappedUploadBuffer::Create(device,64u<<10,BufferUse::Index).Release();
-    slot.constants=radray::MappedUploadBuffer::Create(device,slot.constantStride*2,BufferUse::CBuffer).Release();
-    if(!slot.vertices || !slot.indices || !slot.constants) { RADRAY_ERR_LOG("Cannot create GUI slot uploads"); return false; }
-    for(uint32_t i=0;i<2;++i) {
-        auto& parameters=slot.passParameters[i];
+    for(auto& parameters:slot.passParameters) {
         parameters=device.CreateShaderParameterSet({_objects->passLayout.get()}).Release();
-        if(!parameters || !parameters->Set(0,0,ShaderBufferBinding{slot.constants->Get(),{i*slot.constantStride,256}}) || !parameters->FlushWrites()) {
-            RADRAY_ERR_LOG("Cannot create GUI frame parameters"); return false;
-        }
+        if(!parameters) { RADRAY_ERR_LOG("Cannot create GUI frame parameters"); return false; }
     }
     return true;
 }
 bool GuiPassResources::Prepare(Device& device,GuiFrameSlot& slot,const UploadedTextures& textures,const rn_render_frame_desc& f,uint32_t width,uint32_t height) {
-    for(auto& parameters:slot.textureParameters) if(parameters) parameters->ResetBindingsForReuse();
-    slot.draws.clear(); slot.vertexCount=0;
+    slot.draws.clear(); slot.vertexCount=0; slot.vertices={};
     if(f.gui_vertex_count>4194304 || f.gui_draw_count>1048576 || (f.gui_vertex_count && !f.gui_vertices) || (f.gui_draw_count && !f.gui_draws) || f.gui_vertex_count%4 ||
        ((f.gui_vertex_count || f.gui_draw_count) && (!std::isfinite(f.gui_width) || !std::isfinite(f.gui_height) || f.gui_width<=0 || f.gui_height<=0))) {
         RADRAY_ERR_LOG("Invalid GUI arrays or logical extent"); return false;
     }
+    for(size_t i=f.gui_draw_count;i<slot.textureParameters.size();++i) {
+        auto& binding=slot.textureParameters[i];
+        if(binding.parameters) binding.parameters->ResetBindingsForReuse();
+        binding.texture.Reset(); binding.sampler=nullptr;
+    }
     if(!f.gui_draw_count) return true;
-    if(!slot.vertices->Reserve(device,uint64_t(f.gui_vertex_count)*24) || !slot.indices->Reserve(device,uint64_t(f.gui_vertex_count/4)*24)) {
-        RADRAY_ERR_LOG("Cannot grow GUI vertices/indices"); return false;
-    }
-    std::memcpy(slot.vertices->GetData(),f.gui_vertices,size_t(f.gui_vertex_count)*24);
-    auto* indices=reinterpret_cast<uint32_t*>(slot.indices->GetData());
-    for(uint32_t v=0;v<f.gui_vertex_count;v+=4) {
-        const uint32_t quad[]{v,v+1,v+2,v+2,v+3,v}; std::copy_n(quad,6,indices); indices+=6;
-    }
-    for(uint32_t i=0;i<2;++i) {
-        const float viewport[]{f.gui_width,f.gui_height,device.GetBackend()==RenderBackend::Vulkan?-1.f:1.f,float(i)};
-        std::memcpy(slot.constants->GetData()+i*slot.constantStride,viewport,sizeof(viewport));
-    }
-    if(!slot.vertices->Flush(0,uint64_t(f.gui_vertex_count)*24) || !slot.indices->Flush(0,uint64_t(f.gui_vertex_count/4)*24) ||
-       !slot.constants->Flush(0,slot.constantStride*2)) { RADRAY_ERR_LOG("Cannot flush GUI frame buffers"); return false; }
-    while(slot.textureParameters.size()<f.gui_draw_count) slot.textureParameters.push_back({});
+    slot.vertices=std::as_bytes(std::span{f.gui_vertices,f.gui_vertex_count});
+    slot.width=f.gui_width; slot.height=f.gui_height;
+    slot.yDirection=device.GetBackend()==RenderBackend::Vulkan?-1.f:1.f;
+    while(slot.textureParameters.size()<f.gui_draw_count) slot.textureParameters.emplace_back();
     slot.draws.reserve(f.gui_draw_count);
     for(uint32_t i=0;i<f.gui_draw_count;++i) {
         const auto& desc=f.gui_draws[i];
@@ -126,55 +113,82 @@ bool GuiPassResources::Prepare(Device& device,GuiFrameSlot& slot,const UploadedT
         const auto bottom=uint32_t(std::clamp(std::ceil((int64_t(desc.scissor[1])+desc.scissor[3])*sy),0.,double(height)));
         GuiDraw draw{.desc=desc,.scissor={int32_t(left),int32_t(top),right-left,bottom-top}};
         if(desc.pipeline>RN_GUI_HIGHLIGHT) {
-            draw.texture=textures.Find(desc.texture);
-            if(!draw.texture) { RADRAY_ERR_LOG("GUI draw={} references missing uploaded texture={}",i,desc.texture); return false; }
-            const uint64_t key=(uint64_t(draw.texture->desc.mip_levels)<<32)|desc.sampler_bits;
+            const auto* owner=textures.Find(desc.texture);
+            if(!owner) { RADRAY_ERR_LOG("GUI draw={} references missing uploaded texture={}",i,desc.texture); return false; }
+            draw.texture=owner->texture.Get();
+            const uint64_t key=(uint64_t(owner->desc.mip_levels)<<32)|desc.sampler_bits;
             auto& sampler=_objects->samplers[key];
             if(!sampler) sampler=device.CreateSampler({.AddressS=(desc.sampler_bits&1)?AddressMode::Repeat:AddressMode::ClampToEdge,
                 .AddressT=(desc.sampler_bits&2)?AddressMode::Repeat:AddressMode::ClampToEdge,.AddressR=AddressMode::ClampToEdge,
                 .MinFilter=(desc.sampler_bits&4)?FilterMode::Linear:FilterMode::Nearest,.MagFilter=(desc.sampler_bits&8)?FilterMode::Linear:FilterMode::Nearest,
-                .MipmapFilter=(desc.sampler_bits&16)?FilterMode::Linear:FilterMode::Nearest,.LodMax=(desc.sampler_bits&32)?0.f:float(draw.texture->desc.mip_levels-1),.AnisotropyClamp=1}).Release();
-            auto& parameters=slot.textureParameters[i];
-            if(!parameters) parameters=device.CreateShaderParameterSet({_objects->textureLayout.get()}).Release();
-            if(!sampler || !parameters || !parameters->Set(0,0,draw.texture->view.get()) || !parameters->Set(1,0,sampler.get()) || !parameters->FlushWrites()) {
-                RADRAY_ERR_LOG("Cannot prepare GUI texture bindings"); return false;
+                .MipmapFilter=(desc.sampler_bits&16)?FilterMode::Linear:FilterMode::Nearest,.LodMax=(desc.sampler_bits&32)?0.f:float(owner->desc.mip_levels-1),.AnisotropyClamp=1}).Release();
+            auto& binding=slot.textureParameters[i];
+            if(!binding.parameters) binding.parameters=device.CreateShaderParameterSet({_objects->textureLayout.get()}).Release();
+            if(!sampler || !binding.parameters) { RADRAY_ERR_LOG("Cannot create GUI texture bindings"); return false; }
+            if(binding.texture.Get()!=draw.texture || binding.sampler!=sampler.get()) {
+                binding.parameters->ResetBindingsForReuse();
+                binding.texture=owner->texture; binding.sampler=sampler.get();
+                if(!binding.parameters->Set(0,0,binding.texture->GetDefaultView()) ||
+                   !binding.parameters->Set(1,0,binding.sampler) || !binding.parameters->FlushWrites()) {
+                    RADRAY_ERR_LOG("Cannot prepare GUI texture bindings"); return false;
+                }
             }
-            draw.parameters=parameters.get();
+            draw.parameters=binding.parameters.get();
+        } else {
+            auto& binding=slot.textureParameters[i];
+            if(binding.parameters) binding.parameters->ResetBindingsForReuse();
+            binding.texture.Reset(); binding.sampler=nullptr;
         }
         slot.draws.push_back(std::move(draw));
     }
     slot.vertexCount=f.gui_vertex_count;
     return true;
 }
-void GuiPassResources::AddPass(radray::RDGBuilder& graph,GuiFrameSlot& frame,radray::RDGTextureHandle color,TextureFormat format,uint32_t width,uint32_t height,
-    std::span<const radray::RDGTextureHandle> textures) {
+void GuiPassResources::AddPass(radray::RDGBuilder& graph,radray::FrameSlot& slot,GuiFrameSlot& frame,
+    radray::RDGTextureHandle color,uint32_t width,uint32_t height) {
     if(frame.draws.empty()) return;
-    const auto vertices=graph.ImportBuffer(frame.vertices->Get(),BufferState::HostWrite,BufferState::HostWrite);
-    const auto indices=graph.ImportBuffer(frame.indices->Get(),BufferState::HostWrite,BufferState::HostWrite);
-    const auto constants=graph.ImportBuffer(frame.constants->Get(),BufferState::HostWrite,BufferState::HostWrite);
-    graph.AddRasterPass("Raynium GUI",[&](radray::RDGRasterPassBuilder& pass) {
-        pass.ReadBuffer(vertices,BufferState::Vertex).ReadBuffer(indices,BufferState::Index).ReadBuffer(constants,BufferState::CBuffer)
-            .WriteColor(0,color,LoadAction::Load,StoreAction::Store);
-        for(auto texture:textures) pass.ReadTexture(texture);
-    },[this,&frame,format,width,height](radray::RDGRasterPassContext& context) {
-        try {
-            auto& encoder=context.GetEncoder();
-            encoder.SetViewport({0,0,float(width),float(height),0,1});
-            const VertexBufferBinding vertices{0,{frame.vertices->Get(),0,uint64_t(frame.vertexCount)*24}};
-            for(const auto& draw:frame.draws) {
-                if(!draw.desc.vertex_count || !draw.scissor.Width || !draw.scissor.Height) continue;
-                encoder.SetScissor(draw.scissor);
-                encoder.BindGraphicsPipelineState(_objects->pipelines[draw.desc.pipeline].get());
-                encoder.BindVertexBuffers({&vertices,1}); encoder.BindIndexBuffer({frame.indices->Get(),0,4});
-                encoder.BindShaderParameterSet(0,frame.passParameters[draw.desc.pipeline==RN_GUI_TEXT_GRAYSCALE?1:0].get());
-                if(draw.parameters) encoder.BindShaderParameterSet(1,draw.parameters);
-                encoder.DrawIndexed(draw.desc.vertex_count/4*6,1,draw.desc.first_vertex/4*6,0,0);
-            }
-            if(!encoder.IsValid()) RADRAY_ABORT("Invalid GUI render encoder");
+    const auto vertices=graph.CreateBuffer({.MaxSize=frame.vertices.size(),.Usage=BufferUse::Vertex},radray::RDGUploadSource::BorrowedBytes(frame.vertices));
+    const uint64_t indexBytes=uint64_t(frame.vertexCount/4)*24;
+    const auto indices=graph.CreateBuffer({.MaxSize=indexBytes,.Usage=BufferUse::Index},
+        radray::RDGUploadSource::Generated(indexBytes,frame.vertexCount,+[](const uint32_t& count,radray::RDGUploadWriteContext& context) noexcept {
+            return WriteQuadIndices(context.Bytes,count);
+        }));
+    radray::array<radray::RDGBufferHandle,2> constants;
+    for(uint32_t i=0;i<2;++i) {
+        const radray::array<float,4> values{frame.width,frame.height,frame.yDirection,float(i)};
+        constants[i]=graph.CreateBuffer({.MaxSize=256,.Usage=BufferUse::CBuffer},radray::RDGUploadSource::Generated(256,values,
+            +[](const radray::array<float,4>& values,radray::RDGUploadWriteContext& context) noexcept {
+                std::memset(context.Bytes.data(),0,context.Bytes.size()); std::memcpy(context.Bytes.data(),values.data(),sizeof(values)); return true;
+            }));
+    }
+    struct PassData {
+        radray::array<GraphicsPipelineState*,12> pipelines;
+        GuiFrameSlot* frame;
+        uint32_t width,height;
+        radray::RDGBufferHandle vertices,indices;
+        radray::array<radray::RDGBufferHandle,2> constants;
+        radray::RDGBufferSlice vertexSlice{},indexSlice{};
+    };
+    radray::array<GraphicsPipelineState*,12> pipelines;
+    for(size_t i=0;i<pipelines.size();++i) pipelines[i]=_objects->pipelines[i].get();
+    auto pass=graph.AddRasterPass("Raynium GUI",PassData{pipelines,&frame,width,height,vertices,indices,constants},
+        +[](const PassData& data,radray::RDGRasterPassContext& context) noexcept {
+            try {
+                auto& encoder=context.GetEncoder();
+                encoder.SetViewport({0,0,float(data.width),float(data.height),0,1});
+                return RecordGuiDraws(*data.frame,data.pipelines,data.vertexSlice,data.indexSlice,encoder);
+            } catch(...) { AbortUnexpectedException("Raynium GUI record"); }
+        },+[](PassData& data,radray::RDGPrepareContext& context) noexcept {
+            data.vertexSlice=context.ResolveBuffer(data.vertices); data.indexSlice=context.ResolveBuffer(data.indices);
+            for(uint32_t i=0;i<2;++i)
+                if(!BindFrameConstants(*data.frame->passParameters[i],data.frame->boundConstants[i],context.ResolveBuffer(data.constants[i]))) return false;
             return true;
-        } catch(...) {
-            AbortUnexpectedException("Raynium GUI record");
-        }
         });
+    pass.ReadBuffer(vertices,BufferState::Vertex).ReadBuffer(indices,BufferState::Index)
+        .ReadBuffer(constants[0],BufferState::CBuffer).ReadBuffer(constants[1],BufferState::CBuffer)
+        .WriteColor(0,color,LoadAction::Load,StoreAction::Store);
+    std::pmr::unordered_set<radray::GpuTexture*> textures{&slot.GetScratchMemoryResource()};
+    for(const auto& draw:frame.draws) if(draw.texture && textures.insert(draw.texture).second)
+        pass.ReadTexture(graph.ImportPersistentBorrowed(*draw.texture));
 }
 }

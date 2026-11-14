@@ -32,12 +32,9 @@ private:
     struct SlotResources {
         GuiFrameSlot gui;
         TerrainFrameLists lists;
-        RenderBuffer passConstants;
+        radray::RDGBufferSlice boundConstants{};
         radray::unique_ptr<radray::render::ShaderParameterSet> passParameterSet;
-        radray::unique_ptr<radray::BatchedBufferUpload> staging;
-        radray::unique_ptr<radray::MappedUploadBuffer> instances,indirect;
-        radray::unique_ptr<radray::MappedUploadBuffer> textureStaging;
-        radray::vector<TextureCopy> textureCopies;
+        radray::vector<GeometryUpload> geometry;
         radray::unique_ptr<radray::render::QueryPool> timestamps; // Empty when the device has no timestamp queries.
         RenderBuffer timing;
         radray::array<radray::unique_ptr<radray::render::ShaderParameterSet>,4> oitParameters;
@@ -53,7 +50,7 @@ private:
     };
     SolidFramePipeline(radray::DeviceContext& device,radray::unique_ptr<MeshPassResources> resources,radray::unique_ptr<GuiPassResources> gui,
         radray::array<SlotResources,2>&& slots,radray::unique_ptr<radray::render::Fence> completion,bool indirect)
-        :RenderGraphFramePipeline(device,2),_resources(std::move(resources)),_gui(std::move(gui)),_slots(std::move(slots)),_completion(std::move(completion)),
+        :RenderGraphFramePipeline(device,2,8u<<20),_resources(std::move(resources)),_gui(std::move(gui)),_slots(std::move(slots)),_completion(std::move(completion)),
          _indirect(indirect),_nativeLimit(device.GetDevice().GetCapabilities().Limits.MaxDrawIndirectCount) {}
     radray::unique_ptr<MeshPassResources> _resources;
     radray::unique_ptr<GuiPassResources> _gui;

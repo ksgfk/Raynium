@@ -257,6 +257,12 @@ TEST(TerrainSubmission, AutoRequiresEveryCapabilityAndForcedModesRespectFailures
 }
 namespace raynium {
 namespace {
+bool AnalyzeAndWrite(std::span<const radray::byte> source,rn_material_mode layer,TerrainMeshLayout& layout,radray::vector<radray::byte>& bytes) {
+    std::pmr::monotonic_buffer_resource memory;
+    TerrainMeshUpload upload{memory};
+    if(!AnalyzeTerrainMesh(source,layer,layout,upload)) return false;
+    bytes.resize(source.size()); return upload.Write(bytes);
+}
 radray::vector<radray::byte> Quad(uint32_t group,float plane=0) {
     float points[4][3]{};
     if(group<6) {
@@ -276,7 +282,7 @@ TEST(TerrainMeshAnalysis, ReordersSevenGroupsWithoutChangingVertexBytesOrWithinG
     radray::vector<radray::byte> source(13); for(int g=6;g>=0;--g) { auto q=Quad(g); source.insert(source.end(),q.begin(),q.end()); }
     auto q=Quad(0,2); source.insert(source.end(),q.begin(),q.end());
     TerrainMeshLayout layout; radray::vector<radray::byte> bytes;
-    ASSERT_TRUE(AnalyzeTerrainMesh(std::span{source}.subspan(13),RN_MATERIAL_OPAQUE,layout,bytes));
+    ASSERT_TRUE(AnalyzeAndWrite(std::span{source}.subspan(13),RN_MATERIAL_OPAQUE,layout,bytes));
     ASSERT_EQ(layout.ranges.size(),7); EXPECT_EQ(layout.ranges[0].count,12);
     EXPECT_EQ(layout.groupBits,(radray::array<uint32_t,7>{1,2,4,8,16,32,64}));
     radray::vector<radray::byte> expected;
@@ -290,7 +296,7 @@ TEST(TerrainMeshAnalysis, ReordersSevenGroupsWithoutChangingVertexBytesOrWithinG
 }
 TEST(TerrainMeshAnalysis, OutlyingBoundsSparseGroupsAndEveryInstanceRemainConservative) {
     auto source=Quad(0,32); TerrainMeshLayout layout; radray::vector<radray::byte> bytes;
-    ASSERT_TRUE(AnalyzeTerrainMesh(source,RN_MATERIAL_CUTOUT,layout,bytes));
+    ASSERT_TRUE(AnalyzeAndWrite(source,RN_MATERIAL_CUTOUT,layout,bytes));
     EXPECT_EQ(layout.minimum[0],32); EXPECT_EQ(layout.maximum[0],32);
     rn_render_frame_desc frame{}; const rn_instance instances[]{{{-31,0,0},1},{{-33,0,0},1}};
     EXPECT_EQ(TerrainVisibleMask(layout,{{},true},frame,{instances,1}),0u);
@@ -300,7 +306,7 @@ TEST(TerrainMeshAnalysis, OutlyingBoundsSparseGroupsAndEveryInstanceRemainConser
     frame.camera_fraction[0]=std::numeric_limits<float>::quiet_NaN();
     EXPECT_EQ(TerrainVisibleMask(layout,{{},true},frame,{&far,1}),1u);
     source=Quad(5); auto second=Quad(2); source.insert(source.end(),second.begin(),second.end());
-    ASSERT_TRUE(AnalyzeTerrainMesh(source,RN_MATERIAL_OPAQUE,layout,bytes));
+    ASSERT_TRUE(AnalyzeAndWrite(source,RN_MATERIAL_OPAQUE,layout,bytes));
     EXPECT_EQ(layout.groupBits[2],1); EXPECT_EQ(layout.groupBits[5],2);
     frame={}; frame.camera_fraction[1]=-2; frame.camera_fraction[2]=2; rn_instance origin{};
     EXPECT_EQ(TerrainVisibleMask(layout,{{},true},frame,{&origin,1}),0u);
@@ -308,21 +314,21 @@ TEST(TerrainMeshAnalysis, OutlyingBoundsSparseGroupsAndEveryInstanceRemainConser
 TEST(TerrainMeshAnalysis, NonplanarInconsistentDegenerateAndNonfiniteQuadsStayGeneral) {
     auto source=Quad(0); float value=.1f; std::memcpy(source.data()+56,&value,4);
     TerrainMeshLayout layout; radray::vector<radray::byte> bytes;
-    ASSERT_TRUE(AnalyzeTerrainMesh(source,RN_MATERIAL_OPAQUE,layout,bytes)); EXPECT_EQ(layout.groupBits[6],1);
+    ASSERT_TRUE(AnalyzeAndWrite(source,RN_MATERIAL_OPAQUE,layout,bytes)); EXPECT_EQ(layout.groupBits[6],1);
     source=Quad(0); value=2; std::memcpy(source.data()+84+4,&value,4);
-    ASSERT_TRUE(AnalyzeTerrainMesh(source,RN_MATERIAL_OPAQUE,layout,bytes)); EXPECT_EQ(layout.groupBits[6],1);
-    source=Quad(6); ASSERT_TRUE(AnalyzeTerrainMesh(source,RN_MATERIAL_OPAQUE,layout,bytes)); EXPECT_EQ(layout.groupBits[6],1);
+    ASSERT_TRUE(AnalyzeAndWrite(source,RN_MATERIAL_OPAQUE,layout,bytes)); EXPECT_EQ(layout.groupBits[6],1);
+    source=Quad(6); ASSERT_TRUE(AnalyzeAndWrite(source,RN_MATERIAL_OPAQUE,layout,bytes)); EXPECT_EQ(layout.groupBits[6],1);
     source=Quad(0); value=std::numeric_limits<float>::quiet_NaN(); std::memcpy(source.data(),&value,4);
-    ASSERT_TRUE(AnalyzeTerrainMesh(source,RN_MATERIAL_OPAQUE,layout,bytes)); EXPECT_FALSE(layout.finiteBounds);
+    ASSERT_TRUE(AnalyzeAndWrite(source,RN_MATERIAL_OPAQUE,layout,bytes)); EXPECT_FALSE(layout.finiteBounds);
     rn_render_frame_desc frame{}; rn_instance instance{};
     EXPECT_EQ(TerrainVisibleMask(layout,{{},true},frame,{&instance,1}),1u);
-    EXPECT_TRUE(AnalyzeTerrainMesh({},RN_MATERIAL_OPAQUE,layout,bytes)); EXPECT_TRUE(layout.ranges.empty());
-    EXPECT_FALSE(AnalyzeTerrainMesh(std::span{source}.first(111),RN_MATERIAL_OPAQUE,layout,bytes));
+    EXPECT_TRUE(AnalyzeAndWrite({},RN_MATERIAL_OPAQUE,layout,bytes)); EXPECT_TRUE(layout.ranges.empty());
+    EXPECT_FALSE(AnalyzeAndWrite(std::span{source}.first(111),RN_MATERIAL_OPAQUE,layout,bytes));
 }
 TEST(TerrainMeshAnalysis, TranslucencyPreservesCompilerOrder) {
     auto source=Quad(5); auto q=Quad(0); source.insert(source.end(),q.begin(),q.end());
     TerrainMeshLayout layout; radray::vector<radray::byte> bytes;
-    ASSERT_TRUE(AnalyzeTerrainMesh(source,RN_MATERIAL_TRANSLUCENT,layout,bytes));
+    ASSERT_TRUE(AnalyzeAndWrite(source,RN_MATERIAL_TRANSLUCENT,layout,bytes));
     EXPECT_EQ(bytes,source); ASSERT_EQ(layout.ranges.size(),1); EXPECT_EQ(layout.ranges[0].count,12);
 }
 TEST(TerrainMeshAnalysis, InverseProjectionEyeIncludesTranslationAndRejectsInvalidMatrices) {

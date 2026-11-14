@@ -35,7 +35,7 @@ GUI 帧也同步采集 epoch，因此退出世界后的下一帧会清空 Java �
 
 ## Native 分组与保守剔除
 
-SOLID/CUTOUT 在上传期检查精确轴向平面及两个三角形绕序，按六轴向加 general 重排；组内顺序和全部顶点字节保持。
+SOLID/CUTOUT 在准备期检查精确轴向平面及两个三角形绕序，记录六轴向加 general 的分组与偏移；RDG Prepare 直接写入最终上传区间，保持组内顺序和全部顶点字节。
 按实际顶点计算 AABB，允许模型超出 section；非平面、退化、绕序不一致进入 general，非有限数据保守可见。
 非空组映射到紧凑 submesh 位。TRANSLUCENT 保持原 quad 顺序与单 submesh。
 共享 Quad 索引由 Native 管理；透明索引归对应 mesh，mesh 删除时同时退役。
@@ -50,7 +50,7 @@ Native 每帧一次求逆 projection × view，变换 (0,0,1,0) 得到有效视�
 renderer 创建时由 `raynium.terrain.submission=auto|direct|indirect` 选择专用提交模式，默认 auto。设备条件、错误和帧槽契约见 [Native runtime](native-runtime.md#提交模式与参数)。
 
 [Shader pack](shader-pack.md) 提供离线 DXIL/SPIR-V 程序。Group 0 保存每槽 Frame，Group 1 保存图集、lightmap 和 sampler；Group 2 保存每槽 OIT 阶段输入。
-驻留绘制模板不保存瞬态 view。每槽命令 epoch 回收后重置 OIT 参数集，再在 RDG 执行时绑定当前 view。
+驻留绘制模板不保存瞬态 view。OIT 参数在 RDG Prepare 绑定，在槽命令 epoch 回收后、图及 view 清理前解除；Record 只编码已准备数据。
 模式切换选择已有 pass，不重新加载包、创建材质或上传顶点。仅复用 MC 可见列表，没有额外 GPU 可见性或异步计算队列。
 
 先绘制 SOLID，再绘制 CUTOUT。二者使用反向 Z（clear=0、GreaterEqual）、背面剔除和深度写入；CUTOUT 丢弃 alpha<0.5 的片元。

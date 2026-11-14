@@ -167,7 +167,8 @@ ABI 参数检查及资源寿命保护仍然执行。benchmark 活跃或游戏 JV
 该数值覆盖 native 命令的 timestamp 区间，在回收槽时发布，不是 MC 全帧 GPU 耗时，也不是发布时那一帧的即时耗时。
 
 `Raynium.Present` 覆盖窗口帧的槽回收、驻留/GUI 准备、Acquire、RDG 提交和 Present。
-`Raynium.Terrain.ResolveVisible`、`Sort`、`BuildArguments`、`UploadArguments` 和 `Record` 分别记录可见解析、排序、参数构建、参数上传和几何录制；没有逐 draw profiling scope。
+`Raynium.Terrain.Prepare` 覆盖驻留更新、可见解析及参数构建；`Raynium.Terrain.Sort`、`BuildArguments` 分别记录排序和参数构建，`Raynium.Terrain.Record` 记录几何及 OIT 屏幕 pass 的录制；没有逐 draw profiling scope。上传字节的复制与生成计入 `RadRay.RDG.FillUploads`。
+锁定 RadRay 的 `CompiledRDG::Record` 按 Upload execution group 记录一个 `RDG UploadBatch` GPU 计时区，逐上传节点保留 CPU zone。该 GPU 区间包含组内拷贝和重叠写屏障，不包含组入口屏障；完整 native GPU 耗时仍读取上述帧外围 timestamp，不能用上传子区间之和替代。实现来源为 RadRay `modules/runtime/src/rdg.cpp`。
 `Raynium.Visible.Solid/Cutout/Translucent` 记录各层输入项；`Raynium.Terrain.<层>.SelectedGroups/Records/Batches` 记录各层选中面组、参数记录及批次。
 `Raynium.Terrain.BuiltRecords/BuiltBatches/ArgumentBytes` 只计参数生成一次的量，`OitParameterBuilds` 在有 OIT 透明输入时为 1。
 `Raynium.Frame.SubmittedRecords/SubmittedBatches/SubmittedIndicesInstances` 汇总实际几何 pass，OIT 透明部分计三次。
@@ -229,11 +230,11 @@ Raynium 自身无需动态 VC++ CRT 或额外 mimalloc DLL；系统与显卡驱�
 | `NativeAbiTest` | 参数、reserved 拒绝、状态码、输出保护及空句柄销毁 | `nativeTest` |
 | `NativeRuntimeTest` / `NativeShaderPackTest` | 双后端设备生命周期、线程/owner、shader pack 及提交策略拒绝 | `nativeTest` |
 | `NativeSwapchainTest` | 双后端呈现、尺寸/模式、隐藏/最小化/零客户区及失败后关闭重建 | `nativeTest` |
-| `NativeTextureTest` | direct/indirect、RGBA8/R8/mip/padding 区域上传、共享索引扩容、透明排序、OIT/普通透明、十二种 GUI 提交、双槽资源退役、epoch 与销毁编号拒绝 | `nativeTest` |
+| `NativeTextureTest` | direct/indirect、RGBA8/R8/mip/padding 区域上传、共享索引扩容、透明排序、OIT/普通透明、十二种 GUI 提交、双槽资源退役、透明顶点连续替换并保留索引、在途材质纹理删除和替换、退役后准备失败关闭、连续局部上传、上传后删除目标、跨页增长、epoch 与销毁编号拒绝 | `nativeTest` |
 
 `test` 排除 `native` 标签，随标准 `check/build` 运行，不加载 DLL、不构建 native；FFM 缓冲测试使用 JVM native access。`nativeTest` 是标准 Gradle `Test` 任务，只包含 `native` 标签；它复用 `testClasses`，依赖 `nativeStage`，在构建/stage 完成后启动测试 JVM。依赖仍须显式准备，执行需要 Windows x64 和 D3D12/Vulkan 驱动；缺少设备或 DLL 时明确失败，不跳过。
 
-专用参数单元测试是可选 CMake 目标。已准备匹配 CRT 的 GTest 后，在 x64 开发终端执行：
+专用参数及帧上传/录制单元测试是可选 CMake 目标。已准备匹配 CRT 的 GTest 后，在 x64 开发终端执行：
 
 ```powershell
 cmake --preset win-x64-debug -S native -DRAYNIUM_BUILD_TESTS=ON
@@ -241,7 +242,7 @@ cmake --build build/native/windows-x64-msvc-mtd/Debug --target test_raynium_terr
 ctest --test-dir build/native/windows-x64-msvc-mtd/Debug -R Terrain --output-on-failure
 ```
 
-该目标覆盖七组重排/紧凑掩码、实际 AABB、非有限值、投影/视点、多实例并集，以及稳定排序、完整 VB/IB/绑定身份、状态回收、独立参数展开、合并边界、计数溢出与模式选择，不需要 GPU。
+该目标覆盖七组重排/紧凑掩码、实际 AABB、非有限值、投影/视点、多实例并集，以及稳定排序、完整 VB/IB/绑定身份、状态回收、独立参数展开、合并边界、计数溢出与模式选择。帧上传/录制用例覆盖最终区间索引生成、非零切片偏移、常量绑定复用、direct/indirect 拆分与 GUI 空绘制；probe 检查录制没有映射、Flush、设备访问或参数写入，不需要 GPU。
 
 通用 runtime 测试位于 RadRay 的 `modules/runtime/tests/`，由 `test_radray_runtime` / GTest 注册，
 直接链接 `RadRay::runtime`，不包含 MC bridge。在已准备依赖并完成 configure 的 RadRay checkout 执行：
@@ -249,7 +250,7 @@ ctest --test-dir build/native/windows-x64-msvc-mtd/Debug -R Terrain --output-on-
 ```powershell
 python tools/compile_test_shaders.py --build-dir build/windows-x64-msvc/Debug --config Debug
 cmake --build --preset win-x64-debug --target test_radray_runtime --parallel 8
-ctest --preset win-x64-debug -R 'FrameScheduler|GeometryBufferPool|GeometryUploadGpuTest|MappedUploadBuffer|BatchedBufferUpload|RDG|Material' --output-on-failure
+ctest --preset win-x64-debug -R 'FrameScheduler|GeometryBufferPool|GeometryUploadGpuTest|UploadArena|RDG|Material' --output-on-failure
 ```
 
 RadRay standalone 的测试依赖需在该 checkout 显式准备，包括 GTest；runtime 的 CPU 用例使用 fake，GeometryUploadGpuTest 需要显式准备 shader fixture 和双后端 GPU。

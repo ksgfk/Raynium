@@ -106,9 +106,9 @@ bool MeshPassResources::CreateMaterialBinding(Device& device,const rn_render_fra
     RADRAY_PROFILE_SCOPE_N("Raynium.Material.CreateBinding");
     const auto resolve=[&](uint32_t id,size_t index,TextureView*& view,uint32_t& mips) {
         if(id<16) { RADRAY_ERR_LOG("Material references reserved texture ID: {}",id); return false; }
-        auto owner=uploaded.Find(id);
+        const auto* owner=uploaded.Find(id);
         if(!owner) { RADRAY_ERR_LOG("Material references missing uploaded texture: {}",id); return false; }
-        view=owner->view.get(); mips=owner->desc.mip_levels; binding.textures[index]=std::move(owner); return true;
+        view=owner->texture->GetDefaultView(); mips=owner->desc.mip_levels; binding.textures[index]=owner->texture; return true;
     };
     TextureView* albedo{}; TextureView* light{}; uint32_t albedoMips{},lightMips{};
     if(!resolve(desc.terrain_albedo_texture,0,albedo,albedoMips) || !resolve(desc.terrain_light_texture,1,light,lightMips)) return false;

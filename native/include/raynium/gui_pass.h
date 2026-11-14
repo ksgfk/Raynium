@@ -2,6 +2,7 @@
 #include <radray/types.h>
 #include <raynium/texture_resources.h>
 #include <raynium/shader_pack.h>
+#include <raynium/frame_upload.h>
 #include <span>
 #include <utility>
 
@@ -9,15 +10,21 @@ namespace raynium {
 struct GuiDraw {
     rn_gui_draw desc{};
     radray::Rect scissor{};
-    radray::shared_ptr<UploadedTexture> texture;
+    radray::GpuTexture* texture{}; // Borrowed from the slot cache through command storage reset.
     radray::render::ShaderParameterSet* parameters{};
 };
 struct GuiFrameSlot {
-    radray::unique_ptr<radray::MappedUploadBuffer> vertices,indices,constants;
+    struct TextureParameters {
+        radray::IntrusivePtr<radray::GpuTexture> texture;
+        radray::render::Sampler* sampler{};
+        radray::unique_ptr<radray::render::ShaderParameterSet> parameters;
+    };
     radray::array<radray::unique_ptr<radray::render::ShaderParameterSet>,2> passParameters;
+    radray::array<radray::RDGBufferSlice,2> boundConstants;
     radray::vector<GuiDraw> draws;
-    radray::vector<radray::unique_ptr<radray::render::ShaderParameterSet>> textureParameters;
-    uint64_t constantStride{};
+    radray::vector<TextureParameters> textureParameters;
+    std::span<const radray::byte> vertices;
+    float width{},height{},yDirection{};
     uint32_t vertexCount{};
 };
 class GuiPassResources final {
@@ -26,8 +33,7 @@ public:
     bool CreateSlot(radray::render::Device&,GuiFrameSlot&);
     bool PrepareOutput(radray::render::Device&,radray::render::TextureFormat);
     bool Prepare(radray::render::Device&,GuiFrameSlot&,const UploadedTextures&,const rn_render_frame_desc&,uint32_t width,uint32_t height);
-    void AddPass(radray::RDGBuilder&,GuiFrameSlot&,radray::RDGTextureHandle,radray::render::TextureFormat,uint32_t,uint32_t,
-        std::span<const radray::RDGTextureHandle>);
+    void AddPass(radray::RDGBuilder&,radray::FrameSlot&,GuiFrameSlot&,radray::RDGTextureHandle,uint32_t,uint32_t);
 private:
     struct Program {
         radray::unique_ptr<ShaderProgram> program;

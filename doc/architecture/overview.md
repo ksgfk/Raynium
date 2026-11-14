@@ -30,7 +30,7 @@ Java 复用扁平采集和堆外帧缓冲，按事件同步驻留状态，传递
 | 输出资源 | HWND 交换链与 RDG 每槽动态后备缓冲视图 | `native/src/render_resources.cpp` |
 | MC 地形适配 | 三层原始地形快照、整 section 预算/回退与成功消费后顶点释放，上传预算、纹理变化 | `src/client/java/dev/raynium/client/terrain/` |
 | MC 接管适配 | 无原版设备的身份句柄、CPU 像素、GUI 采集、关卡维护与窗口呈现 | `src/client/java/dev/raynium/client/takeover/`、`src/client/java/dev/raynium/client/mixin/takeover/` |
-| RadRay runtime | 环境/设备、Scene 容器、Mesh Drawing Pipeline、FrameScheduler/FrameSlot/ObjectArena、RenderGraphFramePipeline/RDG；DLL 从锁定源码编译并链接 `RadRay::runtime` | `native/radray.lock.json`、`native/CMakeLists.txt` |
+| RadRay runtime | 环境/设备、Scene 容器、Mesh Drawing Pipeline、FrameScheduler/FrameSlot/PMR、GpuBuffer/GpuTexture/UploadArena、RenderGraphFramePipeline/RDG；DLL 从锁定源码编译并链接 `RadRay::runtime` | `native/radray.lock.json`、`native/CMakeLists.txt` |
 | 工程工具 | 显式依赖准备、CMake 构建、stage、分发和验证 | `tools/`、`gradle/native.gradle` |
 
 ```mermaid

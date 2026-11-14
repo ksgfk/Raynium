@@ -5,47 +5,46 @@
 #include <raynium/terrain_draw.h>
 #include <radray/runtime/frame_slot.h>
 #include <radray/runtime/geometry_buffer_pool.h>
-#include <radray/runtime/upload_buffer.h>
 
 namespace raynium {
 struct TerrainMesh {
     TerrainMeshLayout layout;
     radray::VertexBufferSubAllocation geometry;
-    radray::shared_ptr<radray::IndexBufferSubAllocation> indices;
-    radray::shared_ptr<const TerrainDrawTemplate> draws;
+    radray::IndexBufferSubAllocation indices;
+    TerrainDrawTemplate draws;
     uint32_t stateId{};
 };
 struct TerrainState {
     uint64_t epoch{},nextMaterialKey{};
-    radray::unordered_map<uint64_t,radray::shared_ptr<TerrainMesh>> meshes;
-    radray::shared_ptr<radray::IndexBufferSubAllocation> quadIndices;
+    radray::unordered_map<uint64_t,TerrainMesh> meshes;
+    radray::IndexBufferSubAllocation quadIndices;
     uint32_t quadVertexCapacity{};
-    radray::shared_ptr<MeshMaterialBinding> material;
+    radray::unique_ptr<MeshMaterialBinding> material;
     uint32_t albedo{},light{},anisotropy{};
     TerrainBindingStates bindings{};
 };
+struct GeometryUpload {
+    radray::IntrusivePtr<radray::GpuBuffer> target;
+    uint64_t offset{};
+    radray::RDGUploadSource source;
+};
 struct SlotUploads {
     radray::FrameSlot& frame;
-    radray::BatchedBufferUpload& staging;
-    radray::MappedUploadBuffer& instances;
-    radray::MappedUploadBuffer& indirect;
+    radray::vector<GeometryUpload>& geometry;
     TerrainFrameLists& lists;
     bool useIndirect{};
-    radray::MappedUploadBuffer& textureStaging;
-    radray::vector<TextureCopy>& textureCopies;
 };
-// ABI arrays are copied during PrepareFrame. Lists remain read-only through RunFrame.
+// ABI payloads are borrowed until synchronous RDG Prepare; no borrow is used by Wait or cleanup.
 struct TerrainFrame {
     const TerrainFrameLists* lists{};
-    radray::Nullable<const radray::VertexBufferPool*> vertices{nullptr};
-    radray::Nullable<const radray::IndexBufferPool*> indices{nullptr};
+    radray::vector<GeometryUpload>* geometry{};
+    std::span<const rn_instance> instances;
+    UploadedTextures* textures{};
     rn_render_frame_desc parameters{};
     bool hasTranslucent{};
     radray::render::Texture* color{};
     radray::render::SwapChainSyncObject* waitToDraw{};
     radray::render::SwapChainSyncObject* readyToPresent{};
-    radray::render::Buffer* textureStaging{};
-    const radray::vector<TextureCopy>* textureCopies{};
 };
 class TerrainResidency final {
 public:

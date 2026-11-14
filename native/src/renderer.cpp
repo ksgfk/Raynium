@@ -53,9 +53,8 @@ bool Renderer::Present(Swapchain& target,const rn_render_frame_desc& frame,rn_pr
     auto& slot=_scheduler->BeginFrame();
     TerrainFrame prepared;
     auto uploads=_pipeline->GetUploads(slot);
-    if(!_terrain.PrepareFrame(_uploaded,frame,_pipeline->Resources(),uploads,prepared) ||
-       !_uploaded.Prepare(_device.GetDevice(),uploads.textureStaging,uploads.textureCopies)) return false;
-    prepared.textureStaging=uploads.textureStaging.Get(); prepared.textureCopies=&uploads.textureCopies;
+    if(!_terrain.PrepareFrame(_uploaded,frame,_pipeline->Resources(),uploads,prepared)) return false;
+    prepared.textures=&_uploaded;
     const auto outputDesc=target.Chain().GetDesc();
     if(!_pipeline->PrepareGui(slot,_uploaded,frame,outputDesc.Width,outputDesc.Height)) return false;
     SwapChainAcquireResult acquired{.Status=SwapChainStatus::RetryLater};

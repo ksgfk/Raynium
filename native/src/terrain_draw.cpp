@@ -92,7 +92,7 @@ bool TerrainBindingStates::Acquire(const TerrainDrawTemplate& geometry,const Mes
     _lookup.emplace(key,next);
     if(_freeHead) _freeHead=_entries[next].nextFree;
     else { _states.emplace_back(); _entries.emplace_back(); }
-    _states[next]={geometry.vertices,geometry.indices,&material}; _entries[next]={key,1,0}; id=next; return true;
+    _states[next]={geometry.vertices,geometry.indices,&material,geometry.vertexPage,geometry.indexPage}; _entries[next]={key,1,0}; id=next; return true;
 }
 void TerrainBindingStates::Release(uint32_t id) noexcept {
     if(!id) return;
@@ -144,7 +144,7 @@ bool BuildTerrainDraws(TerrainFrameLists& lists,std::span<const TerrainBindingSt
             result.selectedGroups+=std::popcount(mask);
             if(!mask) continue;
             if(lists.batches.size()==result.firstBatch || !Same(lists.batches.back(),state))
-                lists.batches.push_back({state.vertices,state.indices,state.material,uint32_t(lists.arguments.size()),0});
+                lists.batches.push_back({state.vertices,state.indices,state.material,uint32_t(lists.arguments.size()),0,state.vertexPage,state.indexPage});
             while(mask) {
                 auto bit=uint32_t(std::countr_zero(mask)); mask&=mask-1;
                 const auto& range=item.ranges[bit];
@@ -204,21 +204,22 @@ uint32_t TerrainQuadGroup(std::span<const radray::byte> bytes,size_t first) noex
 }
 }
 bool AnalyzeTerrainMesh(std::span<const radray::byte> bytes,rn_material_mode layer,TerrainMeshLayout& layout,
-    radray::vector<radray::byte>& reordered) {
+    TerrainMeshUpload& upload) {
     if(layer>RN_MATERIAL_TRANSLUCENT || bytes.size()%112 || bytes.size()/28>1048576) {
         RADRAY_ERR_LOG("Invalid terrain quad stream or layer"); return false;
     }
     layout={}; layout.vertexCount=uint32_t(bytes.size()/28); layout.layer=layer; layout.finiteBounds=!bytes.empty();
     layout.minimum.fill(std::numeric_limits<double>::infinity()); layout.maximum.fill(-std::numeric_limits<double>::infinity());
-    radray::array<uint32_t,7> counts{},offsets{};
-    radray::vector<uint32_t> groups(bytes.size()/112);
+    radray::array<uint32_t,7> counts{};
+    upload.source=bytes; upload.groups.resize(bytes.size()/112); upload.offsets={};
+    auto& groups=upload.groups; auto& offsets=upload.offsets;
     for(size_t q=0;q<groups.size();++q) {
         for(size_t v=0;v<4;++v) for(uint32_t a=0;a<3;++a) {
             const double x=TerrainCoordinate(bytes,q*4+v,a);
             if(!std::isfinite(x)) layout.finiteBounds=false;
             layout.minimum[a]=std::min(layout.minimum[a],x); layout.maximum[a]=std::max(layout.maximum[a],x);
         }
-        groups[q]=layer==RN_MATERIAL_TRANSLUCENT?6:TerrainQuadGroup(bytes,q*4); counts[groups[q]]+=4;
+        groups[q]=uint8_t(layer==RN_MATERIAL_TRANSLUCENT?6:TerrainQuadGroup(bytes,q*4)); counts[groups[q]]+=4;
     }
     uint32_t first=0;
     for(uint32_t g=0;g<7;++g) {
@@ -226,9 +227,24 @@ bool AnalyzeTerrainMesh(std::span<const radray::byte> bytes,rn_material_mode lay
         if(counts[g]) { layout.groupBits[g]=1u<<layout.ranges.size(); layout.ranges.push_back({first,counts[g]/4*6,0}); }
         first+=counts[g]/4*6;
     }
-    reordered.resize(bytes.size());
+    return true;
+}
+bool TerrainMeshUpload::Write(std::span<radray::byte> destination) const noexcept {
+    if(destination.size()!=source.size() || groups.size()*112!=source.size()) return false;
+    auto positions=offsets;
     for(size_t q=0;q<groups.size();++q) {
-        auto& offset=offsets[groups[q]]; std::memcpy(reordered.data()+offset,bytes.data()+q*112,112); offset+=112;
+        const auto group=groups[q];
+        if(group>=positions.size() || uint64_t(positions[group])+112>destination.size()) return false;
+        auto& offset=positions[group];
+        std::memcpy(destination.data()+offset,source.data()+q*112,112); offset+=112;
+    }
+    return true;
+}
+bool WriteQuadIndices(std::span<radray::byte> destination,uint32_t vertexCount) noexcept {
+    if(vertexCount%4 || destination.size()!=uint64_t(vertexCount/4)*24) return false;
+    for(uint32_t q=0;q<vertexCount/4;++q) {
+        const uint32_t v=q*4; const radray::array<uint32_t,6> quad{v,v+1,v+2,v+2,v+3,v};
+        std::memcpy(destination.data()+size_t(q)*24,quad.data(),24);
     }
     return true;
 }

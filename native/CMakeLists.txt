@@ -156,6 +156,8 @@ add_library(rayniumruntime SHARED
     src/terrain_residency.cpp include/raynium/terrain_residency.h
     src/terrain_draw.cpp include/raynium/terrain_draw.h
     src/solid_pipeline.cpp include/raynium/solid_pipeline.h
+    src/frame_upload.cpp include/raynium/frame_upload.h
+    src/frame_record.cpp include/raynium/frame_record.h
     src/render_resources.cpp include/raynium/render_resources.h
     src/device_info.cpp
     src/texture_resources.cpp include/raynium/texture_resources.h
@@ -182,7 +184,7 @@ if(RAYNIUM_BUILD_TESTS)
     find_package(GTest CONFIG REQUIRED)
     enable_testing()
     include(GoogleTest)
-    add_executable(test_raynium_terrain tests/test_terrain_draw.cpp src/terrain_draw.cpp)
+    add_executable(test_raynium_terrain tests/test_terrain_draw.cpp tests/test_frame_record.cpp src/terrain_draw.cpp src/frame_upload.cpp src/frame_record.cpp)
     target_compile_features(test_raynium_terrain PRIVATE cxx_std_20)
     target_include_directories(test_raynium_terrain PRIVATE include)
     target_compile_options(test_raynium_terrain PRIVATE /W4 /permissive- /Zc:preprocessor /utf-8)
