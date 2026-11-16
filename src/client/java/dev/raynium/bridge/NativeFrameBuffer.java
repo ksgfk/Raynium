@@ -7,7 +7,7 @@ import static java.lang.foreign.ValueLayout.*;
 
 /** Render-thread scratch storage. Reserve all capacities before writing; pointers expire on growth or close. */
 public final class NativeFrameBuffer implements AutoCloseable {
-    private static final class Storage implements AutoCloseable {
+    static final class Storage implements AutoCloseable {
         private Arena arena;
         MemorySegment segment=MemorySegment.NULL;
         void reserve(long bytes) {
@@ -27,10 +27,11 @@ public final class NativeFrameBuffer implements AutoCloseable {
         @Override public void close() { if(arena!=null) { arena.close(); arena=null; segment=MemorySegment.NULL; } }
     }
     private final Arena fixed=Arena.ofConfined();
-    private final MemorySegment descriptor=fixed.allocate(328,8);
+    private final MemorySegment descriptor=fixed.allocate(408,8);
     private final Storage[] arrays=new Storage[5];
     private final Storage upload=new Storage();
     private final Storage guiVertices=new Storage(),guiDraws=new Storage();
+    private final NativeSceneFrame scene=new NativeSceneFrame();
     private int guiVertexCount,guiDrawCount;
     private final int[] counts=new int[5];
     private long uploadCursor;
@@ -45,6 +46,7 @@ public final class NativeFrameBuffer implements AutoCloseable {
         arrays[3].reserve(24L*Math.max(1024,visibleCapacity)); arrays[4].reserve(16L*Math.max(1024,visibleCapacity));
         upload.reserve(uploadBytes); Arrays.fill(counts,0); uploadCursor=0; descriptor.fill((byte)0);
         guiVertexCount=guiDrawCount=0;
+        scene.begin();
     }
     public void terrain(int albedo,int light,int anisotropy) {
         descriptor.set(JAVA_INT,84,albedo); descriptor.set(JAVA_INT,88,light); descriptor.set(JAVA_INT,92,anisotropy);
@@ -89,7 +91,7 @@ public final class NativeFrameBuffer implements AutoCloseable {
     public int visibleCount() { return counts[3]; }
     public void beginGui(int vertices,int draws) {
         if(closed) throw new IllegalStateException("Frame buffer is closed");
-        guiVertices.reserve(Math.multiplyExact(24L,vertices)); guiDraws.reserve(Math.multiplyExact(40L,draws));
+        guiVertices.reserve(Math.multiplyExact(24L,vertices)); guiDraws.reserve(Math.multiplyExact(56L,draws));
         guiVertexCount=guiDrawCount=0;
     }
     public void guiVertex(float x,float y,float z,float u,float v,int color) {
@@ -98,20 +100,30 @@ public final class NativeFrameBuffer implements AutoCloseable {
         s.set(JAVA_FLOAT,offset,x); s.set(JAVA_FLOAT,offset+4,y); s.set(JAVA_FLOAT,offset+8,z);
         s.set(JAVA_FLOAT,offset+12,u); s.set(JAVA_FLOAT,offset+16,v); s.set(JAVA_INT,offset+20,color);
     }
+    public int guiDrawCount() { return guiDrawCount; }
     public int guiVertexCount() { return guiVertexCount; }
+    public NativeSceneFrame scene() { return scene; }
     public void guiDraw(int pipeline,int texture,int samplerBits,int first,int count,int x,int y,int width,int height) {
-        guiDraws.reserve(Math.multiplyExact(40L,guiDrawCount+1),true);
-        long offset=guiDrawCount++*40L; var s=guiDraws.segment;
+        guiDraw(pipeline,texture,samplerBits,first,count,x,y,width,height,0,0,1000,1);
+    }
+    public void guiDraw(int pipeline,int texture,int samplerBits,int first,int count,int x,int y,int width,int height,
+            int baseMip,int mipCount,float maxLod,int anisotropy) {
+        if(baseMip<0 || mipCount<0 || !Float.isFinite(maxLod) || maxLod<0 || anisotropy<1) throw new IllegalArgumentException("Invalid GUI texture sampling");
+        guiDraws.reserve(Math.multiplyExact(56L,guiDrawCount+1),true);
+        long offset=guiDrawCount++*56L; var s=guiDraws.segment;
         s.set(JAVA_INT,offset,pipeline); s.set(JAVA_INT,offset+4,texture); s.set(JAVA_INT,offset+8,samplerBits);
         s.set(JAVA_INT,offset+12,first); s.set(JAVA_INT,offset+16,count); s.set(JAVA_INT,offset+20,x);
         s.set(JAVA_INT,offset+24,y); s.set(JAVA_INT,offset+28,width); s.set(JAVA_INT,offset+32,height); s.set(JAVA_INT,offset+36,0);
+        s.set(JAVA_INT,offset+40,baseMip); s.set(JAVA_INT,offset+44,mipCount);
+        s.set(JAVA_FLOAT,offset+48,maxLod); s.set(JAVA_INT,offset+52,anisotropy);
     }
     private static void floats(MemorySegment target,long offset,float[] values,int count) {
         if(values.length!=count) throw new IllegalArgumentException("Expected "+count+" floats");
         for(int i=0;i<count;i++) target.set(JAVA_FLOAT,offset+i*4L,values[i]);
     }
     public MemorySegment finish(NativeRenderer.Frame frame) {
-        var s=descriptor; s.set(JAVA_INT,0,328); s.set(JAVA_INT,4,frame.flags);
+        var s=descriptor; s.set(JAVA_INT,0,408); s.set(JAVA_INT,4,frame.flags);
+        s.set(JAVA_INT,400,frame.renderWidth); s.set(JAVA_INT,404,frame.renderHeight);
         s.set(JAVA_LONG,8,frame.epoch); s.set(JAVA_LONG,16,frame.outputSequence);
         for(int i=0;i<5;i++) {
             s.set(ADDRESS,24+i*8L,counts[i]==0?MemorySegment.NULL:arrays[i].segment);
@@ -127,6 +139,7 @@ public final class NativeFrameBuffer implements AutoCloseable {
         if(frame.clearColor==null) {
             for(int i=0;i<3;i++) s.set(JAVA_FLOAT,312+i*4L,frame.fogColor[i]); s.set(JAVA_FLOAT,324,0);
         } else floats(s,312,frame.clearColor,4);
+        scene.finish(s);
         return s;
     }
     MemorySegment marshal(NativeRenderer.Frame frame) {
@@ -149,6 +162,6 @@ public final class NativeFrameBuffer implements AutoCloseable {
     }
     @Override public void close() {
         if(closed) return;
-        for(var storage:arrays) storage.close(); upload.close(); guiVertices.close(); guiDraws.close(); fixed.close(); closed=true;
+        for(var storage:arrays) storage.close(); upload.close(); guiVertices.close(); guiDraws.close(); scene.close(); fixed.close(); closed=true;
     }
 }

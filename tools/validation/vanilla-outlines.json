@@ -1,0 +1,33 @@
+{
+  "defaults": {
+    "camera": {"x": 0.5, "y": 180, "z": 9.5, "yaw": 180, "pitch": 0},
+    "screen": "none",
+    "hideHud": false,
+    "oit": false,
+    "wireframe": false,
+    "gameTime": 6000,
+    "animationMillis": 10000,
+    "partialTick": 0,
+    "rain": 0,
+    "thunder": 0,
+    "particles": [],
+    "vignetteBrightness": 0.6,
+    "clearNotifications": true,
+    "requiredEntities": ["minecraft:falling_block"],
+    "settleSeconds": 3
+  },
+  "scenes": [
+    {
+      "name": "high-contrast-stone",
+      "commands": [
+        "kill @e[type=!minecraft:player]", "weather clear", "time set 6000", "gamemode creative",
+        "fill -8 179 -8 8 179 10 minecraft:smooth_stone", "setblock 0 181 6 minecraft:stone",
+        "summon minecraft:falling_block -2 181 6 {NoGravity:1b,Time:1,Glowing:1b,BlockState:\"minecraft:stone\"}",
+        "tick freeze"
+      ]
+    },
+    {"name": "high-contrast-stone-oit", "oit": true},
+    {"name": "high-contrast-glass", "commands": ["setblock 0 181 6 minecraft:blue_stained_glass"]},
+    {"name": "high-contrast-glass-oit", "oit": true}
+  ]
+}

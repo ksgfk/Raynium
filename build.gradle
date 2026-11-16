@@ -27,9 +27,20 @@ loom {
             runDir = gameRunDir
             programArg '--gameDir'
             programArg file(gameRunDir).absolutePath
+            if (providers.gradleProperty('gameUsername').isPresent()) {
+                def username = providers.gradleProperty('gameUsername').get()
+                if (!(username ==~ /[a-zA-Z0-9_]{1,16}/)) {
+                    throw new GradleException('gameUsername must contain 1–16 letters, digits or underscores')
+                }
+                programArg '--username'
+                programArg username
+            }
             if (providers.gradleProperty('quickPlayWorld').isPresent()) {
                 programArg '--quickPlaySingleplayer'
                 programArg providers.gradleProperty('quickPlayWorld').get()
+            }
+            if (providers.gradleProperty('captureTracyImages').getOrElse('false').toBoolean()) {
+                programArg '--tracy'
             }
             vmArg '--enable-native-access=ALL-UNNAMED'
             if (providers.gradleProperty('jfrFile').isPresent()) {
@@ -39,6 +50,9 @@ loom {
             property 'raynium.rhi.backend', providers.gradleProperty('rhiBackend').getOrElse('d3d12')
             property 'raynium.rhi.validation', providers.gradleProperty('rhiValidation').getOrElse('false')
             property 'raynium.terrain.submission', providers.gradleProperty('terrainSubmission').getOrElse('auto')
+            if (providers.gradleProperty('validationConfig').isPresent()) {
+                property 'raynium.validation.config', file(providers.gradleProperty('validationConfig').get()).absolutePath
+            }
         }
         clientNative {
             inherit client
@@ -66,6 +80,28 @@ loom {
             property 'raynium.native.dir', layout.buildDirectory.dir(
                 "native/stage/windows-x86_64/${providers.gradleProperty('nativeConfig').getOrElse('Debug')}"
             ).get().asFile.absolutePath
+        }
+        clientReference {
+            inherit client
+            getJvmArguments().set(client.getJvmArguments())
+            configName = 'Minecraft Client (Vanilla Reference)'
+            property 'raynium.reference', 'true'
+            programArg '--graphicsBackend'
+            programArg 'VULKAN'
+            runDir = gameRunDir
+            programArg '--gameDir'
+            programArg file(gameRunDir).absolutePath
+            if (providers.gradleProperty('benchmarkConfig').isPresent()) {
+                if (!providers.gradleProperty('benchmarkRunDir').isPresent()) {
+                    throw new GradleException('benchmarkConfig requires benchmarkRunDir')
+                }
+                runDir = file(providers.gradleProperty('benchmarkRunDir').get()).absolutePath
+                property 'raynium.benchmark.config', file(providers.gradleProperty('benchmarkConfig').get()).absolutePath
+                programArg '--gameDir'
+                programArg file(providers.gradleProperty('benchmarkRunDir').get()).absolutePath
+                programArg '--quickPlaySingleplayer'
+                programArg 'benchmark'
+            }
         }
         remove server
     }
@@ -108,3 +144,10 @@ tasks.named('test', Test) {
 }
 
 apply from: 'gradle/native.gradle'
+
+tasks.register('exportVanillaPipelines', JavaExec) {
+    dependsOn tasks.named('testClasses')
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.raynium.tools.ExportVanillaPipelines'
+    args layout.buildDirectory.file('vanilla/pipelines.json').get().asFile.absolutePath
+}

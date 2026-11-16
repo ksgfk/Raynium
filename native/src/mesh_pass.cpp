@@ -10,7 +10,7 @@ namespace raynium {
 using namespace radray::render;
 namespace {
 radray::unique_ptr<GraphicsPipelineState> CreateTerrainPipeline(Device& device,const ShaderProgram& program,
-    Shader* vs,Shader* ps,PipelineLayout* layout,uint32_t i,TextureFormat format,bool flipY=false) {
+    Shader* vs,Shader* ps,PipelineLayout* layout,uint32_t i,TextureFormat format,bool flipY=false,bool wireframe=false) {
     const VertexBufferLayout layouts[]{{0,28,VertexStepMode::Vertex},{1,16,VertexStepMode::Instance}};
     const VertexAttribute attributes[]{
         {0,0,"POSITION",0,VertexFormat::FLOAT32X3,0},{0,12,"COLOR",0,VertexFormat::UNORM8X4,1},
@@ -21,6 +21,7 @@ radray::unique_ptr<GraphicsPipelineState> CreateTerrainPipeline(Device& device,c
     const bool screen=i>=OitCull,alpha=i==OitBounds || i==OitTransmittance;
     auto primitive=PrimitiveState::Default(); primitive.Cull=screen?CullMode::None:CullMode::Back; primitive.UnclippedDepth=false;
     primitive.FaceClockwise=flipY?FrontFace::CCW:FrontFace::CW;
+    primitive.Poly=wireframe?PolygonMode::Line:PolygonMode::Fill;
     auto depth=DepthStencilState::Default(); depth.Format=TextureFormat::D32_FLOAT;
     depth.DepthTestEnable=true; depth.DepthWriteEnable=i<=Translucent || screen;
     depth.DepthCompare=i==OitComposite?CompareFunction::Always:CompareFunction::GreaterEqual;
@@ -86,18 +87,23 @@ bool MeshPassResources::Create(Device& device,std::span<const radray::byte> shad
         if(i>=OitTransmittance) groups.push_back({2,p.oitGroupLayout.get()});
         program.pipelineLayout=device.CreatePipelineLayout({groups,{}}).Release();
         if(!program.pipelineLayout) { RADRAY_ERR_LOG("Cannot create terrain pipeline layout"); return false; }
-        program.pipeline=CreateTerrainPipeline(device,*program.program,program.vs.get(),program.ps.get(),program.pipelineLayout.get(),i,TextureFormat::BGRA8_UNORM);
+        program.pipeline=CreateTerrainPipeline(device,*program.program,program.vs.get(),program.ps.get(),program.pipelineLayout.get(),i,TextureFormat::RGBA8_UNORM);
         if(!program.pipeline) { RADRAY_ERR_LOG("Cannot create terrain pipeline: {}",TerrainPrograms[i]); return false; }
         if(!screen) {
-            program.flippedPipeline=CreateTerrainPipeline(device,*program.program,program.vs.get(),program.ps.get(),program.pipelineLayout.get(),i,TextureFormat::BGRA8_UNORM,true);
+            program.flippedPipeline=CreateTerrainPipeline(device,*program.program,program.vs.get(),program.ps.get(),program.pipelineLayout.get(),i,TextureFormat::RGBA8_UNORM,true);
             if(!program.flippedPipeline) { RADRAY_ERR_LOG("Cannot create reflected terrain pipeline"); return false; }
         }
+    }
+    const auto& solid=p.programs[Solid];
+    for(uint32_t i=0;i<2;++i) {
+        p.wireframe[i]=CreateTerrainPipeline(device,*solid.program,solid.vs.get(),solid.ps.get(),solid.pipelineLayout.get(),Solid,TextureFormat::RGBA8_UNORM,i!=0,true);
+        if(!p.wireframe[i]) { p.wireframe={}; RADRAY_INFO_LOG("Optional terrain wireframe is unavailable on this device"); break; }
     }
     output=radray::unique_ptr<MeshPassResources>(new MeshPassResources(std::move(objects))); return true;
 }
 bool MeshPassResources::PrepareOutput(Device& device,TextureFormat format) {
-    if(format!=TextureFormat::BGRA8_UNORM || !device.QueryTextureSupport({TextureDimension::Dim2D,format,TextureUse::RenderTarget}).Supported) {
-        RADRAY_ERR_LOG("BGRA8 output is unsupported"); return false;
+    if(format!=TextureFormat::RGBA8_UNORM || !device.QueryTextureSupport({TextureDimension::Dim2D,format,TextureUse::RenderTarget}).Supported) {
+        RADRAY_ERR_LOG("RGBA8 scene output is unsupported"); return false;
     }
     return true;
 }
@@ -108,6 +114,7 @@ bool MeshPassResources::CreateMaterialBinding(Device& device,const rn_render_fra
         if(id<16) { RADRAY_ERR_LOG("Material references reserved texture ID: {}",id); return false; }
         const auto* owner=uploaded.Find(id);
         if(!owner) { RADRAY_ERR_LOG("Material references missing uploaded texture: {}",id); return false; }
+        if(owner->desc.array_layers!=1 || owner->desc.format==RN_PIXEL_DEPTH32F) { RADRAY_ERR_LOG("Terrain requires a color 2D texture: {}",id); return false; }
         view=owner->texture->GetDefaultView(); mips=owner->desc.mip_levels; binding.textures[index]=owner->texture; return true;
     };
     TextureView* albedo{}; TextureView* light{}; uint32_t albedoMips{},lightMips{};

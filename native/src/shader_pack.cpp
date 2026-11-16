@@ -73,6 +73,17 @@ std::string_view ShaderProgram::Entry(ShaderStage stage) const {
     for(const auto& entry:_artifact.Entries()) if(entry.Stage==uint8_t(stage)) return *_artifact.GetName(entry.Name);
     return {};
 }
+bool ValidateOutputShader(const ShaderArtifactView& artifact) {
+    const auto texture=artifact.FindBinding("SceneColor");
+    if(artifact.Entries().size()!=2 || !artifact.FindStageBytecode(ShaderStage::Vertex) || !artifact.FindStageBytecode(ShaderStage::Pixel) ||
+       !artifact.VertexInputs().empty() || !artifact.RootConstants().empty() || !artifact.Samplers().empty() ||
+       !artifact.SerializedRootSignature().empty() || artifact.Bindings().size()!=1 || !texture ||
+       texture->Record.Type!=uint32_t(ShaderBindingKind::Texture) || texture->Record.Group || texture->Record.Binding ||
+       texture->Record.Count!=1 || texture->Record.StageMask!=2 || texture->Record.Placement!=uint32_t(ShaderBindingPlacement::Table)) {
+        RADRAY_ERR_LOG("Output shader interface is incompatible"); return false;
+    }
+    return true;
+}
 bool ValidateGuiShader(const ShaderArtifactView& artifact,std::string_view program) {
 
     const bool textured=program!="gui_color",text=program=="gui_text",vk=artifact.Envelope().Target==uint8_t(ShaderTarget::SPIRV);

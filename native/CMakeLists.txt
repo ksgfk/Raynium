@@ -162,6 +162,8 @@ add_library(rayniumruntime SHARED
     src/device_info.cpp
     src/texture_resources.cpp include/raynium/texture_resources.h
     src/gui_pass.cpp include/raynium/gui_pass.h
+    src/output_pass.cpp include/raynium/output_pass.h
+    src/scene_pass.cpp include/raynium/scene_pass.h src/scene_catalog.inc
     src/mesh_pass.cpp include/raynium/mesh_pass.h
     src/shader_pack.cpp include/raynium/shader_pack.h)
 target_compile_features(rayniumruntime PRIVATE cxx_std_20)

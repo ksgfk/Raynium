@@ -29,12 +29,14 @@ final class NativeBindings {
     private final MethodHandle destroy;
     final MethodHandle createRenderer, destroyRenderer;
     final MethodHandle queryDeviceInfo,createSwapchain,resizeSwapchain,destroySwapchain,presentFrame;
-    final MethodHandle createTexture,uploadTexture,destroyTexture;
+    final MethodHandle createTexture,uploadTexture,destroyTexture,pollCapture,requestCapture;
+    final MethodHandle createSceneBuffer,uploadSceneBuffer,destroySceneBuffer;
 
     NativeBindings(SymbolLookup library) {
         Linker linker = Linker.nativeLinker();
         FunctionDescriptor scalar = FunctionDescriptor.of(ValueLayout.JAVA_INT);
         version = bind(linker, library, "rn_get_abi_version", scalar);
+        requireCurrentVersion();
         query = bind(linker, library, "rn_query_abi", FunctionDescriptor.of(ValueLayout.JAVA_INT,
                 ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
         initEnvironment = bind(linker, library, "rn_init_env",
@@ -53,15 +55,30 @@ final class NativeBindings {
         destroySwapchain=bind(linker,library,"rn_destroy_swapchain",signature(1));
         presentFrame=bind(linker,library,"rn_present_frame",signature(4));
         createTexture=bind(linker,library,"rn_create_texture",signature(2));
+        createSceneBuffer=bind(linker,library,"rn_create_scene_buffer",signature(2));
+        uploadSceneBuffer=bind(linker,library,"rn_upload_scene_buffer",signature(2));
+        destroySceneBuffer=bind(linker,library,"rn_destroy_scene_buffer",FunctionDescriptor.of(ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
         uploadTexture=bind(linker,library,"rn_upload_texture",signature(2));
         destroyTexture=bind(linker,library,"rn_destroy_texture",FunctionDescriptor.of(ValueLayout.JAVA_INT,
             ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
+        pollCapture=bind(linker,library,"rn_poll_capture",FunctionDescriptor.of(ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,ValueLayout.JAVA_LONG,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_LONG));
+        requestCapture=bind(linker,library,"rn_request_capture",signature(2));
+    }
+
+    private int requireCurrentVersion() {
+        try {
+            int abi=(int)version.invokeExact();
+            if(abi!=NativeManifest.ABI_VERSION) throw new IllegalStateException("Native ABI version mismatch: "+abi+"; required "+NativeManifest.ABI_VERSION);
+            return abi;
+        } catch(RuntimeException | Error failure) { throw failure; }
+        catch(Throwable failure) { throw new IllegalStateException("Cannot query the Raynium ABI version",failure); }
     }
 
     int inspect(NativeManifest expected) {
         try (Arena scratch = Arena.ofConfined()) {
-            int abi = (int) version.invokeExact();
-            if (abi != NativeManifest.ABI_VERSION || abi != expected.abiVersion()) {
+            int abi = requireCurrentVersion();
+            if (abi != expected.abiVersion()) {
                 throw new IllegalStateException("Native ABI version mismatch: " + abi);
             }
             MemorySegment info = scratch.allocate(abiLayout);

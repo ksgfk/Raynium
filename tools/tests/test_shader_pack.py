@@ -1,4 +1,6 @@
 import struct
+import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -13,7 +15,12 @@ class ShaderPackTest(unittest.TestCase):
             'src/client/resources/assets/raynium/shaderpacks/default.rnsp').read_bytes())
 
     def test_dual_backend_pack(self):
-        self.assertEqual({(name.encode(), target) for name in PROGRAMS for target in (0, 1)}, verify_shader_pack(self.data))
+        interfaces = json.loads((Path(__file__).resolve().parents[2] /
+            'src/client/resources/assets/raynium/scene-interfaces.json').read_text(encoding='utf-8'))
+        programs = set(PROGRAMS) | {entry['program'] for entry in interfaces}
+        post_catalog=(Path(__file__).resolve().parents[2]/'native/src/post_catalog.inc').read_text(encoding='utf-8')
+        programs.update(re.findall(r'result.program="([a-z0-9_]+)"',post_catalog))
+        self.assertEqual({(name.encode(), target) for name in programs for target in (0, 1)}, verify_shader_pack(self.data))
 
     def test_bad_containers(self):
         for mutation in ('version', 'truncated', 'range', 'duplicate', 'missing', 'checksum', 'identity'):

@@ -13,7 +13,7 @@ import java.util.OptionalDouble;
 import java.util.function.Supplier;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
-@Mixin(targets={"net.minecraft.client.renderer.Lightmap","net.minecraft.client.renderer.texture.DynamicTexture","net.minecraft.client.renderer.texture.TextureAtlas","net.minecraft.client.gui.font.FontTexture","net.minecraft.client.renderer.texture.ReloadableTexture","net.minecraft.client.renderer.texture.MipmappedTexture","net.minecraft.client.resources.palette.PalettedTextureManager$AtlasTexture"})
+@Mixin(targets={"net.minecraft.client.gui.render.GuiItemAtlas","net.minecraft.client.renderer.Lightmap","net.minecraft.client.renderer.texture.DynamicTexture","net.minecraft.client.renderer.texture.TextureAtlas","net.minecraft.client.gui.font.FontTexture","net.minecraft.client.renderer.texture.ReloadableTexture","net.minecraft.client.renderer.texture.MipmappedTexture","net.minecraft.client.resources.palette.PalettedTextureManager$AtlasTexture"})
 abstract class TextureViewMixin {
     @WrapOperation(method={"<init>","*"},at=@At(value="INVOKE",target="Lcom/mojang/renderpearl/api/device/GpuDevice;createTextureView(Lcom/mojang/renderpearl/api/textures/GpuTexture;)Lcom/mojang/renderpearl/api/textures/GpuTextureView;"))
     private static GpuTextureView raynium$view(GpuDevice device,GpuTexture texture,Operation<GpuTextureView> original) { return TakeoverHandles.view(texture,0,texture.getMipLevels()); }

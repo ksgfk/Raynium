@@ -12,10 +12,21 @@ public final class TakeoverAtlas {
     private final List<Animation> animations=new ArrayList<>();
     private static final class Animation {
         final TextureAtlasSprite sprite;
+        final byte[][] pixels;
         int frame,subFrame;
-        Animation(TextureAtlasSprite sprite) { this.sprite=sprite; }
+        Animation(TextureAtlasSprite sprite,int mips) {
+            this.sprite=sprite; pixels=new byte[mips][];
+            for(int mip=0;mip<mips;mip++) pixels[mip]=new byte[Math.multiplyExact(
+                Math.multiplyExact((sprite.contents().width()+2*sprite.padding)>>mip,(sprite.contents().height()+2*sprite.padding)>>mip),4)];
+        }
         boolean tick() {
             var info=sprite.contents().animatedTexture;
+            long phase=dev.raynium.client.validation.VisualValidation.spritePhase(info.frames);
+            if(phase>=0) {
+                int next=(int)(phase>>>32),sub=(int)phase;
+                boolean changed=info.frames.get(frame).index()!=info.frames.get(next).index() || (info.interpolateFrames && subFrame!=sub);
+                frame=next; subFrame=sub; return changed;
+            }
             var current=info.frames.get(frame);
             subFrame++;
             boolean changed=false;
@@ -28,7 +39,7 @@ public final class TakeoverAtlas {
     }
     public TakeoverAtlas(TextureAtlas atlas,List<TextureAtlasSprite> sprites) {
         texture=((TakeoverHandles.Texture)atlas.getTexture()).nativeTexture();
-        for(var sprite:sprites) if(sprite.isAnimated()) animations.add(new Animation(sprite));
+        for(var sprite:sprites) if(sprite.isAnimated()) animations.add(new Animation(sprite,texture.mipLevels()));
         for(int mip=0;mip<texture.mipLevels();mip++) {
             int width=Math.max(1,texture.width()>>mip),height=Math.max(1,texture.height()>>mip);
             byte[] bytes=new byte[Math.multiplyExact(Math.multiplyExact(width,height),4)];
@@ -55,7 +66,7 @@ public final class TakeoverAtlas {
             float progress=info.interpolateFrames?(int)(((float)animation.subFrame/info.frames.get(animation.frame).time())*1000)/1000f:0;
             for(int mip=0;mip<texture.mipLevels();mip++) {
                 int width=(sprite.contents().width()+2*sprite.padding)>>mip,height=(sprite.contents().height()+2*sprite.padding)>>mip;
-                byte[] bytes=new byte[Math.multiplyExact(Math.multiplyExact(width,height),4)];
+                byte[] bytes=animation.pixels[mip];
                 stitch(sprite,mip,current,next,progress,MemorySegment.ofArray(bytes),width,0,0);
                 texture.upload(mip,sprite.getX()>>mip,sprite.getY()>>mip,width,height,bytes);
             }

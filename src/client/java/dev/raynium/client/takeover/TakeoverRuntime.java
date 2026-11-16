@@ -25,8 +25,19 @@ public final class TakeoverRuntime {
     private static long preparationStarted;
     private static GpuSurface.Configuration configuration;
     private static boolean suboptimal,levelFrame;
+    private static final java.util.ArrayList<dev.raynium.client.takeover.scene.SceneInput> sceneInputs=new java.util.ArrayList<>();
+    public static void retain(dev.raynium.client.takeover.scene.SceneInput features) { sceneInputs.add(features); }
+    private static void releaseSceneInputs() { for(var input:sceneInputs) input.release(); sceneInputs.clear(); }
     private static final dev.raynium.client.terrain.TakeoverTerrain terrain=new dev.raynium.client.terrain.TakeoverTerrain();
-    public interface FrameSource { void raynium$prepare(); }
+    public interface FrameSource { void raynium$prepare(); void raynium$prepareWorldOnly(); }
+    public static void panorama(net.minecraft.client.renderer.GameRenderer game) {
+        dev.raynium.client.terrain.TerrainCapture.beginFrame();
+        ((FrameSource)game).raynium$prepareWorldOnly();
+        frame.renderWidth=game.gameRenderState().windowRenderState.width;
+        frame.renderHeight=game.gameRenderState().windowRenderState.height;
+        frame.flags|=NativeRenderer.WORLD_ONLY;
+        present();
+    }
     private TakeoverRuntime() {}
     public static void install(NativeEnvironment owner,Logger log) { environment=owner; logger=org.slf4j.LoggerFactory.getLogger("raynium.takeover"); }
     public static DeviceInfo deviceInfo() {
@@ -45,6 +56,7 @@ public final class TakeoverRuntime {
         return renderer;
     }
     public static boolean ready() { return renderer!=null && swapchain!=null; }
+    public static boolean wireframeAvailable() { return renderer!=null && runtime.deviceInfo().wireframe(); }
     public static void createSurface(long window) {
         deviceInfo();
         renderer=runtime.createRenderer(dev.raynium.client.terrain.BuiltinShaderPack.load());
@@ -62,6 +74,7 @@ public final class TakeoverRuntime {
     }
     public static NativeFrameBuffer frameBuffer() { return renderer().frameBuffer(); }
     public static void beginFrame(net.minecraft.client.renderer.state.GameRenderState state) {
+        releaseSceneInputs();
         frames++;
         levelFrame=state.shouldRenderLevel;
         frameEvent=TerrainFrameEvent.start();
@@ -78,6 +91,7 @@ public final class TakeoverRuntime {
     public static void prepareTerrain(net.minecraft.client.Minecraft client) { terrain.prepare(renderer,client,frame); }
     public static void present() {
         try {
+            TakeoverScreenshots.beforePresent(renderer,frame);
             long nativeStarted=System.nanoTime();
             var outcome=renderer.presentPrepared(swapchain,frame);
             if(frameEvent!=null) {
@@ -88,14 +102,16 @@ public final class TakeoverRuntime {
                 frameEvent.end(); frameEvent.commit(); frameEvent=null;
             }
             terrain.commit();
-            if(levelFrame) dev.raynium.client.benchmark.BenchmarkSession.nativeFrame();
+            if(levelFrame) dev.raynium.client.benchmark.BenchmarkSession.nativeFrame(swapchain,frame.outputSequence,nativeStarted-preparationStarted,System.nanoTime()-nativeStarted);
             if(outcome==NativeSwapchain.Presentation.PRESENTED) presented++; else skipped++;
             statistics();
             suboptimal=outcome==NativeSwapchain.Presentation.RECREATE;
+            TakeoverScreenshots.poll(renderer);
         } catch(RuntimeException | Error failure) {
+            TakeoverScreenshots.clear();
             try { close(); } catch(RuntimeException | Error cleanup) { failure.addSuppressed(cleanup); }
             throw failure;
-        }
+        } finally { releaseSceneInputs(); }
     }
     public static long levelFrames() { return levelFrames; }
     public static long presented() { return presented; }
@@ -128,10 +144,31 @@ public final class TakeoverRuntime {
         configuration=request;
     }
     public static void close() {
+        TakeoverTracyImages.close();
+        releaseSceneInputs();
         dev.raynium.client.terrain.TerrainCapture.activate(false);
-        if(swapchain!=null) { swapchain.close(); swapchain=null; }
-        if(renderer!=null) { renderer.close(); renderer=null; }
-        if(runtime!=null) { runtime.close(); runtime=null; }
-        if(environment!=null) { environment.close(); environment=null; }
+        Throwable failure=cleanup(null,()-> {
+            if(renderer!=null && swapchain!=null && TakeoverScreenshots.hasRequests()) {
+                var capture=new NativeRenderer.Frame(); capture.epoch=frame==null?1:frame.epoch; capture.outputSequence=++sequence;
+                TakeoverScreenshots.beforePresent(renderer,capture); renderer.present(swapchain,capture);
+            }
+        });
+        failure=cleanup(failure,()-> { if(swapchain!=null) { swapchain.close(); swapchain=null; } });
+        if(failure==null) failure=cleanup(null,()-> { if(renderer!=null) TakeoverScreenshots.poll(renderer); });
+        TakeoverScreenshots.clear();
+        failure=cleanup(failure,dev.raynium.client.takeover.scene.ScenePanorama::close);
+        failure=cleanup(failure,()-> { if(renderer!=null) { renderer.close(); renderer=null; } });
+        failure=cleanup(failure,()-> { if(runtime!=null) { runtime.close(); runtime=null; } });
+        failure=cleanup(failure,()-> { if(environment!=null) { environment.close(); environment=null; } });
+        if(failure instanceof RuntimeException exception) throw exception;
+        if(failure instanceof Error error) throw error;
+    }
+    private static Throwable cleanup(Throwable previous,Runnable action) {
+        try { action.run(); }
+        catch(RuntimeException | Error failure) {
+            if(previous==null) return failure;
+            previous.addSuppressed(failure);
+        }
+        return previous;
     }
 }

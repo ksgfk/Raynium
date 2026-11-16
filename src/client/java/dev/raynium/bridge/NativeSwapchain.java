@@ -12,9 +12,9 @@ public final class NativeSwapchain implements AutoCloseable {
     final NativeRenderer owner;
     private final long hwnd;
     private final Arena arena=Arena.ofConfined();
-    final MemorySegment result=arena.allocate(16,8);
+    final MemorySegment result=arena.allocate(160,8);
     MemorySegment handle=MemorySegment.NULL;
-    NativeSwapchain(NativeRenderer owner,long hwnd) { this.owner=owner; this.hwnd=hwnd; result.set(JAVA_INT,0,16); }
+    NativeSwapchain(NativeRenderer owner,long hwnd) { this.owner=owner; this.hwnd=hwnd; result.set(JAVA_INT,0,160); }
     static MemorySegment descriptor(Arena arena,long hwnd,int width,int height,PresentMode mode) {
         var desc=arena.allocate(24,8); desc.set(JAVA_INT,0,24); desc.set(JAVA_INT,4,width); desc.set(JAVA_INT,8,height);
         desc.set(JAVA_INT,12,java.util.Objects.requireNonNull(mode).ordinal()); desc.set(JAVA_LONG,16,hwnd); return desc;
@@ -26,9 +26,13 @@ public final class NativeSwapchain implements AutoCloseable {
         }
     }
     public long acquireTimeouts() { checkOpen(); return result.get(JAVA_LONG,8); }
+    public long measurement(int index) {
+        checkOpen(); if(index<0 || index>=18) throw new IndexOutOfBoundsException(index);
+        return result.get(JAVA_LONG,16+index*8L);
+    }
     Presentation presentation() {
         int value=result.get(JAVA_INT,4);
-        if(result.get(JAVA_INT,0)!=16 || value<0 || value>=OUTCOMES.length) throw new IllegalStateException("Invalid native presentation result");
+        if(result.get(JAVA_INT,0)!=160 || value<0 || value>=OUTCOMES.length) throw new IllegalStateException("Invalid native presentation result");
         return OUTCOMES[value];
     }
     void checkOpen() {

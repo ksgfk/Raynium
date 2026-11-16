@@ -10,13 +10,15 @@ namespace raynium {
 struct GuiDraw {
     rn_gui_draw desc{};
     radray::Rect scissor{};
-    radray::GpuTexture* texture{}; // Borrowed from the slot cache through command storage reset.
+    TextureResource* texture{}; // Borrowed from the slot cache through command storage reset.
     radray::render::ShaderParameterSet* parameters{};
 };
 struct GuiFrameSlot {
+    rn_frame_metrics* metrics{};
     struct TextureParameters {
-        radray::IntrusivePtr<radray::GpuTexture> texture;
+        radray::IntrusivePtr<TextureResource> texture;
         radray::render::Sampler* sampler{};
+        radray::render::TextureView* view{};
         radray::unique_ptr<radray::render::ShaderParameterSet> parameters;
     };
     radray::array<radray::unique_ptr<radray::render::ShaderParameterSet>,2> passParameters;
@@ -26,6 +28,8 @@ struct GuiFrameSlot {
     std::span<const radray::byte> vertices;
     float width{},height{},yDirection{};
     uint32_t vertexCount{};
+    radray::RDGBufferHandle vertexBuffer,indexBuffer;
+    radray::array<radray::RDGBufferHandle,2> constants;
 };
 class GuiPassResources final {
 public:
@@ -33,7 +37,8 @@ public:
     bool CreateSlot(radray::render::Device&,GuiFrameSlot&);
     bool PrepareOutput(radray::render::Device&,radray::render::TextureFormat);
     bool Prepare(radray::render::Device&,GuiFrameSlot&,const UploadedTextures&,const rn_render_frame_desc&,uint32_t width,uint32_t height);
-    void AddPass(radray::RDGBuilder&,radray::FrameSlot&,GuiFrameSlot&,radray::RDGTextureHandle,uint32_t,uint32_t);
+    void Upload(radray::RDGBuilder&,GuiFrameSlot&);
+    void AddPass(radray::RDGBuilder&,radray::FrameSlot&,GuiFrameSlot&,radray::RDGTextureHandle,uint32_t,uint32_t,radray::vector<TextureResource*>&,uint32_t first=0,uint32_t count=UINT32_MAX);
 private:
     struct Program {
         radray::unique_ptr<ShaderProgram> program;

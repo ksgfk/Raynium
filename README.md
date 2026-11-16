@@ -2,9 +2,9 @@
 
 基于 Fabric 的 Minecraft 客户端模组，包含 Java FFM/C ABI 桥接与使用 RadRay RHI 的 native 设备会话。
 
-当前在 Windows 以 D3D12/Vulkan 独立设备接管窗口呈现，绘制全分辨率三层地形与十二种 GUI 管线，不创建原版 GPU 设备。
-Java 25 通过 FFM 与 ABI 17 调用 native；RadRay runtime 提供帧调度和 Render Graph，Raynium 使用专用 direct/indirect 地形数据、上传纹理与 CPU GUI 采集。
-普通透明和小波 OIT 已实现。物品图标、实体、天空、标题全景、模糊与截图等能力的边界见[架构地图](doc/architecture/overview.md)和[Minecraft 接入](doc/architecture/minecraft-integration.md)。
+当前在 Windows 以 D3D12/Vulkan 独立设备接管地形、实体、环境、第一人称和 GUI 渲染，不创建原版 GPU 设备。
+Java 25 保留原版模型、动画、文字和节点排序，通过 FFM 与 ABI 18 提交数据；native 使用 RadRay 帧调度和 Render Graph 组织 direct/indirect 地形、动态场景、离屏 GUI、透明及后处理合成。
+已实现的适配、资源包支持、截图与生命周期边界见[架构地图](doc/architecture/overview.md)和[Minecraft 接入](doc/architecture/minecraft-integration.md)。
 
 ## 开发入口
 

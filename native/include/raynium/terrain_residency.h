@@ -7,12 +7,18 @@
 #include <radray/runtime/geometry_buffer_pool.h>
 
 namespace raynium {
+struct TerrainWireframe {
+    uint32_t mask{},stateId{};
+    radray::IndexBufferSubAllocation indices;
+    TerrainDrawTemplate draws;
+};
 struct TerrainMesh {
     TerrainMeshLayout layout;
     radray::VertexBufferSubAllocation geometry;
     radray::IndexBufferSubAllocation indices;
     TerrainDrawTemplate draws;
     uint32_t stateId{};
+    radray::vector<TerrainWireframe> wireframes;
 };
 struct TerrainState {
     uint64_t epoch{},nextMaterialKey{};
@@ -22,6 +28,7 @@ struct TerrainState {
     radray::unique_ptr<MeshMaterialBinding> material;
     uint32_t albedo{},light{},anisotropy{};
     TerrainBindingStates bindings{};
+    bool wireframeActive{};
 };
 struct GeometryUpload {
     radray::IntrusivePtr<radray::GpuBuffer> target;
@@ -42,6 +49,7 @@ struct TerrainFrame {
     UploadedTextures* textures{};
     rn_render_frame_desc parameters{};
     bool hasTranslucent{};
+    uint32_t width{},height{};
     radray::render::Texture* color{};
     radray::render::SwapChainSyncObject* waitToDraw{};
     radray::render::SwapChainSyncObject* readyToPresent{};
@@ -52,6 +60,7 @@ public:
     bool PrepareFrame(const UploadedTextures&,const rn_render_frame_desc&,const MeshPassResources&,SlotUploads,TerrainFrame&);
     void Reset() noexcept;
     uint64_t ResidentBytes() const noexcept;
+    void MeasureGeometry(rn_frame_metrics&) const noexcept;
 private:
     radray::DeviceContext& _device;
     radray::unique_ptr<radray::VertexBufferPool> _vertices;

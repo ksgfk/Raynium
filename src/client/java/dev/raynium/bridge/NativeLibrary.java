@@ -2,6 +2,7 @@ package dev.raynium.bridge;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.SymbolLookup;
+import java.nio.file.Path;
 import org.slf4j.Logger;
 
 final class NativeLibrary implements AutoCloseable {
@@ -15,7 +16,7 @@ final class NativeLibrary implements AutoCloseable {
         }
         arena = Arena.ofShared();
         try {
-            SymbolLookup lookup = SymbolLookup.libraryLookup(payload.libraryPath(), arena);
+            SymbolLookup lookup = SymbolLookup.libraryLookup(windowsLibraryPath(payload.libraryPath()), arena);
             bindings = new NativeBindings(lookup);
             int abiVersion = bindings.inspect(payload.manifest());
             NativeManifest manifest = payload.manifest();
@@ -27,6 +28,15 @@ final class NativeLibrary implements AutoCloseable {
             arena.close();
             throw failure;
         }
+    }
+
+    static String windowsLibraryPath(Path path) {
+        String absolute = path.toAbsolutePath().normalize().toString();
+        // The Path overload resolves toRealPath and strips the prefix before LoadLibrary.
+        if (absolute.startsWith("\\\\?\\")) return absolute;
+        return absolute.startsWith("\\\\")
+                ? "\\\\?\\UNC\\" + absolute.substring(2)
+                : "\\\\?\\" + absolute;
     }
 
     NativeBindings bindings() {

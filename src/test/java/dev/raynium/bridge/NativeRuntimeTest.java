@@ -31,6 +31,18 @@ class NativeRuntimeTest {
     }
 
     @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void loadsVerifiedPayloadBeyondWindowsMaxPath(NativeEnvironment.Backend backend) throws Exception {
+        Path nested = gameDirectory;
+        for (int i = 0; i < 5; i++) nested = nested.resolve("long game directory 测试 ".repeat(3) + i);
+        var longPayload = NativeTestSupport.locate(nested);
+        assertTrue(longPayload.libraryPath().toString().length() > 350);
+        try (var environment = new NativeEnvironment(longPayload, backend, logger);
+             var runtime = environment.createRuntime()) {
+            assertTrue(runtime.deviceInfo().maxTextureSize() > 0);
+        }
+    }
+
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
     void environmentWithoutRuntimeClosesAndCanBeRecreated(NativeEnvironment.Backend backend) {
         for (int iteration = 0; iteration < 2; iteration++) {
             try (var environment = new NativeEnvironment(payload, backend, logger)) {

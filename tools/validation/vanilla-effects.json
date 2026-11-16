@@ -1,0 +1,315 @@
+{
+  "defaults": {
+    "camera": {
+      "x": 0.5,
+      "y": 181,
+      "z": 9.5,
+      "yaw": 180,
+      "pitch": 10
+    },
+    "oit": false,
+    "hideHud": true,
+    "screen": "none",
+    "wireframe": false,
+    "gameTime": 6000,
+    "animationMillis": 10000,
+    "partialTick": 0,
+    "rain": 0,
+    "thunder": 0,
+    "particleSeed": 149521,
+    "particleTicks": 12,
+    "particles": [
+      {
+        "type": {
+          "type": "minecraft:campfire_cosy_smoke"
+        },
+        "x": 3.5,
+        "dy": 0.04,
+        "count": 6,
+        "z": 1.5,
+        "y": 181.1
+      },
+      {
+        "type": {
+          "type": "minecraft:flame"
+        },
+        "x": -4.5,
+        "dy": 0.01,
+        "count": 8,
+        "z": 1.5,
+        "y": 182
+      },
+      {
+        "type": {
+          "type": "minecraft:portal"
+        },
+        "x": 7,
+        "dx": 0.15,
+        "count": 12,
+        "z": -5.5,
+        "y": 182
+      },
+      {
+        "dz": 0.1,
+        "x": -3,
+        "dy": 0.2,
+        "z": 1,
+        "type": {
+          "type": "minecraft:enchant"
+        },
+        "count": 8,
+        "dx": 0.6,
+        "y": 181.5
+      }
+    ],
+    "vignetteBrightness": 0.6,
+    "blockAnimations": [
+      {
+        "position": [
+          -3,
+          180,
+          1
+        ],
+        "time": 200,
+        "flip": 0.25,
+        "open": 0.8,
+        "rotation": 0
+      },
+      {
+        "position": [
+          -8,
+          180,
+          -7
+        ],
+        "age": 80
+      }
+    ],
+    "clearNotifications": true
+  },
+  "scenes": [
+    {
+      "name": "materials-classic",
+      "commands": [
+        "weather clear",
+        "time set 6000",
+        "gamemode creative",
+        "worldborder center 0 0",
+        "worldborder set 512",
+        "fill -12 179 -12 12 179 12 minecraft:smooth_stone",
+        "fill -5 180 -4 -3 182 -4 minecraft:glass",
+        "fill -1 180 -4 1 182 -4 minecraft:blue_stained_glass",
+        "fill 3 180 -4 5 182 -4 minecraft:ice",
+        "setblock -5 180 1 minecraft:chest[facing=south]",
+        "setblock -3 180 1 minecraft:enchanting_table",
+        "setblock -1 180 1 minecraft:oak_sign[rotation=0]",
+        "setblock 1 180 1 minecraft:white_banner[rotation=0]",
+        "setblock 3 180 1 minecraft:campfire",
+        "setblock 5 180 1 minecraft:shulker_box",
+        "fill -1 179 -8 1 179 -6 minecraft:iron_block",
+        "setblock 0 180 -7 minecraft:beacon",
+        "summon minecraft:pig -3 180 -1 {NoAI:1b,NoGravity:1b,Silent:1b,Rotation:[0f,0f]}",
+        "summon minecraft:sheep 0 180 -1 {NoAI:1b,NoGravity:1b,Silent:1b,Color:14b,Rotation:[0f,0f]}",
+        "summon minecraft:armor_stand 3 180 -1 {NoGravity:1b,ShowArms:1b}",
+        "give @s minecraft:diamond_sword",
+        "give @s minecraft:diamond_pickaxe",
+        "give @s minecraft:oak_planks",
+        "give @s minecraft:enchanted_book",
+        "give @s minecraft:filled_map",
+        "give @s minecraft:shield",
+        "give @s minecraft:apple",
+        "give @s minecraft:bow",
+        "data merge block -1 180 1 {front_text:{messages:[\"Raynium\",\"Text and fonts\",\"0123456789\",\"Unicode: 世界\"],color:\"black\",has_glowing_text:1b}}",
+        "data merge block 1 180 1 {patterns:[{pattern:\"minecraft:stripe_center\",color:\"blue\"},{pattern:\"minecraft:cross\",color:\"red\"}]}",
+        "item replace entity @e[type=minecraft:armor_stand,limit=1,sort=nearest] armor.head with minecraft:diamond_helmet[enchantments={protection:1}]",
+        "item replace entity @e[type=minecraft:armor_stand,limit=1,sort=nearest] armor.chest with minecraft:diamond_chestplate[enchantments={protection:1}]",
+        "item replace entity @e[type=minecraft:armor_stand,limit=1,sort=nearest] weapon.mainhand with minecraft:diamond_sword[enchantments={sharpness:1}]",
+        "data merge entity @e[type=minecraft:sheep,limit=1,sort=nearest] {Glowing:1b,CustomName:\"Glowing Sheep\",CustomNameVisible:1b}",
+        "summon minecraft:creeper -7 180 -1 {NoAI:1b,NoGravity:1b,Silent:1b,powered:1b}",
+        "summon minecraft:enderman 7 180 -1 {NoAI:1b,NoGravity:1b,Silent:1b,carriedBlockState:\"minecraft:grass_block\"}",
+        "summon minecraft:text_display 0 184 -3 {text:{text:\"World text / 世界\",color:\"gold\"},billboard:\"center\",background:1073741824}",
+        "setblock -8 180 -5 minecraft:end_portal",
+        "setblock -8 180 -7 minecraft:end_gateway",
+        "fill 7 180 -7 7 183 -5 minecraft:nether_portal[axis=z]",
+        "tick freeze",
+        "tick step 80"
+      ],
+      "settleSeconds": 7
+    },
+    {
+      "name": "materials-oit",
+      "oit": true
+    },
+    {
+      "name": "flat-clouds",
+      "clouds": "fast"
+    },
+    {
+      "name": "flat-clouds-oit",
+      "clouds": "fast",
+      "oit": true
+    },
+    {
+      "name": "post-creeper",
+      "postEffect": "creeper",
+      "hideHud": false
+    },
+    {
+      "name": "post-invert",
+      "postEffect": "invert",
+      "hideHud": false
+    },
+    {
+      "name": "post-spider",
+      "postEffect": "spider",
+      "hideHud": false
+    },
+    {
+      "name": "equipped-preview",
+      "commands": [
+        "gamemode survival",
+        "item replace entity @s armor.head with minecraft:diamond_helmet[enchantments={protection:1}]",
+        "item replace entity @s armor.chest with minecraft:diamond_chestplate[enchantments={protection:1}]",
+        "item replace entity @s weapon.mainhand with minecraft:diamond_sword[enchantments={sharpness:1}]"
+      ],
+      "screen": "inventory",
+      "hideHud": false
+    },
+    {
+      "name": "water-first-person",
+      "commands": [
+        "gamemode creative",
+        "fill 17 180 -3 23 184 3 minecraft:water"
+      ],
+      "camera": {
+        "x": 20.5,
+        "y": 181,
+        "z": 0.5,
+        "yaw": 90,
+        "pitch": 0
+      },
+      "hideHud": false
+    },
+    {
+      "name": "water-oit",
+      "oit": true,
+      "camera": {
+        "x": 20.5,
+        "y": 181,
+        "z": 0.5,
+        "yaw": 90,
+        "pitch": 0
+      },
+      "hideHud": false
+    },
+    {
+      "name": "lava-first-person",
+      "commands": [
+        "fill 27 180 -3 33 184 3 minecraft:lava"
+      ],
+      "camera": {
+        "x": 30.5,
+        "y": 181,
+        "z": 0.5,
+        "yaw": 90,
+        "pitch": 0
+      },
+      "hideHud": false
+    },
+    {
+      "name": "inside-block",
+      "commands": [
+        "fill 37 180 -3 43 184 3 minecraft:stone"
+      ],
+      "camera": {
+        "x": 40.5,
+        "y": 181,
+        "z": 0.5,
+        "yaw": 90,
+        "pitch": 0
+      },
+      "hideHud": false
+    },
+    {
+      "name": "world-border",
+      "camera": {
+        "x": 254,
+        "y": 100,
+        "z": 0,
+        "yaw": -90,
+        "pitch": 0
+      }
+    },
+    {
+      "name": "night-sky",
+      "commands": [
+        "time set 18000"
+      ],
+      "camera": {
+        "x": 0.5,
+        "y": 181,
+        "z": 9.5,
+        "yaw": 180,
+        "pitch": -40
+      },
+      "gameTime": 18000
+    },
+    {
+      "name": "sunset-sky",
+      "commands": [
+        "time set 12000"
+      ],
+      "camera": {
+        "x": 0.5,
+        "y": 181,
+        "z": 9.5,
+        "yaw": 90,
+        "pitch": -10
+      },
+      "gameTime": 12000
+    },
+    {
+      "name": "nether",
+      "commands": [
+        "execute in minecraft:the_nether run tp @s 0 90 0"
+      ],
+      "camera": {
+        "x": 0,
+        "y": 90,
+        "z": 0,
+        "yaw": 0,
+        "pitch": 10
+      }
+    },
+    {
+      "name": "end",
+      "commands": [
+        "execute in minecraft:the_end run tp @s 0 85 0"
+      ],
+      "camera": {
+        "x": 0,
+        "y": 85,
+        "z": 0,
+        "yaw": 0,
+        "pitch": 10
+      }
+    },
+    {
+      "name": "return-overworld",
+      "commands": [
+        "execute in minecraft:overworld run tp @s 0.5 181 9.5"
+      ],
+      "reload": true
+    },
+    {
+      "name": "panorama-atlases",
+      "commands": [
+        "execute in minecraft:overworld run tp @s 0.5 181 9.5"
+      ],
+      "panorama": true,
+      "textureExports": [
+        "minecraft:textures/atlas/blocks.png",
+        "minecraft:textures/atlas/items.png"
+      ]
+    }
+  ]
+}

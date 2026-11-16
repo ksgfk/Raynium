@@ -37,7 +37,9 @@ public final class TakeoverTerrain {
         var light=(TakeoverHandles.Texture)client.gameRenderer.levelLightmap().texture();
         frame.epoch=epoch;
         frame.flags=NativeRenderer.FLIP_Y|(snapshot.rgss?NativeRenderer.RGSS:0)|(snapshot.improvedTransparency?NativeRenderer.IMPROVED_TRANSPARENCY:0)|
-            ((dev.raynium.client.benchmark.BenchmarkSession.isActive() || Boolean.getBoolean("raynium.terrain.profile"))?NativeRenderer.PROFILE:0);
+            ((dev.raynium.client.benchmark.BenchmarkSession.profilerEnabled() || Boolean.getBoolean("raynium.terrain.profile"))?NativeRenderer.PROFILE:0)|
+            (client.gameRenderer.gameRenderState().levelRenderState.renderWireframeTerrain?NativeRenderer.WIREFRAME:0)|
+            (dev.raynium.client.benchmark.BenchmarkSession.isActive()?NativeRenderer.MEASURE:0);
         frame.projection=snapshot.projection; frame.view=snapshot.view; frame.cameraBlock=snapshot.block; frame.cameraFraction=snapshot.fraction;
         frame.fogColor=snapshot.fog; frame.fogDistances=snapshot.distances; frame.clearColor=snapshot.fog;
         residency.prepare(snapshot,renderer.frameBuffer(),atlas.nativeTexture().id(),light.nativeTexture().id());

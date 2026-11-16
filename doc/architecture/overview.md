@@ -9,14 +9,15 @@ Java 25 通过 FFM 和 C ABI 加载 DLL；DLL 消费上游 `RadRay::runtime` 静
 
 ## 当前实现与边界
 
-构建与分发、payload 定位和内容缓存、ABI 17 检查、独立设备与 HWND 交换链已实现。
-MC 不创建原版 GPU 设备，由 Raynium 的 BGRA8 交换链呈现全分辨率地形和 GUI。
+构建与分发、payload 定位和内容缓存、ABI 18 检查、独立设备与 HWND 交换链已实现。
+接管模式不创建原版 GPU 设备，由 Raynium 的 BGRA8 交换链呈现世界、第一人称、后处理及 GUI 合成结果。
 CPU 上传路径覆盖独立贴图、字形、动态图、全部图集和光照图；GUI 保留文字准备、节点排序与裁剪。
 已实现范围及缺失能力见[Minecraft 接入](minecraft-integration.md)。
 地形使用驻留绘制模板、每槽可见记录/参数数组和双槽 FrameScheduler。
 SolidFramePipeline 基于 RenderGraphFramePipeline，通过 RDG 和 RHI 提交专用 direct/indirect 绘制；Raynium 负责队列提交。
 Java 复用扁平采集和堆外帧缓冲，按事件同步驻留状态，传递原始 quad 流和 section 可见项；Native 完成分组与保守剔除；上传预算和回退回收契约见[地形渲染](terrain-rendering.md)。
-游戏和 nativeTest 均使用窗口交换链呈现；GPU 测试不读回像素。操作与测试入口见[构建与测试](../guide/build-test.md)。
+主颜色目标使用 RGBA8，再由输出 pass 写入 BGRA8 交换链；按请求读回支持普通截图与 GPU 像素断言。
+独立原版参考入口关闭接管与 native 加载。操作与测试入口见[构建与测试](../guide/build-test.md)。
 
 ## 职责与源码地图
 
@@ -26,8 +27,9 @@ Java 复用扁平采集和堆外帧缓冲，按事件同步驻留状态，传递
 | Java bridge | payload 定位、内容缓存、FFM 布局和绑定、DLL/环境/runtime 所有权 | `src/client/java/dev/raynium/bridge/` |
 | C bridge | ABI 查询、参数校验、状态码和不透明 runtime 句柄 | `native/include/raynium/bridge.h`、`native/src/bridge.cpp` |
 | MC native 管线 | ABI 转换、SolidFramePipeline、专用绘制参数与批次、shader 与单队列提交 | `native/src/renderer.cpp`、`native/src/solid_pipeline.cpp`、`native/src/mesh_pass.cpp` |
+| 原版场景适配 | 原版 feature 几何和排序、环境、第一人称、GUI 离屏内容、管线变体及内置后处理 | `src/client/java/dev/raynium/client/takeover/scene/`、`native/src/scene_pass.cpp`、`native/src/scene_post.inc` |
 | 地形驻留 | 驻留增量更新、runtime 顶点/索引池、材质绑定、专用绘制批次与跨槽资源退役 | `native/src/terrain_residency.cpp`、`native/src/terrain_draw.cpp`、`native/src/renderer.cpp` |
-| 输出资源 | HWND 交换链与 RDG 每槽动态后备缓冲视图 | `native/src/render_resources.cpp` |
+| 输出资源 | HWND 交换链、每槽主颜色目标、输出合成与异步读回 | `native/src/render_resources.cpp`、`native/src/output_pass.cpp`、`native/src/solid_pipeline.cpp` |
 | MC 地形适配 | 三层原始地形快照、整 section 预算/回退与成功消费后顶点释放，上传预算、纹理变化 | `src/client/java/dev/raynium/client/terrain/` |
 | MC 接管适配 | 无原版设备的身份句柄、CPU 像素、GUI 采集、关卡维护与窗口呈现 | `src/client/java/dev/raynium/client/takeover/`、`src/client/java/dev/raynium/client/mixin/takeover/` |
 | RadRay runtime | 环境/设备、Scene 容器、Mesh Drawing Pipeline、FrameScheduler/FrameSlot/PMR、GpuBuffer/GpuTexture/UploadArena、RenderGraphFramePipeline/RDG；DLL 从锁定源码编译并链接 `RadRay::runtime` | `native/radray.lock.json`、`native/CMakeLists.txt` |
@@ -37,7 +39,7 @@ Java 复用扁平采集和堆外帧缓冲，按事件同步驻留状态，传递
 flowchart LR
     Lifecycle[Fabric 客户端生命周期] --> Java[NativeEnvironment / NativeRuntime]
     Java --> FFM[NativeBindings / FFM]
-    FFM --> ABI[C ABI 17]
+    FFM --> ABI[C ABI 18]
     ABI --> Env[radray::Environment 单例环境]
     Env --> Runtime[radray::DeviceContext 设备会话]
     Runtime --> Scheduler[FrameScheduler / 双 FrameSlot]

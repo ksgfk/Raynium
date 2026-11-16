@@ -26,9 +26,11 @@ bool Verify(std::span<const radray::byte> data) {
     if(!raynium::ReadShaderPack(data,entries)) return false;
     bool required[8][2]{};
     bool gui[3][2]{};
+    bool output[2]{};
     for(const auto& entry:entries) {
         auto decoded=DecodeShaderArtifact(entry.data,{.Target=entry.target,.ExpectedGpuArtifact=entry.identity,.ExpectedToolchainIdentity=kShaderToolchainIdentity});
         if(!decoded.Succeeded()) { RADRAY_ERR_LOG("Shader program={} target={} decode failed: {}",entry.name,uint32_t(entry.target),decoded.Diagnostics); return false; }
+        if(entry.name=="output") { if(!raynium::ValidateOutputShader(*decoded.Value)) return false; output[uint8_t(entry.target)]=true; }
         for(size_t i=0;i<raynium::TerrainPrograms.size();++i) if(entry.name==raynium::TerrainPrograms[i]) {
             if(!raynium::ValidateTerrainShader(*decoded.Value,entry.name)) return false;
             required[i][uint8_t(entry.target)]=true;
@@ -42,6 +44,7 @@ bool Verify(std::span<const radray::byte> data) {
         Require(required[i][0] && required[i][1],"Shader pack requires every terrain program for DXIL and SPIR-V");
     for(size_t i=0;i<raynium::GuiPrograms.size();++i)
         Require(gui[i][0] && gui[i][1],"Shader pack requires every GUI program for DXIL and SPIR-V");
+    Require(output[0] && output[1],"Shader pack requires the output program for DXIL and SPIR-V");
     return true;
 }
 struct Program { radray::string name,source; };

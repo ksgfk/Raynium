@@ -12,6 +12,8 @@ struct TerrainDrawRange { uint32_t first{},count{}; int32_t vertex{}; };
 struct TerrainMeshLayout {
     radray::vector<TerrainDrawRange> ranges;
     radray::array<uint32_t,7> groupBits{};
+    // Three bits per input quad for restoring the order of multi-group solid/cutout meshes.
+    radray::vector<uint8_t> originalQuadGroups;
     radray::array<double,3> minimum{},maximum{};
     uint32_t vertexCount{};
     rn_material_mode layer{};
@@ -27,6 +29,8 @@ struct TerrainMeshUpload {
 };
 bool AnalyzeTerrainMesh(std::span<const radray::byte>,rn_material_mode,TerrainMeshLayout&,TerrainMeshUpload&);
 bool WriteQuadIndices(std::span<radray::byte>,uint32_t vertexCount) noexcept;
+bool WriteWireframeIndices(std::span<radray::byte>,const TerrainMeshLayout&,uint32_t mask) noexcept;
+bool WriteLineIndices(std::span<radray::byte>,uint32_t vertexCount) noexcept;
 TerrainEye ComputeTerrainEye(const rn_render_frame_desc&) noexcept;
 uint32_t TerrainVisibleMask(const TerrainMeshLayout&,const TerrainEye&,const rn_render_frame_desc&,
                             std::span<const rn_instance>) noexcept;

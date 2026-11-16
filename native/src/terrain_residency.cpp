@@ -13,6 +13,10 @@ namespace raynium {
 using namespace radray::render;
 namespace {
 template<class T> bool Array(const T* p,uint32_t n,uint32_t limit=1048576) { return n<=limit && (!n || p); }
+void ReleaseMeshBindings(TerrainMesh& mesh,TerrainBindingStates& bindings) noexcept {
+    bindings.Release(mesh.stateId);
+    for(auto& wire:mesh.wireframes) bindings.Release(wire.stateId);
+}
 bool ResolveMesh(TerrainMesh& mesh,TerrainState& state) {
     const auto& index=mesh.layout.layer==RN_MATERIAL_TRANSLUCENT?mesh.indices:state.quadIndices;
     if(!index) { RADRAY_ERR_LOG("Terrain mesh references missing indices"); return false; }
@@ -47,7 +51,7 @@ bool TerrainResidency::PrepareFrame(const UploadedTextures& uploaded,const rn_re
     const MeshPassResources& resources,SlotUploads slot,TerrainFrame& frame) {
     RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.Prepare");
 
-    if(f.struct_size!=sizeof(f) || (f.flags&~15u) || !f.epoch || f.epoch<_state.epoch ||
+    if(f.struct_size!=sizeof(f) || (f.flags&~511u) || ((f.flags&RN_FRAME_CAPTURE_PREVIOUS) && !(f.flags&RN_FRAME_CAPTURE)) || !f.epoch || f.epoch<_state.epoch ||
        !Array(f.indices,f.index_count,65536) || !Array(f.meshes,f.mesh_count,65536) ||
        !Array(f.removed_meshes,f.removed_mesh_count) || !Array(f.visible,f.visible_count) || !Array(f.instances,f.instance_count))
         { RADRAY_ERR_LOG("Invalid frame layout, epoch or array: sequence={} epoch={} resident_epoch={}",f.output_sequence,f.epoch,_state.epoch); return false; }
@@ -63,11 +67,20 @@ bool TerrainResidency::PrepareFrame(const UploadedTextures& uploaded,const rn_re
         state=TerrainState{}; state.meshes.reserve(4096);
     }
     state.epoch=f.epoch;
+    const bool wireframe=(f.flags&RN_FRAME_WIREFRAME)!=0;
+    if(state.wireframeActive && !wireframe) for(auto& [id,mesh]:state.meshes) {
+        for(auto& wire:mesh.wireframes) {
+            state.bindings.Release(wire.stateId);
+            slot.frame.Emplace<TerrainWireframe>(std::move(wire));
+        }
+        mesh.wireframes.clear();
+    }
+    state.wireframeActive=wireframe;
     std::pmr::unordered_set<uint64_t> changedMeshes{&slot.frame.GetScratchMemoryResource()};
     uint64_t uploadBytes=0;
     for(uint32_t i=0;i<f.removed_mesh_count;++i) {
         auto it=state.meshes.find(f.removed_meshes[i]); if(it==state.meshes.end()) continue;
-        state.bindings.Release(it->second.stateId); slot.frame.Emplace<TerrainMesh>(std::move(it->second)); state.meshes.erase(it);
+        ReleaseMeshBindings(it->second,state.bindings); slot.frame.Emplace<TerrainMesh>(std::move(it->second)); state.meshes.erase(it);
     }
     uint32_t needed=state.quadVertexCapacity;
     for(const auto& x:std::span{f.meshes,f.mesh_count}) {
@@ -102,7 +115,7 @@ bool TerrainResidency::PrepareFrame(const UploadedTextures& uploaded,const rn_re
         if(!inserted) {
             // The surviving index interval is retired only when its newest owner stops using it.
             if(x.layer==RN_MATERIAL_TRANSLUCENT && previous.layout.layer==x.layer) mesh.indices=std::move(previous.indices);
-            state.bindings.Release(previous.stateId); slot.frame.Emplace<TerrainMesh>(std::move(previous));
+            ReleaseMeshBindings(previous,state.bindings); slot.frame.Emplace<TerrainMesh>(std::move(previous));
         }
         previous=std::move(mesh); changedMeshes.insert(x.id);
     }
@@ -139,6 +152,32 @@ bool TerrainResidency::PrepareFrame(const UploadedTextures& uploaded,const rn_re
         state.bindings.Release(mesh.stateId); mesh.stateId=0;
         if(!state.bindings.Acquire(mesh.draws,*state.material,mesh.stateId)) return false;
     }
+    if(materialChanged) for(auto& [id,mesh]:state.meshes) for(auto& wire:mesh.wireframes) {
+        state.bindings.Release(wire.stateId); wire.stateId=0;
+        if(!state.bindings.Acquire(wire.draws,*state.material,wire.stateId)) return false;
+    }
+    const auto prepareWireframe=[&](TerrainMesh& mesh,uint32_t requested,TerrainWireframe*& result) {
+        for(auto& wire:mesh.wireframes) if(wire.mask==requested) { result=&wire; return true; }
+        uint32_t count=0;
+        for(size_t n=0;n<mesh.layout.ranges.size();++n) if(requested&(1u<<n)) count+=mesh.layout.ranges[n].count;
+        auto allocation=_indices->Allocate(count);
+        if(!allocation) { RADRAY_ERR_LOG("Cannot allocate terrain wireframe indices"); return false; }
+        TerrainWireframe wire{.mask=requested,.indices=std::move(*allocation)};
+        wire.draws.vertices=mesh.draws.vertices; wire.draws.indices=wire.indices.GetIndexBufferView();
+        wire.draws.vertexPage=mesh.draws.vertexPage; wire.draws.indexPage=wire.indices.GetGpuBuffer().Get();
+        wire.draws.fullMask=wire.draws.validMask=1;
+        wire.draws.ranges.push_back({wire.indices.GetFirstIndex(),count,int32_t(mesh.geometry.GetFirstVertex())});
+        struct Source { const TerrainMeshLayout* layout; uint32_t mask; };
+        slot.geometry.push_back({wire.indices.GetGpuBuffer(),wire.indices.GetByteOffset(),
+            radray::RDGUploadSource::Generated(wire.indices.GetByteSize(),Source{&mesh.layout,requested},
+                +[](const Source& source,radray::RDGUploadWriteContext& context) noexcept {
+                    return WriteWireframeIndices(context.Bytes,*source.layout,source.mask);
+                })});
+        if(_indexPages.insert(wire.indices.GetBuffer()).second) _indexReservedBytes+=wire.indices.GetBuffer()->GetDesc().Size;
+        uploadBytes+=wire.indices.GetByteSize();
+        if(!state.bindings.Acquire(wire.draws,*state.material,wire.stateId)) return false;
+        mesh.wireframes.push_back(std::move(wire)); result=&mesh.wireframes.back(); return true;
+    };
     for(auto& layer:slot.lists.visible) layer.clear();
     for(auto& layer:slot.lists.order) layer.clear();
     const auto eye=ComputeTerrainEye(f);
@@ -146,15 +185,20 @@ bool TerrainResidency::PrepareFrame(const UploadedTextures& uploaded,const rn_re
         auto found=state.meshes.find(item.mesh);
         if(found==state.meshes.end() || !item.instance_count || uint64_t(item.first_instance)+item.instance_count>f.instance_count)
             { RADRAY_ERR_LOG("Invalid visible mesh or instance range: mesh={} first={} count={}",item.mesh,item.first_instance,item.instance_count); return false; }
-        const auto& mesh=found->second; const auto& draws=mesh.draws;
+        auto& mesh=found->second; const auto& draws=mesh.draws;
         if(!mesh.stateId || !item.element_mask || (item.element_mask!=UINT32_MAX && (item.element_mask&~draws.fullMask)))
             { RADRAY_ERR_LOG("Invalid visible terrain submesh: mesh={} mask={}",item.mesh,item.element_mask); return false; }
         const uint32_t requested=item.element_mask==UINT32_MAX?draws.fullMask:item.element_mask;
         const uint32_t mask=requested&draws.validMask&TerrainVisibleMask(mesh.layout,eye,f,{f.instances+item.first_instance,item.instance_count});
         if(!mask) continue;
+        const TerrainDrawTemplate* selected=&draws; uint32_t selectedMask=mask,stateId=mesh.stateId;
+        if(wireframe && !mesh.layout.originalQuadGroups.empty()) {
+            TerrainWireframe* wire{}; if(!prepareWireframe(mesh,requested,wire)) return false;
+            selected=&wire->draws; selectedMask=1; stateId=wire->stateId;
+        }
         auto& visible=slot.lists.visible[mesh.layout.layer]; auto& order=slot.lists.order[mesh.layout.layer];
-        order.push_back({(uint64_t(mesh.stateId)<<32)|item.sort_key,uint32_t(visible.size())});
-        visible.push_back({draws.ranges.data(),mask,draws.mergeMask,item.first_instance,item.instance_count,mesh.stateId});
+        order.push_back({(uint64_t(stateId)<<32)|item.sort_key,uint32_t(visible.size())});
+        visible.push_back({selected->ranges.data(),selectedMask,selected->mergeMask,item.first_instance,item.instance_count,stateId});
     }
     if(!BuildTerrainDraws(slot.lists,state.bindings.States(),(f.flags&RN_FRAME_IMPROVED_TRANSPARENCY)!=0)) return false;
     frame.hasTranslucent=!slot.lists.visible[RN_MATERIAL_TRANSLUCENT].empty();
@@ -200,7 +244,12 @@ uint64_t TerrainResidency::ResidentBytes() const noexcept {
     uint64_t bytes=_state.quadIndices?_state.quadIndices.GetByteSize():0;
     for(const auto& [id,mesh]:_state.meshes) {
         bytes+=mesh.geometry.GetByteSize(); if(mesh.indices) bytes+=mesh.indices.GetByteSize();
+        for(const auto& wire:mesh.wireframes) bytes+=wire.indices.GetByteSize();
     }
     return bytes;
+}
+void TerrainResidency::MeasureGeometry(rn_frame_metrics& metrics) const noexcept {
+    metrics.vertex_capacity=_vertexReservedBytes; metrics.index_capacity=_indexReservedBytes;
+    metrics.geometry_allocated=_vertexReservedBytes+_indexReservedBytes-_vertices->GetFreeBytes()-_indices->GetFreeBytes();
 }
 }

@@ -17,6 +17,37 @@ import static org.junit.jupiter.api.Assertions.*;
 @Tag("native")
 class NativeTextureTest {
     @TempDir Path gameDirectory;
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void arrayAndCubeMipUploadsRetainDeletedOwners(NativeEnvironment.Backend backend) throws Exception {
+        try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var window=new NativeSwapchainTest.Window(); var runtime=environment.createRuntime();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
+            var chain=renderer.createSwapchain(window.hwnd,640,360,NativeSwapchain.PresentMode.IMMEDIATE)) {
+            assertTrue(SDLVideo.SDL_HideWindow(window.handle)); window.pump();
+            for(int n=1;n<=6;n++) {
+                for(int flags:new int[]{0,NativeTexture.CUBE,NativeTexture.ATTACHMENT|NativeTexture.READBACK}) {
+                    int layers=(flags&NativeTexture.CUBE)!=0?6:3;
+                    for(var format:List.of(NativeTexture.Format.RGBA8,NativeTexture.Format.R8,NativeTexture.Format.RGBA16F,NativeTexture.Format.RGBA32F)) {
+                        try(var texture=renderer.createTexture(8,8,4,layers,format,flags)) {
+                            for(int mip=0;mip<4;mip++) for(int layer=0;layer<layers;layer++) {
+                                int size=8>>mip,pitch=size*format.bytesPerPixel()+16;
+                                byte[] pixels=new byte[pitch*size]; Arrays.fill(pixels,(byte)(layer+n));
+                                texture.uploadLayer(mip,layer,0,0,size,size,pitch,MemorySegment.ofArray(pixels));
+                            }
+                            assertThrows(IllegalStateException.class,()->texture.uploadLayer(0,layers,0,0,1,1,16,MemorySegment.ofArray(new byte[16])));
+                        }
+                    }
+                }
+                assertEquals(NativeSwapchain.Presentation.SKIPPED,renderer.present(chain,NativeTestSupport.solidFrame(n)));
+            }
+            try(var depth=renderer.createTexture(8,8,1,1,NativeTexture.Format.DEPTH32F,NativeTexture.ATTACHMENT|NativeTexture.READBACK)) {
+                assertThrows(IllegalStateException.class,()->depth.upload(0,0,0,8,8,new byte[256]));
+            }
+            assertThrows(IllegalStateException.class,()->renderer.createTexture(8,4,1,6,NativeTexture.Format.RGBA8,NativeTexture.CUBE));
+            assertThrows(IllegalStateException.class,()->renderer.createTexture(8,8,1,5,NativeTexture.Format.RGBA8,NativeTexture.CUBE));
+            assertThrows(IllegalStateException.class,()->renderer.createTexture(8,8,1,0,NativeTexture.Format.RGBA8));
+        }
+    }
     static byte[] quad() {
         var b=ByteBuffer.allocate(112).order(ByteOrder.nativeOrder());
         for(float[] point:new float[][]{{-.75f,-.75f},{-.75f,.75f},{.75f,.75f},{.75f,-.75f}}) {
@@ -35,7 +66,7 @@ class NativeTextureTest {
     void mipRegionUploadsAndInFlightTerrainGuiSurviveSwapchainChanges(NativeEnvironment.Backend backend) throws Exception {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var window=new NativeSwapchainTest.Window(); var runtime=environment.createRuntime()) {
-            for(var mode:List.of(TerrainSubmission.DIRECT,TerrainSubmission.INDIRECT)) for(var format:NativeTexture.Format.values()) {
+            for(var mode:List.of(TerrainSubmission.DIRECT,TerrainSubmission.INDIRECT)) for(var format:List.of(NativeTexture.Format.RGBA8,NativeTexture.Format.R8)) {
                 try(var renderer=runtime.createRenderer(NativeTestSupport.shaders(),mode);
                     var chain=renderer.createSwapchain(window.hwnd,640,360,NativeSwapchain.PresentMode.IMMEDIATE);
                     var atlas=renderer.createTexture(8,8,4,format);
@@ -55,6 +86,7 @@ class NativeTextureTest {
                         atlas.upload(0,0,0,2,2,update);
                         atlas.upload(0,1,1,2,2,update);
                         var frame=NativeTestSupport.solidFrame(n+1); frame.flags=NativeRenderer.PROFILE|(n%2==0?NativeRenderer.IMPROVED_TRANSPARENCY:0);
+                        if(n%4<2 && runtime.deviceInfo().wireframe()) frame.flags|=NativeRenderer.WIREFRAME;
                         frame.terrainAlbedoTexture=atlas.id(); frame.terrainLightTexture=light.id();
                         if(n==0 || n==12) {
                             frame.meshes=List.of(new NativeRenderer.Mesh(1,quad(),4,0),new NativeRenderer.Mesh(2,quad(),4,1),new NativeRenderer.Mesh(3,quad(),4,2));

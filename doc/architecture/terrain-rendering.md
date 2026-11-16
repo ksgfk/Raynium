@@ -40,6 +40,11 @@ SOLID/CUTOUT 在准备期检查精确轴向平面及两个三角形绕序，记�
 非空组映射到紧凑 submesh 位。TRANSLUCENT 保持原 quad 顺序与单 submesh。
 共享 Quad 索引由 Native 管理；透明索引归对应 mesh，mesh 删除时同时退役。
 
+多面组的 SOLID/CUTOUT 另外保留每个原始 quad 的 3 位面组号；单组及透明网格不保留此映射。
+线框首次绘制时按显式面掩码生成独立索引，在已分组顶点上恢复原始 quad 顺序，保持共享边的覆盖顺序；索引按网格和掩码缓存，不随相机朝向重复上传。
+线框使用完整请求面组交给 GPU 背面剔除；CPU 仍可跳过全部面组均不可见的网格。
+关闭线框、替换或删除网格及 epoch 切换都通过 FrameSlot 退役索引子分配，材质变化时重绑对应状态。
+
 Native 每帧一次求逆 projection × view，变换 (0,0,1,0) 得到有效视点偏移。
 不可逆、非有限或 abs(w)<=1e-8 时关闭面组剔除。相对相机坐标先做整数减法，保留大世界精度。
 按实际 AABB 及 0.001 容差计算轴向组；general 始终保留。多实例取可见组并集，再与显式请求掩码和有效元素位求交。
@@ -75,9 +80,11 @@ renderer 创建时由 `raynium.terrain.submission=auto|direct|indirect` 选择�
 ## 纹理、ABI 与测试
 
 TakeoverAtlas 在 CPU 拼接图集与 mip/padding，动画只上传变化区域；CPU lightmap 使用 MC 26.3 规则计算。
-ABI 17 在一次 present_frame 传递网格、透明索引、可见项、全局纹理参数、相机和 GUI。结构及指针借用见[互操作与加载](interop.md#abi-17-布局)。
+ABI 18 在一次 present_frame 传递网格、透明索引、可见项、全局纹理参数、相机和 GUI。结构及指针借用见[互操作与加载](interop.md#abi-18-布局)。
 
-benchmark 活跃或 JVM 属性 raynium.terrain.profile=true 时启用 GPU timestamp；native 每 120 样本输出阶段统计，并向 Tracy 发布 GPU 毫秒样本。
+benchmark 活跃时启用整帧 GPU timestamp；profilerEnabled 诊断运行或 JVM 属性 raynium.terrain.profile=true 另启用阶段计时。阶段统计每 120 样本输出，并向 Tracy 发布 GPU 毫秒样本。
 JFR TerrainFrame/ClientFrame 记录 Java 准备、FFM 包络及客户端帧；操作入口见[构建与测试](../guide/build-test.md)。
 C++ 测试覆盖网格重排、AABB、非有限值、视点/多实例剔除及排序参数；Java 测试覆盖 FFM、预算、回退和释放。
-nativeTest 覆盖双后端交换链提交、纹理上传、OIT/普通透明切换、GUI 与窗口状态，不进行像素读回比对。
+nativeTest 覆盖双后端交换链提交、纹理上传、OIT/普通透明切换、GUI 与窗口状态；NativeCaptureTest 检查主颜色目标的像素、方向及 resize。
+NativeWireframeTest 对比原始顺序与分组后的共享边像素，覆盖 direct/indirect、显式面掩码、扩容、材质重绑、双槽退役及 epoch；CPU 测试遍历全部 128 种面掩码。
+原版游戏截图对照由[视觉验证工具](../guide/build-test.md#java-构建与运行)生成，采集完成与差异审查分别记录。

@@ -1,4 +1,4 @@
-"""Build Release, fly a copied world, and save native Tracy and optional JVM JFR captures."""
+"""Measure isolated Release scenes; opt into Tracy/JFR for separate diagnostic runs."""
 
 import argparse
 import ctypes
@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import time
+from gpu_memory import GpuMemory
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULTS = {
@@ -22,6 +23,7 @@ DEFAULTS = {
     'warmupSeconds': 20, 'startupTimeoutSeconds': 180, 'shutdownTimeoutSeconds': 60,
     'captureTimeoutSeconds': 120, 'width': 1280, 'height': 720,
     'renderDistance': 32, 'simulationDistance': 8, 'jfrEnabled': False, 'terrainSubmission': 'auto',
+    'profilerEnabled': False, 'renderer': 'raynium', 'commands': [], 'screen': 'none', 'oit': False, 'playerMode': 'spectator',
 }
 PATH_KEYS = ('tracyCapture', 'world', 'optionsFile', 'outputDir')
 
@@ -40,7 +42,7 @@ def number(value, name, minimum, maximum):
     return value
 
 
-def load_config(path, capture_override=None):
+def load_config(path, capture_override=None, *, profiler_override=None, renderer_override=None):
     raw = read_json(path)
     if not isinstance(raw, dict):
         raise ValueError('Configuration must be a JSON object')
@@ -50,7 +52,11 @@ def load_config(path, capture_override=None):
     config = {**DEFAULTS, **raw}
     if capture_override:
         config['tracyCapture'] = str(Path(capture_override).resolve())
-    for key in ('world', 'tracyCapture', 'route'):
+    if profiler_override is not None:
+        config['profilerEnabled'] = profiler_override
+    if renderer_override is not None:
+        config['renderer'] = renderer_override
+    for key in ('world', 'route') + (('tracyCapture',) if config['profilerEnabled'] else ()):
         if key not in config:
             raise ValueError(f'Missing setting: {key}')
     for key in PATH_KEYS:
@@ -63,13 +69,21 @@ def load_config(path, capture_override=None):
     if Path(config['outputDir']).is_relative_to(Path(config['world'])):
         raise ValueError('outputDir cannot be inside the source world')
     for key in ('tracyCapture', 'optionsFile'):
-        if key in config and not Path(config[key]).is_file():
+        if key in config and (key != 'tracyCapture' or config['profilerEnabled']) and not Path(config[key]).is_file():
             raise ValueError(f'{key} does not exist: {config[key]}')
     if config['backend'] not in ('d3d12', 'vulkan'):
         raise ValueError('backend must be d3d12 or vulkan')
     if config['terrainSubmission'] not in ('auto','direct','indirect'):
         raise ValueError('terrainSubmission must be auto, direct or indirect')
-    for key in ('jfrEnabled',):
+    if config['renderer'] not in ('raynium', 'vanilla'):
+        raise ValueError('renderer must be raynium or vanilla')
+    if config['renderer'] == 'vanilla' and config['backend'] != 'vulkan':
+        raise ValueError('Vanilla reference uses Vulkan')
+    if config['screen'] not in ('none', 'inventory', 'pause') or not isinstance(config['commands'], list) or any(not isinstance(c, str) for c in config['commands']):
+        raise ValueError('Invalid benchmark scene screen or commands')
+    if config['playerMode'] not in ('spectator', 'creative', 'survival'):
+        raise ValueError('playerMode must be spectator, creative or survival')
+    for key in ('jfrEnabled', 'profilerEnabled', 'oit'):
         if type(config[key]) is not bool:
             raise ValueError(f'{key} must be a boolean')
     for key in ('warmupSeconds', 'startupTimeoutSeconds', 'shutdownTimeoutSeconds', 'captureTimeoutSeconds'):
@@ -108,6 +122,31 @@ def process_options():
             'startupinfo': startup}
 
 
+def process_memory(pid):
+    class Counters(ctypes.Structure):
+        _fields_ = [('cb', ctypes.c_ulong), ('PageFaultCount', ctypes.c_ulong)] + [
+            (name, ctypes.c_size_t) for name in ('PeakWorkingSetSize', 'WorkingSetSize', 'QuotaPeakPagedPoolUsage',
+                'QuotaPagedPoolUsage', 'QuotaPeakNonPagedPoolUsage', 'QuotaNonPagedPoolUsage', 'PagefileUsage', 'PeakPagefileUsage', 'PrivateUsage')]
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    kernel.OpenProcess.restype = ctypes.c_void_p
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    query = ctypes.WinDLL('psapi').GetProcessMemoryInfo
+    query.argtypes = [ctypes.c_void_p, ctypes.POINTER(Counters), ctypes.c_ulong]
+    query.restype = ctypes.c_int
+    handle = kernel.OpenProcess(0x410, False, pid)
+    if not handle:
+        return None
+    try:
+        values = Counters(); values.cb = ctypes.sizeof(values)
+        if not query(handle, ctypes.byref(values), values.cb):
+            return None
+        return {'peakWorkingSetBytes': values.PeakWorkingSetSize, 'peakCommitBytes': values.PeakPagefileUsage,
+                'sampledPrivateBytes': values.PrivateUsage}
+    finally:
+        kernel.CloseHandle(handle)
+
+
 def gradle_command(*arguments):
     java_home = os.environ.get('JAVA_HOME')
     java = str(Path(java_home) / 'bin/java.exe') if java_home else shutil.which('java')
@@ -120,7 +159,7 @@ def gradle_command(*arguments):
 
 
 def gradle_properties(config):
-    return ['-PnativeConfig=Release', '-PnativeProfiler=true', '-PrhiValidation=false',
+    return ['-PnativeConfig=Release', '-PnativeProfiler=' + str(config.get('profilerEnabled', False)).lower(), '-PrhiValidation=false',
             '-PrhiBackend=' + config['backend'],
             '-PterrainSubmission=' + config['terrainSubmission'],
             '-PnativePython=' + sys.executable]
@@ -223,36 +262,43 @@ def check_capture_tool(path):
     return expected
 
 
-def check_payload(session):
+def check_payload(session, profiler):
     stage = ROOT / 'build/native/stage/windows-x86_64/Release'
     current = read_json(stage / 'current.json')
     payload = stage / current['contentId']
     manifest = read_json(payload / 'native-manifest.json')
-    if manifest.get('configuration') != 'Release' or manifest.get('crt') != 'MT' or manifest.get('profilerEnabled') is not True:
-        raise RuntimeError('Staged payload is not Release/MT with Tracy enabled')
+    if manifest.get('configuration') != 'Release' or manifest.get('crt') != 'MT' or manifest.get('profilerEnabled') is not profiler:
+        raise RuntimeError('Staged payload configuration, CRT or profiler identity does not match the measurement')
     shutil.copyfile(payload / 'native-manifest.json', session / 'native-manifest.json')
 
 
-def check_result(session, game_code, capture_code, jfr_enabled):
+def check_result(session, game_code, capture_code, jfr_enabled, profiler=True, renderer='raynium'):
     if game_code != 0 or capture_code != 0:
         raise RuntimeError(f'Process failed: game/Gradle={game_code}, Tracy={capture_code}')
     client = read_json(session / 'client-result.json')
     if client.get('status') != 'completed' or client.get('routeNativeFrames', 0) <= 0:
         raise RuntimeError('Client did not complete native benchmark: ' + client.get('message', 'missing completion'))
     game_log = (session / 'game/logs/latest.log').read_text(encoding='utf-8', errors='replace')
-    for marker in ('Raynium runtime destroyed', 'Raynium native environment destroyed', 'Raynium native library closed'):
+    for marker in (('Raynium runtime destroyed', 'Raynium native environment destroyed', 'Raynium native library closed') if renderer == 'raynium' else ()):
         if marker not in game_log:
             raise RuntimeError(f'Game log is missing required evidence: {marker}')
     if 'Shutdown failure!' in game_log:
         raise RuntimeError('Native shutdown failed; inspect game log')
-    trace = session / 'session.tracy'
-    if not trace.is_file() or trace.stat().st_size < 16:
-        raise RuntimeError('Tracy did not save a nonempty trace')
-    capture_log = (session / 'capture.log').read_text(encoding='utf-8', errors='replace')
-    if 'Instrumentation failure:' in capture_log:
-        raise RuntimeError('Tracy reported an instrumentation failure; inspect capture.log')
-    if 'Saving trace...' not in capture_log or 'done!' not in capture_log:
-        raise RuntimeError('Tracy did not report successful trace serialization')
+    for marker in ('Serialization errors:', 'Failed to decode value'):
+        if marker in game_log:
+            raise RuntimeError('Benchmark scene has invalid Minecraft input: '+marker)
+    native_log = (session / 'game.log').read_text(encoding='utf-8', errors='replace') if (session / 'game.log').exists() else ''
+    if '[critical]' in native_log or re.search(r'\[error\][^\n]*\r?\n(?:d3d12 validation|vk Validation|RHI validation)', native_log):
+        raise RuntimeError('Native validation or abort in benchmark log')
+    if profiler:
+        trace = session / 'session.tracy'
+        if not trace.is_file() or trace.stat().st_size < 16:
+            raise RuntimeError('Tracy did not save a nonempty trace')
+        capture_log = (session / 'capture.log').read_text(encoding='utf-8', errors='replace')
+        if 'Instrumentation failure:' in capture_log:
+            raise RuntimeError('Tracy reported an instrumentation failure; inspect capture.log')
+        if 'Saving trace...' not in capture_log or 'done!' not in capture_log:
+            raise RuntimeError('Tracy did not report successful trace serialization')
     if jfr_enabled:
         recording = session / 'session.jfr'
         if not recording.is_file() or recording.stat().st_size < 68:
@@ -266,53 +312,75 @@ def check_result(session, game_code, capture_code, jfr_enabled):
 def run_benchmark(config):
     if os.name != 'nt':
         raise RuntimeError('This benchmark currently requires Windows x64')
-    version = check_capture_tool(Path(config['tracyCapture']))
+    profiler = config['profilerEnabled']
+    version = check_capture_tool(Path(config['tracyCapture'])) if profiler else None
     session = Path(config['outputDir']) / datetime.now().strftime('%Y%m%d-%H%M%S-%f')
     session.mkdir(parents=True, exist_ok=False)
     print(f'Session: {session}', flush=True)
     summary = {'status': 'running', 'tracyVersion': version, 'configuration': 'Release',
-               'nativeProfiler': True, 'rhiValidation': False,
+               'nativeProfiler': profiler, 'rhiValidation': False, 'renderer': config['renderer'],
+               'measurement': 'diagnostic' if profiler or config['jfrEnabled'] else 'primary',
                'jfrEnabled': config['jfrEnabled'], 'terrainSubmission': config['terrainSubmission']}
-    game = capture = build = None
+    game = capture = build = gpu_memory = None
     try:
         print('Copying world and preparing isolated options...', flush=True)
         run = prepare_run(config, session)
         properties = gradle_properties(config)
         print('Building Release native payload and Java client (build.log)...', flush=True)
         with (session / 'build.log').open('wb') as log:
-            build = subprocess.Popen(gradle_command('nativeStage', 'classes', 'clientClasses', *properties),
+            build = subprocess.Popen(gradle_command(*(['nativeStage'] if config['renderer'] == 'raynium' else []), 'classes', 'clientClasses', *properties),
                                      cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, **process_options())
             if build.wait(timeout=1800) != 0:
                 raise RuntimeError('Build failed; see build.log (dependencies must be prepared explicitly)')
-        check_payload(session)
+        if config['renderer'] == 'raynium':
+            check_payload(session, profiler)
         with socket.socket() as reservation:
             reservation.bind(('127.0.0.1', 0))
             port = reservation.getsockname()[1]
         environment = os.environ.copy()
         environment['TRACY_PORT'] = str(port)
         summary['port'] = port
-        command = gradle_command('runClientNative', '-x', 'nativeStage', *properties,
+        command = gradle_command('runClientNative' if config['renderer'] == 'raynium' else 'runClientReference', '-x', 'nativeStage', *properties,
+                                 '-PgameUsername=RayniumTest',
                                  '-PbenchmarkRunDir=' + str(run), '-PbenchmarkConfig=' + str(session / 'benchmark.json'))
         if config['jfrEnabled']:
             command.append('-PjfrFile=' + str(session / 'session.jfr'))
         write_json(session / 'commands.json', {'game': command, 'capture': [config['tracyCapture'], '-a', '127.0.0.1',
-                                                                        '-p', str(port), '-o', 'session.tracy']})
-        print(f'Starting Tracy on localhost:{port}, then Minecraft...', flush=True)
+                                                                        '-p', str(port), '-o', 'session.tracy'] if profiler else None})
+        print(f'Starting {config["renderer"]}; profiler={profiler}...', flush=True)
         with (session / 'capture.log').open('wb') as capture_log, (session / 'game.log').open('wb') as game_log:
             # A relative ASCII trace name also works with Tracy's Windows narrow-character fopen.
-            capture = subprocess.Popen([config['tracyCapture'], '-a', '127.0.0.1', '-p', str(port), '-o', 'session.tracy'],
-                                       cwd=session, stdout=capture_log, stderr=subprocess.STDOUT, **process_options())
+            if profiler:
+                capture = subprocess.Popen([config['tracyCapture'], '-a', '127.0.0.1', '-p', str(port), '-o', 'session.tracy'],
+                                           cwd=session, stdout=capture_log, stderr=subprocess.STDOUT, **process_options())
             game = subprocess.Popen(command, cwd=ROOT, env=environment, stdout=game_log,
                                     stderr=subprocess.STDOUT, **process_options())
             deadline = time.monotonic() + config['startupTimeoutSeconds'] + config['warmupSeconds'] + config['route'][-1]['seconds'] + config['shutdownTimeoutSeconds']
-            connected = False
+            connected = not profiler
             stopping = False
+            client_pid = None
+            summary['processMemory'] = {}
             while game.poll() is None:
+                if client_pid is None and (session / 'client-start.json').exists():
+                    try:
+                        client_pid = read_json(session / 'client-start.json')['pid']
+                        try:
+                            gpu_memory = GpuMemory(client_pid)
+                        except OSError as error:
+                            summary['gpuMemoryUnavailable'] = str(error)
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+                if client_pid:
+                    for name, value in (process_memory(client_pid) or {}).items():
+                        summary['processMemory'][name] = max(value, summary['processMemory'].get(name, 0))
+                    if gpu_memory:
+                        for name, value in gpu_memory.sample().items():
+                            summary['processMemory'][name] = max(value, summary['processMemory'].get(name, 0))
                 if not connected and capture_connected(capture.pid, port):
                     connected = True
                     (session / 'capture.ready').touch()
                     print('Tracy connected; waiting for warmup and route completion...', flush=True)
-                if capture.poll() is not None and not (session / 'client-result.json').exists():
+                if profiler and capture.poll() is not None and not (session / 'client-result.json').exists():
                     raise RuntimeError('Tracy exited before the route completed; see capture.log')
                 if not stopping and (session / 'client-result.json').exists():
                     stopping = True
@@ -322,14 +390,16 @@ def run_benchmark(config):
                 time.sleep(0.25)
             if not connected:
                 raise RuntimeError('Game exited before Tracy connected; see game.log')
-            print('Game exited; waiting for Tracy to finish saving...', flush=True)
-            capture.wait(timeout=config['captureTimeoutSeconds'])
-        summary['client'] = check_result(session, game.returncode, capture.returncode, config['jfrEnabled'])
-        summary['traceBytes'] = (session / 'session.tracy').stat().st_size
+            if profiler:
+                print('Game exited; waiting for Tracy to finish saving...', flush=True)
+                capture.wait(timeout=config['captureTimeoutSeconds'])
+        summary['client'] = check_result(session, game.returncode, capture.returncode if profiler else 0, config['jfrEnabled'], profiler, config['renderer'])
+        if profiler:
+            summary['traceBytes'] = (session / 'session.tracy').stat().st_size
         if config['jfrEnabled']:
             summary['jfrBytes'] = (session / 'session.jfr').stat().st_size
         summary['status'] = 'completed'
-        print(f"Saved: {session / 'session.tracy'}", flush=True)
+        print(f"Saved: {session / 'client-result.json'}", flush=True)
         if config['jfrEnabled']:
             print(f"Saved: {session / 'session.jfr'}", flush=True)
     except (Exception, KeyboardInterrupt) as error:
@@ -351,6 +421,11 @@ def run_benchmark(config):
                 summary['forcedCaptureTermination'] = True
                 terminate_tree(capture)
     finally:
+        if gpu_memory is not None:
+            summary['gpuMemorySamples'] = gpu_memory.samples
+            if not gpu_memory.samples:
+                summary['gpuMemoryUnavailable'] = 'GPU Process Memory counters returned no valid samples for this client'
+            gpu_memory.close()
         terminate_tree(build)
         terminate_tree(game)
         terminate_tree(capture)
@@ -363,13 +438,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True, help='JSON config; relative paths resolve against its directory')
     parser.add_argument('--tracy-capture', help='Override capture executable path (relative to current directory)')
-    parser.add_argument('--jfr', action='store_true', help='Record JVM profile JFR alongside Tracy in session.jfr')
+    parser.add_argument('--profiler', action=argparse.BooleanOptionalAction, default=None, help='Override Tracy instrumentation; enable only for a diagnostic run')
+    parser.add_argument('--renderer', choices=['raynium', 'vanilla'], help='Override renderer; vanilla requires Vulkan')
+    parser.add_argument('--jfr', action=argparse.BooleanOptionalAction, default=None, help='Override JVM profile recording in session.jfr')
     parser.add_argument('--check', action='store_true', help='Validate configuration and print resolved settings without building or launching')
     args = parser.parse_args()
     try:
-        config = load_config(args.config.resolve(), args.tracy_capture)
-        if args.jfr:
-            config['jfrEnabled'] = True
+        config = load_config(args.config.resolve(), args.tracy_capture, profiler_override=args.profiler, renderer_override=args.renderer)
+        if args.jfr is not None:
+            config['jfrEnabled'] = args.jfr
         if args.check:
             print(json.dumps(config, ensure_ascii=False, indent=2))
             return 0

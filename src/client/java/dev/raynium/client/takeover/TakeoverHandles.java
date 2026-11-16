@@ -21,8 +21,18 @@ public final class TakeoverHandles {
         private boolean closed;
         Texture(String label,int usage,GpuFormat format,int width,int height,int layers,int mips) {
             this.label=label; this.usage=usage; this.format=format; this.width=width; this.height=height; this.layers=layers; this.mips=mips;
-            nativeTexture=layers==1 && (format==GpuFormat.RGBA8_UNORM || format==GpuFormat.R8_UNORM)?
-                TakeoverRuntime.renderer().createTexture(width,height,mips,format==GpuFormat.R8_UNORM?NativeTexture.Format.R8:NativeTexture.Format.RGBA8):null;
+            NativeTexture.Format nativeFormat=switch(format) {
+                case RGBA8_UNORM -> NativeTexture.Format.RGBA8;
+                case R8_UNORM -> NativeTexture.Format.R8;
+                case RGBA16_FLOAT -> NativeTexture.Format.RGBA16F;
+                case RGBA32_FLOAT -> NativeTexture.Format.RGBA32F;
+                case D32_FLOAT -> NativeTexture.Format.DEPTH32F;
+                default -> throw new IllegalArgumentException("Unsupported native texture format: "+format);
+            };
+            int flags=((usage&GpuTexture.USAGE_CUBEMAP_COMPATIBLE)!=0?NativeTexture.CUBE:0)
+                |((usage&GpuTexture.USAGE_RENDER_ATTACHMENT)!=0?NativeTexture.ATTACHMENT:0)
+                |((usage&GpuTexture.USAGE_COPY_SRC)!=0?NativeTexture.READBACK:0);
+            nativeTexture=TakeoverRuntime.renderer().createTexture(width,height,mips,layers,nativeFormat,flags);
         }
         public NativeTexture nativeTexture() { if(closed) throw new IllegalStateException("takeover: Texture closed"); return nativeTexture; }
         @Override public int getWidth(int mip) { return Math.max(1,width>>mip); }
@@ -37,7 +47,10 @@ public final class TakeoverHandles {
     }
     public static final class View implements GpuTextureView {
         private final GpuTexture texture; private final int base,mips; private boolean closed;
-        View(GpuTexture texture,int base,int mips) { this.texture=texture; this.base=base; this.mips=mips; }
+        View(GpuTexture texture,int base,int mips) {
+            if(texture.isClosed() || base<0 || mips<=0 || base>texture.getMipLevels()-mips) throw new IllegalArgumentException("Invalid texture view range");
+            this.texture=texture; this.base=base; this.mips=mips;
+        }
         @Override public boolean isClosed() { return closed || texture.isClosed(); }
         @Override public GpuTexture texture() { return texture; }
         @Override public int baseMipLevel() { return base; }
@@ -81,16 +94,37 @@ public final class TakeoverHandles {
     public static void write(GpuTexture texture,NativeImage image,int mip,int layer,int x,int y) {
         var nativeTexture=((Texture)texture).nativeTexture();
         if(nativeTexture!=null) {
-            if(layer!=0) throw new IllegalArgumentException("takeover: Uploaded texture array layer is unsupported");
-            nativeTexture.upload(mip,x,y,image.getWidth(),image.getHeight(),image.getWidth()*image.format().components(),MemorySegment.ofBuffer(image.getPixelBytes()));
+            nativeTexture.uploadLayer(mip,layer,x,y,image.getWidth(),image.getHeight(),image.getWidth()*image.format().components(),MemorySegment.ofBuffer(image.getPixelBytes()));
         }
     }
     public static void clear(GpuTexture texture,Vector4fc color) {
         var nativeTexture=((Texture)texture).nativeTexture();
-        if(nativeTexture==null) return;
-        byte[] pixels=new byte[Math.multiplyExact(texture.getWidth(0)*texture.getHeight(0),4)];
-        byte[] rgba={(byte)Math.round(color.x()*255),(byte)Math.round(color.y()*255),(byte)Math.round(color.z()*255),(byte)Math.round(color.w()*255)};
-        for(int p=0;p<pixels.length;p++) pixels[p]=rgba[p&3];
-        nativeTexture.upload(0,0,0,texture.getWidth(0),texture.getHeight(0),pixels);
+        for(int mip=0;mip<texture.getMipLevels();mip++) {
+            int width=texture.getWidth(mip),height=texture.getHeight(mip);
+            var pixels=MemorySegment.ofArray(clearPixels(nativeTexture.format(),width,height,color));
+            for(int layer=0;layer<texture.getDepthOrLayers();layer++)
+                nativeTexture.uploadLayer(mip,layer,0,0,width,height,Math.multiplyExact(width,nativeTexture.format().bytesPerPixel()),pixels);
+        }
+    }
+    static byte[] clearPixels(NativeTexture.Format format,int width,int height,Vector4fc color) {
+        if(width<=0 || height<=0 || format==NativeTexture.Format.DEPTH32F)
+            throw new IllegalArgumentException("Color clear requires a nonempty color texture");
+        var texel=ByteBuffer.allocate(format.bytesPerPixel()).order(java.nio.ByteOrder.nativeOrder());
+        float[] values={color.x(),color.y(),color.z(),color.w()};
+        for(int component=0;component<(format==NativeTexture.Format.R8?1:4);component++) {
+            float value=values[component];
+            switch(format) {
+                case RGBA8,R8 -> texel.put((byte)Math.round(Math.clamp(value,0,1)*255));
+                case RGBA16F -> texel.putShort(Float.floatToFloat16(value));
+                case RGBA32F -> texel.putFloat(value);
+                default -> throw new IllegalArgumentException("Unsupported clear format: "+format);
+            }
+        }
+        byte[] pixels=new byte[Math.multiplyExact(Math.multiplyExact(width,height),format.bytesPerPixel())];
+        System.arraycopy(texel.array(),0,pixels,0,texel.capacity());
+        for(int filled=texel.capacity();filled<pixels.length;) {
+            int copy=Math.min(filled,pixels.length-filled); System.arraycopy(pixels,0,pixels,filled,copy); filled+=copy;
+        }
+        return pixels;
     }
 }

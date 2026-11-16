@@ -13,7 +13,7 @@ import java.util.OptionalDouble;
 import java.util.function.Supplier;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
-@Mixin(targets={"net.minecraft.client.renderer.fog.FogRenderer","net.minecraft.client.renderer.CubeMap","net.minecraft.client.renderer.DebugCrosshairRenderer"})
+@Mixin(targets={"net.minecraft.client.renderer.fog.FogRenderer","net.minecraft.client.renderer.CubeMap"})
 abstract class BufferDataMixin {
     @WrapOperation(method={"<init>","*"},at=@At(value="INVOKE",target="Lcom/mojang/renderpearl/api/device/GpuDevice;createBuffer(Ljava/util/function/Supplier;ILjava/nio/ByteBuffer;)Lcom/mojang/renderpearl/api/buffers/GpuBuffer;"))
     private static GpuBuffer raynium$buffer(GpuDevice device,Supplier<String> label,int usage,ByteBuffer data,Operation<GpuBuffer> original) { return TakeoverHandles.buffer(label,usage,data); }

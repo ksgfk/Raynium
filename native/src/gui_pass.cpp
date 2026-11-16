@@ -38,11 +38,11 @@ bool GuiPassResources::Create(Device& device,std::span<const radray::byte> shade
         if(!program.vs || !program.ps || !program.layout) { RADRAY_ERR_LOG("Cannot create GUI shader stages/layout"); return false; }
     }
     auto resources=radray::unique_ptr<GuiPassResources>(new GuiPassResources(std::move(objects)));
-    if(!resources->PrepareOutput(device,TextureFormat::BGRA8_UNORM)) return false;
+    if(!resources->PrepareOutput(device,TextureFormat::RGBA8_UNORM)) return false;
     output=std::move(resources); return true;
 }
 bool GuiPassResources::PrepareOutput(Device& device,TextureFormat format) {
-    if(format!=TextureFormat::BGRA8_UNORM) { RADRAY_ERR_LOG("Unsupported GUI output format"); return false; }
+    if(format!=TextureFormat::RGBA8_UNORM) { RADRAY_ERR_LOG("Unsupported GUI output format"); return false; }
     auto& pipelines=_objects->pipelines;
     const VertexBufferLayout vertex{0,24,VertexStepMode::Vertex};
     auto primitive=PrimitiveState::Default(); primitive.Cull=CullMode::None;
@@ -92,7 +92,7 @@ bool GuiPassResources::Prepare(Device& device,GuiFrameSlot& slot,const UploadedT
     for(size_t i=f.gui_draw_count;i<slot.textureParameters.size();++i) {
         auto& binding=slot.textureParameters[i];
         if(binding.parameters) binding.parameters->ResetBindingsForReuse();
-        binding.texture.Reset(); binding.sampler=nullptr;
+        binding.texture.Reset(); binding.sampler=nullptr; binding.view=nullptr;
     }
     if(!f.gui_draw_count) return true;
     slot.vertices=std::as_bytes(std::span{f.gui_vertices,f.gui_vertex_count});
@@ -102,6 +102,15 @@ bool GuiPassResources::Prepare(Device& device,GuiFrameSlot& slot,const UploadedT
     slot.draws.reserve(f.gui_draw_count);
     for(uint32_t i=0;i<f.gui_draw_count;++i) {
         const auto& desc=f.gui_draws[i];
+        if(desc.pipeline==RN_GUI_SCENE) {
+            if(desc.vertex_count || desc.texture>=f.scene_draw_count || !f.scene_draws || f.scene_draws[desc.texture].phase!=RN_SCENE_GUI) {
+                RADRAY_ERR_LOG("Invalid GUI scene draw reference"); return false;
+            }
+            auto& binding=slot.textureParameters[i];
+            if(binding.parameters) binding.parameters->ResetBindingsForReuse();
+            binding.texture.Reset(); binding.sampler=nullptr; binding.view=nullptr;
+            slot.draws.push_back({.desc=desc}); continue;
+        }
         if(desc.pipeline>RN_GUI_TEXT_GRAYSCALE || desc.reserved || (desc.sampler_bits&~63u) || desc.first_vertex%4 || desc.vertex_count%4 ||
            uint64_t(desc.first_vertex)+desc.vertex_count>f.gui_vertex_count || desc.scissor[2]<0 || desc.scissor[3]<0) {
             RADRAY_ERR_LOG("Invalid GUI draw, pipeline, vertex range or scissor"); return false;
@@ -115,20 +124,17 @@ bool GuiPassResources::Prepare(Device& device,GuiFrameSlot& slot,const UploadedT
         if(desc.pipeline>RN_GUI_HIGHLIGHT) {
             const auto* owner=textures.Find(desc.texture);
             if(!owner) { RADRAY_ERR_LOG("GUI draw={} references missing uploaded texture={}",i,desc.texture); return false; }
+            if(owner->desc.array_layers!=1 || owner->desc.format==RN_PIXEL_DEPTH32F) { RADRAY_ERR_LOG("GUI requires a color 2D texture: {}",desc.texture); return false; }
             draw.texture=owner->texture.Get();
-            const uint64_t key=(uint64_t(owner->desc.mip_levels)<<32)|desc.sampler_bits;
-            auto& sampler=_objects->samplers[key];
-            if(!sampler) sampler=device.CreateSampler({.AddressS=(desc.sampler_bits&1)?AddressMode::Repeat:AddressMode::ClampToEdge,
-                .AddressT=(desc.sampler_bits&2)?AddressMode::Repeat:AddressMode::ClampToEdge,.AddressR=AddressMode::ClampToEdge,
-                .MinFilter=(desc.sampler_bits&4)?FilterMode::Linear:FilterMode::Nearest,.MagFilter=(desc.sampler_bits&8)?FilterMode::Linear:FilterMode::Nearest,
-                .MipmapFilter=(desc.sampler_bits&16)?FilterMode::Linear:FilterMode::Nearest,.LodMax=(desc.sampler_bits&32)?0.f:float(owner->desc.mip_levels-1),.AnisotropyClamp=1}).Release();
+            auto* sampler=GetTextureSampler(device,_objects->samplers,desc.sampler_bits,desc.sampling);
+            auto* view=owner->texture->GetSamplingView(device,desc.sampling);
             auto& binding=slot.textureParameters[i];
             if(!binding.parameters) binding.parameters=device.CreateShaderParameterSet({_objects->textureLayout.get()}).Release();
-            if(!sampler || !binding.parameters) { RADRAY_ERR_LOG("Cannot create GUI texture bindings"); return false; }
-            if(binding.texture.Get()!=draw.texture || binding.sampler!=sampler.get()) {
+            if(!sampler || !view || !binding.parameters) { RADRAY_ERR_LOG("Cannot create GUI texture bindings"); return false; }
+            if(binding.texture.Get()!=draw.texture || binding.sampler!=sampler || binding.view!=view) {
                 binding.parameters->ResetBindingsForReuse();
-                binding.texture=owner->texture; binding.sampler=sampler.get();
-                if(!binding.parameters->Set(0,0,binding.texture->GetDefaultView()) ||
+                binding.texture=owner->texture; binding.sampler=sampler; binding.view=view;
+                if(!binding.parameters->Set(0,0,binding.view) ||
                    !binding.parameters->Set(1,0,binding.sampler) || !binding.parameters->FlushWrites()) {
                     RADRAY_ERR_LOG("Cannot prepare GUI texture bindings"); return false;
                 }
@@ -137,18 +143,18 @@ bool GuiPassResources::Prepare(Device& device,GuiFrameSlot& slot,const UploadedT
         } else {
             auto& binding=slot.textureParameters[i];
             if(binding.parameters) binding.parameters->ResetBindingsForReuse();
-            binding.texture.Reset(); binding.sampler=nullptr;
+            binding.texture.Reset(); binding.sampler=nullptr; binding.view=nullptr;
         }
         slot.draws.push_back(std::move(draw));
     }
     slot.vertexCount=f.gui_vertex_count;
     return true;
 }
-void GuiPassResources::AddPass(radray::RDGBuilder& graph,radray::FrameSlot& slot,GuiFrameSlot& frame,
-    radray::RDGTextureHandle color,uint32_t width,uint32_t height) {
-    if(frame.draws.empty()) return;
+void GuiPassResources::Upload(radray::RDGBuilder& graph,GuiFrameSlot& frame) {
+    if(!frame.vertexCount) return;
     const auto vertices=graph.CreateBuffer({.MaxSize=frame.vertices.size(),.Usage=BufferUse::Vertex},radray::RDGUploadSource::BorrowedBytes(frame.vertices));
     const uint64_t indexBytes=uint64_t(frame.vertexCount/4)*24;
+    if(frame.metrics) frame.metrics->gui_upload_bytes+=frame.vertices.size()+indexBytes+512;
     const auto indices=graph.CreateBuffer({.MaxSize=indexBytes,.Usage=BufferUse::Index},
         radray::RDGUploadSource::Generated(indexBytes,frame.vertexCount,+[](const uint32_t& count,radray::RDGUploadWriteContext& context) noexcept {
             return WriteQuadIndices(context.Bytes,count);
@@ -161,34 +167,46 @@ void GuiPassResources::AddPass(radray::RDGBuilder& graph,radray::FrameSlot& slot
                 std::memset(context.Bytes.data(),0,context.Bytes.size()); std::memcpy(context.Bytes.data(),values.data(),sizeof(values)); return true;
             }));
     }
+    frame.vertexBuffer=vertices; frame.indexBuffer=indices; frame.constants=constants;
+}
+void GuiPassResources::AddPass(radray::RDGBuilder& graph,radray::FrameSlot& slot,GuiFrameSlot& frame,
+    radray::RDGTextureHandle color,uint32_t width,uint32_t height,radray::vector<TextureResource*>& imports,uint32_t first,uint32_t count) {
+    count=std::min(count,uint32_t(frame.draws.size())-first);
+    if(!count) return;
+    const auto vertices=frame.vertexBuffer,indices=frame.indexBuffer; const auto constants=frame.constants;
     struct PassData {
         radray::array<GraphicsPipelineState*,12> pipelines;
         GuiFrameSlot* frame;
-        uint32_t width,height;
+        uint32_t width,height,first,count;
         radray::RDGBufferHandle vertices,indices;
         radray::array<radray::RDGBufferHandle,2> constants;
         radray::RDGBufferSlice vertexSlice{},indexSlice{};
     };
     radray::array<GraphicsPipelineState*,12> pipelines;
     for(size_t i=0;i<pipelines.size();++i) pipelines[i]=_objects->pipelines[i].get();
-    auto pass=graph.AddRasterPass("Raynium GUI",PassData{pipelines,&frame,width,height,vertices,indices,constants},
+    auto pass=graph.AddRasterPass("Raynium GUI",PassData{pipelines,&frame,width,height,first,count,vertices,indices,constants},
         +[](const PassData& data,radray::RDGRasterPassContext& context) noexcept {
             try {
                 auto& encoder=context.GetEncoder();
                 encoder.SetViewport({0,0,float(data.width),float(data.height),0,1});
-                return RecordGuiDraws(*data.frame,data.pipelines,data.vertexSlice,data.indexSlice,encoder);
+                return RecordGuiDraws(*data.frame,data.pipelines,data.vertexSlice,data.indexSlice,encoder,data.first,data.count);
             } catch(...) { AbortUnexpectedException("Raynium GUI record"); }
         },+[](PassData& data,radray::RDGPrepareContext& context) noexcept {
             data.vertexSlice=context.ResolveBuffer(data.vertices); data.indexSlice=context.ResolveBuffer(data.indices);
             for(uint32_t i=0;i<2;++i)
                 if(!BindFrameConstants(*data.frame->passParameters[i],data.frame->boundConstants[i],context.ResolveBuffer(data.constants[i]))) return false;
+            if(auto* metrics=data.frame->metrics; metrics && data.vertexSlice.Size && data.indexSlice.Size)
+                for(const auto& draw:std::span{data.frame->draws}.subspan(data.first,data.count))
+                    if(draw.desc.vertex_count && draw.scissor.Width && draw.scissor.Height) {
+                        ++metrics->gui_calls; metrics->bind_calls+=4+uint64_t(draw.parameters!=nullptr);
+                    }
             return true;
         });
     pass.ReadBuffer(vertices,BufferState::Vertex).ReadBuffer(indices,BufferState::Index)
         .ReadBuffer(constants[0],BufferState::CBuffer).ReadBuffer(constants[1],BufferState::CBuffer)
         .WriteColor(0,color,LoadAction::Load,StoreAction::Store);
-    std::pmr::unordered_set<radray::GpuTexture*> textures{&slot.GetScratchMemoryResource()};
-    for(const auto& draw:frame.draws) if(draw.texture && textures.insert(draw.texture).second)
-        pass.ReadTexture(graph.ImportPersistentBorrowed(*draw.texture));
+    std::pmr::unordered_set<TextureResource*> textures{&slot.GetScratchMemoryResource()};
+    for(const auto& draw:std::span{frame.draws}.subspan(first,count)) if(draw.texture && textures.insert(draw.texture).second)
+        pass.ReadTexture(draw.texture->Import(graph,slot,imports));
 }
 }

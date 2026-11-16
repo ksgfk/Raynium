@@ -19,6 +19,12 @@ public:
     bool CreateTexture(const rn_uploaded_texture_desc& desc) { return _uploaded.Create(_device,desc); }
     bool UploadTexture(const rn_texture_upload_desc& desc) { return _uploaded.Upload(desc); }
     bool DestroyTexture(uint32_t id) { return _uploaded.Destroy(id); }
+    bool CreateSceneBuffer(const rn_scene_buffer_desc& desc) { return _pipeline->Scene().CreateBuffer(_device.GetDevice(),desc); }
+    bool UploadSceneBuffer(const rn_scene_buffer_upload_desc& desc) { return _pipeline->Scene().UploadBuffer(desc); }
+    bool DestroySceneBuffer(uint32_t id) { return _pipeline->Scene().DestroyBuffer(id); }
+    bool PollCapture(uint64_t sequence,rn_capture_info& info,void* pixels,uint64_t capacity) { return _pipeline->PollCapture(sequence,info,pixels,capacity); }
+    bool RequestCapture(const rn_capture_request& request) { return _pipeline->RequestCapture(_uploaded,request); }
+    bool SupportsWireframe() const { return _pipeline->Resources().SupportsWireframe(); }
     radray::DeviceContext& Runtime() { return _device; }
 private:
     Renderer(radray::DeviceContext& device,radray::unique_ptr<radray::FrameScheduler> scheduler,

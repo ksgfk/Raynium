@@ -1,0 +1,202 @@
+{
+  "scenes": [
+    {
+      "name": "world-classic",
+      "commands": [
+        "weather clear",
+        "time set 6000",
+        "gamemode creative",
+        "worldborder center 0 0",
+        "worldborder set 512",
+        "fill -12 179 -12 12 179 12 minecraft:smooth_stone",
+        "fill -5 180 -4 -3 182 -4 minecraft:glass",
+        "fill -1 180 -4 1 182 -4 minecraft:blue_stained_glass",
+        "fill 3 180 -4 5 182 -4 minecraft:ice",
+        "setblock -5 180 1 minecraft:chest[facing=south]",
+        "setblock -3 180 1 minecraft:enchanting_table",
+        "setblock -1 180 1 minecraft:oak_sign[rotation=0]",
+        "setblock 1 180 1 minecraft:white_banner[rotation=0]",
+        "setblock 3 180 1 minecraft:campfire",
+        "setblock 5 180 1 minecraft:shulker_box",
+        "fill -1 179 -8 1 179 -6 minecraft:iron_block",
+        "setblock 0 180 -7 minecraft:beacon",
+        "summon minecraft:pig -3 180 -1 {NoAI:1b,NoGravity:1b,Silent:1b,Rotation:[0f,0f]}",
+        "summon minecraft:sheep 0 180 -1 {NoAI:1b,NoGravity:1b,Silent:1b,Color:14b,Rotation:[0f,0f]}",
+        "summon minecraft:armor_stand 3 180 -1 {NoGravity:1b,ShowArms:1b}",
+        "give @s minecraft:diamond_sword",
+        "give @s minecraft:diamond_pickaxe",
+        "give @s minecraft:oak_planks",
+        "give @s minecraft:enchanted_book",
+        "give @s minecraft:filled_map",
+        "give @s minecraft:shield",
+        "give @s minecraft:apple",
+        "give @s minecraft:bow",
+        "tick freeze"
+      ],
+      "camera": {
+        "x": 0.5,
+        "y": 181,
+        "z": 9.5,
+        "yaw": 180,
+        "pitch": 10
+      },
+      "oit": false,
+      "hideHud": true,
+      "gameTime": 6000,
+      "animationMillis": 10000,
+      "rain": 0,
+      "thunder": 0,
+      "wireframe": false
+    },
+    {
+      "name": "world-oit",
+      "camera": {
+        "x": 0.5,
+        "y": 181,
+        "z": 9.5,
+        "yaw": 180,
+        "pitch": 10
+      },
+      "oit": true,
+      "hideHud": true,
+      "gameTime": 6000,
+      "animationMillis": 10000,
+      "rain": 0,
+      "thunder": 0,
+      "wireframe": false
+    },
+    {
+      "name": "first-person",
+      "camera": {
+        "x": 0.5,
+        "y": 181,
+        "z": 9.5,
+        "yaw": 180,
+        "pitch": 10
+      },
+      "oit": false,
+      "gameTime": 6000,
+      "animationMillis": 10000,
+      "rain": 0,
+      "thunder": 0,
+      "wireframe": false
+    },
+    {
+      "name": "pause-blur",
+      "camera": {
+        "x": 0.5,
+        "y": 181,
+        "z": 9.5,
+        "yaw": 180,
+        "pitch": 10
+      },
+      "screen": "pause",
+      "oit": false,
+      "gameTime": 6000,
+      "animationMillis": 10000,
+      "rain": 0,
+      "thunder": 0,
+      "wireframe": false
+    },
+    {
+      "name": "inventory-preview",
+      "commands": [
+        "gamemode survival"
+      ],
+      "camera": {
+        "x": 0.5,
+        "y": 181,
+        "z": 9.5,
+        "yaw": 180,
+        "pitch": 10
+      },
+      "screen": "inventory",
+      "gameTime": 6000,
+      "animationMillis": 10000,
+      "rain": 0,
+      "thunder": 0,
+      "wireframe": false
+    },
+    {
+      "name": "resource-reload",
+      "camera": {
+        "x": 0.5,
+        "y": 181,
+        "z": 9.5,
+        "yaw": 180,
+        "pitch": 10
+      },
+      "screen": "inventory",
+      "reload": true,
+      "gameTime": 6000,
+      "animationMillis": 10000,
+      "rain": 0,
+      "thunder": 0,
+      "wireframe": false
+    },
+    {
+      "name": "wireframe-classic",
+      "camera": {
+        "x": 0.5,
+        "y": 181,
+        "z": 9.5,
+        "yaw": 180,
+        "pitch": 10
+      },
+      "gameTime": 6000,
+      "animationMillis": 10000,
+      "rain": 0,
+      "wireframe": true,
+      "oit": false,
+      "hideHud": true
+    },
+    {
+      "name": "wireframe-oit",
+      "camera": {
+        "x": 0.5,
+        "y": 181,
+        "z": 9.5,
+        "yaw": 180,
+        "pitch": 10
+      },
+      "gameTime": 6000,
+      "animationMillis": 10000,
+      "rain": 0,
+      "wireframe": true,
+      "oit": true,
+      "hideHud": true
+    },
+    {
+      "name": "rain-classic",
+      "camera": {
+        "x": 0.5,
+        "y": 181,
+        "z": 9.5,
+        "yaw": 180,
+        "pitch": 10
+      },
+      "gameTime": 6000,
+      "animationMillis": 10000,
+      "rain": 1,
+      "wireframe": false,
+      "oit": false,
+      "hideHud": true
+    },
+    {
+      "name": "rain-oit",
+      "camera": {
+        "x": 0.5,
+        "y": 181,
+        "z": 9.5,
+        "yaw": 180,
+        "pitch": 10
+      },
+      "gameTime": 6000,
+      "animationMillis": 10000,
+      "rain": 1,
+      "wireframe": false,
+      "oit": true,
+      "hideHud": true
+    }
+  ]
+}

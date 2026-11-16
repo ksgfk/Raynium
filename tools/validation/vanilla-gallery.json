@@ -1,0 +1,25 @@
+{
+  "defaults": {
+    "camera": {"x": 0.5, "y": 181, "z": 9.5, "yaw": 180, "pitch": 10},
+    "screen": "gallery",
+    "requiredPictureInPicture": ["GuiSkinRenderState", "GuiBookModelRenderState", "GuiBannerResultRenderState", "GuiProfilerChartRenderState", "OversizedItemRenderState"],
+    "hideHud": true,
+    "oit": false,
+    "wireframe": false,
+    "gameTime": 6000,
+    "animationMillis": 10000,
+    "partialTick": 0,
+    "rain": 0,
+    "thunder": 0,
+    "particles": [],
+    "clearNotifications": true,
+    "settleSeconds": 3
+  },
+  "scenes": [
+    {"name": "gallery-cached", "galleryPhase": 0, "commands": ["tick freeze", "gamemode creative"]},
+    {"name": "gallery-repeat", "galleryPhase": 0},
+    {"name": "gallery-animation", "galleryPhase": 1},
+    {"name": "gallery-reload", "galleryPhase": 1, "reload": true},
+    {"name": "gallery-reload-consecutive", "galleryPhase": 1, "reload": true}
+  ]
+}

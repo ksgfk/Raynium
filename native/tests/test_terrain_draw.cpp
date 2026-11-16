@@ -330,6 +330,41 @@ TEST(TerrainMeshAnalysis, TranslucencyPreservesCompilerOrder) {
     TerrainMeshLayout layout; radray::vector<radray::byte> bytes;
     ASSERT_TRUE(AnalyzeAndWrite(source,RN_MATERIAL_TRANSLUCENT,layout,bytes));
     EXPECT_EQ(bytes,source); ASSERT_EQ(layout.ranges.size(),1); EXPECT_EQ(layout.ranges[0].count,12);
+    EXPECT_TRUE(layout.originalQuadGroups.empty());
+}
+TEST(TerrainMeshAnalysis, PackedWireframeIndicesRestoreOriginalVerticesForEveryFaceMask) {
+    const radray::array<uint32_t,11> groups{6,0,5,2,0,1,4,3,6,2,5};
+    radray::vector<radray::byte> source;
+    for(size_t n=0;n<groups.size();++n) { auto q=Quad(groups[n],float(n)); source.insert(source.end(),q.begin(),q.end()); }
+    TerrainMeshLayout layout; radray::vector<radray::byte> grouped;
+    ASSERT_TRUE(AnalyzeAndWrite(source,RN_MATERIAL_OPAQUE,layout,grouped));
+    ASSERT_EQ(layout.originalQuadGroups.size(),5u);
+    ASSERT_NE(grouped,source);
+    const radray::array<uint32_t,6> vertices{0,1,2,2,3,0};
+    for(uint32_t mask=0;mask<128;++mask) {
+        size_t selected=0; for(auto g:groups) if(mask&layout.groupBits[g]) ++selected;
+        radray::vector<radray::byte> storage(selected*24+2,radray::byte{0x7f});
+        ASSERT_TRUE(WriteWireframeIndices(std::span{storage}.subspan(1,selected*24),layout,mask));
+        EXPECT_EQ(storage.front(),radray::byte{0x7f}); EXPECT_EQ(storage.back(),radray::byte{0x7f});
+        size_t index=0;
+        for(size_t q=0;q<groups.size();++q) if(mask&layout.groupBits[groups[q]]) for(auto vertex:vertices) {
+            uint32_t actual; std::memcpy(&actual,storage.data()+1+index++*4,4);
+            ASSERT_LT(actual,layout.vertexCount);
+            EXPECT_EQ(std::memcmp(grouped.data()+actual*28,source.data()+(q*4+vertex)*28,28),0);
+        }
+    }
+    EXPECT_FALSE(WriteWireframeIndices({},layout,128));
+    EXPECT_FALSE(WriteWireframeIndices({},layout,127));
+}
+TEST(TerrainMeshAnalysis, SingleGroupNeedsNoRetainedWireframePermutation) {
+    TerrainMeshLayout layout; radray::vector<radray::byte> grouped;
+    ASSERT_TRUE(AnalyzeAndWrite(Quad(4),RN_MATERIAL_CUTOUT,layout,grouped));
+    EXPECT_TRUE(layout.originalQuadGroups.empty());
+    radray::array<radray::byte,24> indices{},expected{};
+    ASSERT_TRUE(WriteWireframeIndices(indices,layout,1)); ASSERT_TRUE(WriteQuadIndices(expected,4));
+    EXPECT_EQ(indices,expected); EXPECT_TRUE(WriteWireframeIndices({},layout,0));
+    ASSERT_TRUE(AnalyzeAndWrite({},RN_MATERIAL_OPAQUE,layout,grouped));
+    EXPECT_TRUE(WriteWireframeIndices({},layout,0));
 }
 TEST(TerrainMeshAnalysis, InverseProjectionEyeIncludesTranslationAndRejectsInvalidMatrices) {
     rn_render_frame_desc frame{};

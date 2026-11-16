@@ -1,0 +1,33 @@
+{
+  "defaults": {
+    "camera": {"x": 0.5, "y": 181, "z": 9.5, "yaw": 180, "pitch": 10},
+    "screen": "none", "hideHud": true, "oit": false, "wireframe": false,
+    "gameTime": 6000, "animationMillis": 10000, "partialTick": 0,
+    "rain": 0, "thunder": 0, "particles": [], "vignetteBrightness": 0.6,
+    "clearNotifications": true, "settleSeconds": 5
+  },
+  "scenes": [
+    {
+      "name": "world-grayscale-fonts",
+      "commands": [
+        "kill @e[type=!minecraft:player]", "clear @s", "gamemode creative",
+        "weather clear", "time set 6000", "worldborder center 0 0", "worldborder set 512",
+        "fill -12 179 -8 12 179 6 minecraft:smooth_stone",
+        "fill -2 180 -1 2 182 -1 minecraft:blue_stained_glass",
+        "setblock -4 180 1 minecraft:oak_sign[rotation=0]",
+        "data merge block -4 180 1 {front_text:{messages:[\"Grayscale glyphs\",\"UV and offset\",\"0123456789\",\"Unicode: 世界\"],color:\"black\",has_glowing_text:1b}}",
+        "summon minecraft:text_display -2 184 -3 {text:{text:\"World TrueType / 世界\",color:\"gold\"},billboard:\"center\",background:1073741824}",
+        "summon minecraft:text_display 0 181 -3 {text:{text:\"See-through glyphs\",color:\"white\"},billboard:\"center\",see_through:1b,background:0}",
+        "summon minecraft:item_display 4 181 -2 {item:{id:\"minecraft:blue_stained_glass\",count:1},billboard:\"center\"}",
+        "item replace entity @s weapon.mainhand with minecraft:compass[enchantment_glint_override=true]",
+        "tick freeze", "tick step 80"
+      ],
+      "requiredEntities": ["minecraft:text_display", "minecraft:item_display"]
+    },
+    {"name": "world-grayscale-fonts-oit", "oit": true},
+    {"name": "translucent-special-glint", "hideHud": false},
+    {"name": "translucent-special-glint-oit", "hideHud": false, "oit": true},
+    {"name": "nausea-overlay", "hideHud": false, "commands": ["effect give @s minecraft:nausea infinite 0 true", "tick step 80"]},
+    {"name": "nausea-cleared", "hideHud": false, "commands": ["effect clear @s", "tick step 80"]}
+  ]
+}

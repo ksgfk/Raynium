@@ -227,6 +227,14 @@ bool AnalyzeTerrainMesh(std::span<const radray::byte> bytes,rn_material_mode lay
         if(counts[g]) { layout.groupBits[g]=1u<<layout.ranges.size(); layout.ranges.push_back({first,counts[g]/4*6,0}); }
         first+=counts[g]/4*6;
     }
+    if(layer!=RN_MATERIAL_TRANSLUCENT && layout.ranges.size()>1) {
+        layout.originalQuadGroups.resize((groups.size()*3+7)/8,0);
+        for(size_t q=0;q<groups.size();++q) {
+            const size_t bit=q*3,byte=bit/8; const auto shift=uint32_t(bit%8);
+            layout.originalQuadGroups[byte]|=uint8_t(groups[q]<<shift);
+            if(shift>5) layout.originalQuadGroups[byte+1]|=uint8_t(groups[q]>>(8-shift));
+        }
+    }
     return true;
 }
 bool TerrainMeshUpload::Write(std::span<radray::byte> destination) const noexcept {
@@ -245,6 +253,46 @@ bool WriteQuadIndices(std::span<radray::byte> destination,uint32_t vertexCount) 
     for(uint32_t q=0;q<vertexCount/4;++q) {
         const uint32_t v=q*4; const radray::array<uint32_t,6> quad{v,v+1,v+2,v+2,v+3,v};
         std::memcpy(destination.data()+size_t(q)*24,quad.data(),24);
+    }
+    return true;
+}
+bool WriteWireframeIndices(std::span<radray::byte> destination,const TerrainMeshLayout& layout,uint32_t mask) noexcept {
+    if(layout.ranges.size()>7 || layout.vertexCount%4 || layout.layer==RN_MATERIAL_TRANSLUCENT ||
+       (mask&~((1u<<layout.ranges.size())-1))) return false;
+    uint64_t count=0;
+    for(size_t n=0;n<layout.ranges.size();++n) if(mask&(1u<<n)) count+=layout.ranges[n].count;
+    if(destination.size()!=count*4) return false;
+    if(!count) return true;
+    if(layout.ranges.size()<=1) return WriteQuadIndices(destination,layout.vertexCount);
+    const size_t quads=layout.vertexCount/4;
+    if(layout.originalQuadGroups.size()!=(quads*3+7)/8) return false;
+    radray::array<uint32_t,7> positions{};
+    for(uint32_t g=0;g<7;++g) if(layout.groupBits[g]) {
+        const auto bit=layout.groupBits[g]; const auto range=std::countr_zero(bit);
+        if((bit&(bit-1)) || size_t(range)>=layout.ranges.size() || layout.ranges[range].first%6) return false;
+        positions[g]=layout.ranges[range].first/6;
+    }
+    size_t output=0;
+    for(size_t q=0;q<quads;++q) {
+        const size_t bit=q*3,byte=bit/8; const auto shift=uint32_t(bit%8);
+        uint32_t packed=layout.originalQuadGroups[byte];
+        if(shift>5) packed|=uint32_t(layout.originalQuadGroups[byte+1])<<8;
+        const auto group=(packed>>shift)&7u;
+        if(group>=7 || !layout.groupBits[group]) return false;
+        if(positions[group]>=quads) return false;
+        const auto v=positions[group]++*4;
+        if(!(layout.groupBits[group]&mask)) continue;
+        if(output+24>destination.size()) return false;
+        const radray::array<uint32_t,6> quad{v,v+1,v+2,v+2,v+3,v};
+        std::memcpy(destination.data()+output,quad.data(),24); output+=24;
+    }
+    return output==destination.size();
+}
+bool WriteLineIndices(std::span<radray::byte> destination,uint32_t vertexCount) noexcept {
+    if(vertexCount%4 || destination.size()!=uint64_t(vertexCount/4)*24) return false;
+    for(uint32_t q=0;q<vertexCount/4;++q) {
+        const uint32_t v=q*4; const radray::array<uint32_t,6> line{v,v+1,v+2,v+3,v+2,v+1};
+        std::memcpy(destination.data()+size_t(q)*24,line.data(),24);
     }
     return true;
 }

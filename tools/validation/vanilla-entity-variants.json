@@ -1,0 +1,39 @@
+{
+  "defaults": {
+    "camera": {"x": 0.5, "y": 181, "z": 9.5, "yaw": 180, "pitch": 10},
+    "screen": "none", "hideHud": true, "oit": false, "wireframe": false,
+    "gameTime": 6000, "animationMillis": 10000, "partialTick": 0,
+    "rain": 0, "thunder": 0, "particles": [], "vignetteBrightness": 0.6,
+    "clearNotifications": true, "settleSeconds": 5,
+    "requiredEntities": ["minecraft:pig", "minecraft:shulker", "minecraft:painting"]
+  },
+  "scenes": [
+    {
+      "name": "entity-depth-and-ghost",
+      "commands": [
+        "kill @e[type=!minecraft:player]", "gamemode creative", "weather clear", "time set 6000",
+        "worldborder center 0 0", "worldborder set 512",
+        "fill -12 179 -8 12 179 8 minecraft:smooth_stone",
+        "summon minecraft:pig -3 180 0 {NoAI:1b,NoGravity:1b,Silent:1b,Tags:[\"rn_ghost\"],Rotation:[0f,0f]}",
+        "team add rn_visual_ghost",
+        "team join rn_visual_ghost @s",
+        "team join rn_visual_ghost @e[tag=rn_ghost]",
+        "effect give @e[tag=rn_ghost] minecraft:invisibility infinite 0 true",
+        "summon minecraft:shulker 0 180 0 {NoAI:1b,NoGravity:1b,Silent:1b}",
+        "summon minecraft:painting 3 181 0 {variant:\"minecraft:kebab\",facing:0b}",
+        "tick freeze", "tick step 1"
+      ]
+    },
+    {"name": "entity-depth-and-ghost-oit", "oit": true},
+    {"name": "painting-back-and-ghost-oit", "oit": true, "camera": {"x": 0.5, "y": 181, "z": -8.5, "yaw": 0, "pitch": 10}},
+    {
+      "name": "moving-solid-and-cutout",
+      "commands": [
+        "summon minecraft:falling_block -5 182 1 {NoGravity:1b,Time:1,BlockState:\"minecraft:stone\"}",
+        "summon minecraft:falling_block 5 182 1 {NoGravity:1b,Time:1,BlockState:\"minecraft:oak_leaves\"}"
+      ],
+      "requiredEntities": ["minecraft:pig", "minecraft:shulker", "minecraft:painting", "minecraft:falling_block"]
+    },
+    {"name": "moving-solid-and-cutout-oit", "oit": true, "requiredEntities": ["minecraft:falling_block"]}
+  ]
+}

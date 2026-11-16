@@ -16,7 +16,7 @@ class NativeFrameBufferTest {
             frame.instances=List.of(new NativeRenderer.Instance(1,2,3,.5f));
             frame.removedMeshes=new long[]{2};
             var descriptor=buffer.marshal(frame);
-            assertEquals(328,descriptor.byteSize()); assertEquals(328,descriptor.get(JAVA_INT,0));
+            assertEquals(408,descriptor.byteSize()); assertEquals(408,descriptor.get(JAVA_INT,0));
             for(int i=0;i<5;i++) {
                 assertNotEquals(MemorySegment.NULL,descriptor.get(ADDRESS,24+i*8L));
                 assertEquals(1,descriptor.get(JAVA_INT,64+i*4L));

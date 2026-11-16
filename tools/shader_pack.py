@@ -7,7 +7,7 @@ RESOURCE_PATH = 'assets/raynium/shaderpacks/default.rnsp'
 TERRAIN_PROGRAMS = ('terrain', 'terrain_cutout', 'terrain_translucent', 'terrain_oit_bounds',
                     'terrain_oit_transmittance', 'terrain_oit_accumulate', 'oit_bounds_cull', 'oit_composite')
 GUI_PROGRAMS = ('gui_color', 'gui_textured', 'gui_text')
-PROGRAMS = TERRAIN_PROGRAMS + GUI_PROGRAMS
+PROGRAMS = TERRAIN_PROGRAMS + GUI_PROGRAMS + ('output',)
 HEADER = struct.Struct('<6I')
 RECORD = struct.Struct('<64s4I16s')
 

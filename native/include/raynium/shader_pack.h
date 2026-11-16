@@ -32,6 +32,7 @@ inline constexpr radray::array<std::string_view,8> TerrainPrograms{"terrain","te
 bool ValidateTerrainShader(const radray::shader::ShaderArtifactView&,std::string_view program);
 inline constexpr radray::array<std::string_view,3> GuiPrograms{"gui_color","gui_textured","gui_text"};
 bool ValidateGuiShader(const radray::shader::ShaderArtifactView&,std::string_view);
+bool ValidateOutputShader(const radray::shader::ShaderArtifactView&);
 
 class ShaderProgram final {
 public:

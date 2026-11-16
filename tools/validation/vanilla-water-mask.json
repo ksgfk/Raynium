@@ -1,0 +1,33 @@
+{
+  "defaults": {
+    "camera": {"x": 0.5, "y": 182, "z": 7.5, "yaw": 180, "pitch": 25},
+    "screen": "none",
+    "hideHud": true,
+    "oit": false,
+    "wireframe": false,
+    "gameTime": 6000,
+    "animationMillis": 10000,
+    "partialTick": 0,
+    "rain": 0,
+    "thunder": 0,
+    "particles": [],
+    "clearNotifications": true,
+    "settleSeconds": 3
+  },
+  "scenes": [
+    {
+      "name": "boat-water-mask",
+      "requiredEntities": ["minecraft:oak_boat"],
+      "commands": [
+        "kill @e[type=!minecraft:player]", "weather clear", "time set 6000", "gamemode creative",
+        "worldborder center 0 0", "worldborder set 512",
+        "fill -8 178 -8 8 178 6 minecraft:smooth_stone",
+        "fill -8 179 -8 8 179 6 minecraft:water",
+        "summon minecraft:oak_boat 0 179.8 0 {NoGravity:1b,Rotation:[0f,0f]}",
+        "tick freeze"
+      ]
+    },
+    {"name": "boat-water-mask-oit", "oit": true, "requiredEntities": ["minecraft:oak_boat"]},
+    {"name": "world-border-oit", "oit": true, "camera": {"x": 254, "y": 100, "z": 0, "yaw": -90, "pitch": 0}}
+  ]
+}

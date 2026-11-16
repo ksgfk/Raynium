@@ -23,7 +23,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import com.llamalad7.mixinextras.sugar.Share;
 import com.llamalad7.mixinextras.sugar.ref.LocalRef;
 import dev.raynium.client.diagnostics.ClientFrameEvent;
-import dev.raynium.client.takeover.UnsupportedCapture;
 import net.minecraft.network.chat.Component;
 import org.spongepowered.asm.mixin.injection.*;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
@@ -58,8 +57,10 @@ abstract class MinecraftTakeoverMixin {
         var frame=event.get();
         if(frame!=null) { frame.end(); frame.commit(); }
     }
-    @ModifyExpressionValue(method="<init>",at=@At(value="INVOKE",target="Lcom/mojang/jtracy/TracyClient;isAvailable()Z"))
-    private boolean raynium$noFrameCapture(boolean value) { return false; }
+    @WrapOperation(method="<init>",at=@At(value="NEW",target="com/mojang/blaze3d/TracyFrameCapture"))
+    private com.mojang.blaze3d.TracyFrameCapture raynium$frameCapture(Operation<com.mojang.blaze3d.TracyFrameCapture> original) {
+        dev.raynium.client.takeover.TakeoverTracyImages.enable(); return null;
+    }
     @WrapOperation(method="renderFrame",at=@At(value="INVOKE",target="Lcom/mojang/renderpearl/api/device/GpuSurface;isAcquired()Z"))
     private boolean raynium$notAcquired(GpuSurface surface,Operation<Boolean> original) { return false; }
     @WrapOperation(method="renderFrame",at=@At(value="INVOKE",target="Lcom/mojang/renderpearl/api/device/GpuSurface;isSuboptimal()Z"))
@@ -79,15 +80,15 @@ abstract class MinecraftTakeoverMixin {
     @WrapOperation(method="renderFrame",at=@At(value="INVOKE",target="Lcom/mojang/renderpearl/api/device/GpuDevice;createCommandEncoder()Lcom/mojang/renderpearl/api/commands/CommandEncoder;"))
     private CommandEncoder raynium$encoder(GpuDevice device,Operation<CommandEncoder> original) { return null; }
     @WrapOperation(method="renderFrame",at=@At(value="INVOKE",target="Lcom/mojang/renderpearl/api/commands/CommandEncoder;submit()V"))
-    private void raynium$submit(CommandEncoder encoder,Operation<Void> original) { TakeoverRuntime.present(); }
+    private void raynium$submit(CommandEncoder encoder,Operation<Void> original) {
+        dev.raynium.client.takeover.TakeoverTracyImages.beforeSubmit(); TakeoverRuntime.present();
+    }
     @WrapOperation(method="renderFrame",at=@At(value="INVOKE",target="Lcom/mojang/blaze3d/systems/RenderSystem;getDynamicUniforms()Lnet/minecraft/client/renderer/DynamicGpuData;"))
     private DynamicGpuData raynium$uniforms(Operation<DynamicGpuData> original) { return null; }
     @WrapOperation(method="renderFrame",at=@At(value="INVOKE",target="Lnet/minecraft/client/renderer/DynamicGpuData;reset()V"))
-    private void raynium$reset(DynamicGpuData uniforms,Operation<Void> original) {}
-    @WrapOperation(method="renderFrame",at=@At(value="INVOKE",target="Lnet/minecraft/client/renderer/LevelRenderer;endFrame()V"))
-    private void raynium$end(LevelRenderer level,Operation<Void> original) {}
-    @Inject(method="grabPanoramixScreenshot",at=@At("HEAD"),cancellable=true)
-    private void raynium$unsupported(CallbackInfoReturnable<Component> ci) { UnsupportedCapture.warn(); ci.setReturnValue(Component.literal("Raynium screenshots are unavailable")); }
+    private void raynium$reset(DynamicGpuData uniforms,Operation<Void> original) { dev.raynium.client.takeover.TakeoverTracyImages.endFrame(); }
+    @WrapOperation(method="grabPanoramixScreenshot",at=@At(value="INVOKE",target="Lnet/minecraft/client/renderer/GameRenderer;renderLevel()V"))
+    private void raynium$panorama(GameRenderer game,Operation<Void> original) { TakeoverRuntime.panorama(game); }
     @WrapOperation(method="lambda$new$7",at=@At(value="INVOKE",target="Lcom/mojang/blaze3d/systems/RenderSystem;getDevice()Lcom/mojang/renderpearl/api/device/GpuDevice;"))
     private GpuDevice raynium$telemetryDevice(Operation<GpuDevice> original) { return null; }
     @WrapOperation(method="lambda$new$7",at=@At(value="INVOKE",target="Lcom/mojang/renderpearl/api/device/GpuDevice;getDeviceInfo()Lcom/mojang/renderpearl/api/device/DeviceInfo;"))

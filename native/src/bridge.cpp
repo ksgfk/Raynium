@@ -46,10 +46,12 @@ static_assert(alignof(rn_runtime_desc) == 4);
 static_assert(!std::is_default_constructible_v<radray::DeviceContext>);
 static_assert(!std::is_default_constructible_v<radray::Environment>);
 static_assert(sizeof(rn_swapchain_desc)==24 && offsetof(rn_swapchain_desc,hwnd)==16);
-static_assert(sizeof(rn_present_result)==16 && offsetof(rn_present_result,acquire_timeouts)==8);
+static_assert(sizeof(rn_frame_metrics)==96 && sizeof(rn_present_result)==160 && offsetof(rn_present_result,metrics)==64 && offsetof(rn_present_result,acquire_timeouts)==8);
+static_assert(sizeof(rn_capture_info)==32 && offsetof(rn_capture_info,byte_size)==16);
+static_assert(sizeof(rn_capture_request)==32 && offsetof(rn_capture_request,id)==8);
 static_assert(sizeof(rn_device_info)==488 && offsetof(rn_device_info,name)==40 && offsetof(rn_device_info,driver)==360);
-static_assert(sizeof(rn_uploaded_texture_desc)==24);
-static_assert(sizeof(rn_texture_upload_desc)==48 && offsetof(rn_texture_upload_desc,pixels)==32 && offsetof(rn_texture_upload_desc,byte_size)==40);
+static_assert(sizeof(rn_uploaded_texture_desc)==32 && offsetof(rn_uploaded_texture_desc,array_layers)==24);
+static_assert(sizeof(rn_texture_upload_desc)==56 && offsetof(rn_texture_upload_desc,pixels)==32 && offsetof(rn_texture_upload_desc,byte_size)==40 && offsetof(rn_texture_upload_desc,array_layer)==48);
 static_assert(sizeof(rn_renderer_desc)==24 && offsetof(rn_renderer_desc,shader_pack)==8 && offsetof(rn_renderer_desc,shader_pack_size)==16);
 static_assert(sizeof(rn_index_update)==24);
 static_assert(sizeof(rn_mesh_update)==24);
@@ -57,8 +59,11 @@ static_assert(offsetof(rn_mesh_update,vertex_count)==16 && offsetof(rn_mesh_upda
 static_assert(sizeof(rn_visible_item)==24);
 static_assert(offsetof(rn_visible_item,mesh)==0 && offsetof(rn_visible_item,element_mask)==8);
 static_assert(offsetof(rn_visible_item,sort_key)==12 && offsetof(rn_visible_item,first_instance)==16 && offsetof(rn_visible_item,instance_count)==20);
-static_assert(sizeof(rn_render_frame_desc)==328);
-static_assert(sizeof(rn_gui_vertex)==24 && sizeof(rn_gui_draw)==40);
+static_assert(sizeof(rn_render_frame_desc)==408);
+static_assert(sizeof(rn_scene_target)==32);
+static_assert(sizeof(rn_scene_blob)==16 && sizeof(rn_scene_binding)==48 && sizeof(rn_scene_draw)==88);
+static_assert(offsetof(rn_render_frame_desc,scene_blobs)==328 && offsetof(rn_render_frame_desc,scene_blob_count)==352);
+static_assert(sizeof(rn_gui_vertex)==24 && sizeof(rn_gui_draw)==56 && sizeof(rn_texture_sampling)==16);
 static_assert(offsetof(rn_render_frame_desc,gui_vertices)==280 && offsetof(rn_render_frame_desc,gui_draws)==288);
 static_assert(offsetof(rn_render_frame_desc,gui_vertex_count)==296 && offsetof(rn_render_frame_desc,clear_color)==312);
 static_assert(offsetof(rn_render_frame_desc,projection)==96);
@@ -237,6 +242,7 @@ rn_status rn_query_device_info(rn_runtime* runtime,rn_device_info* info,uint32_t
         }
         rn_device_info value{};
         raynium::QueryDeviceInfo(*runtime->runtime,value);
+        if(runtime->renderer && runtime->renderer->renderer->SupportsWireframe()) value.flags|=1;
         *info=value; return true;
     });
 }
@@ -288,6 +294,24 @@ rn_status rn_create_texture(rn_renderer* renderer,const rn_uploaded_texture_desc
         return renderer->renderer->CreateTexture(*desc);
     });
 }
+static_assert(sizeof(rn_scene_buffer_desc)==16 && sizeof(rn_scene_buffer_upload_desc)==32);
+rn_status rn_create_scene_buffer(rn_renderer* renderer,const rn_scene_buffer_desc* desc) noexcept {
+    return Invoke("rn_create_scene_buffer",[&] {
+        if(!Owner(renderer)) return false;
+        if(!desc) { RADRAY_ERR_LOG("Scene buffer descriptor is null"); return false; }
+        return renderer->renderer->CreateSceneBuffer(*desc);
+    });
+}
+rn_status rn_upload_scene_buffer(rn_renderer* renderer,const rn_scene_buffer_upload_desc* desc) noexcept {
+    return Invoke("rn_upload_scene_buffer",[&] {
+        if(!Owner(renderer)) return false;
+        if(!desc) { RADRAY_ERR_LOG("Scene buffer upload descriptor is null"); return false; }
+        return renderer->renderer->UploadSceneBuffer(*desc);
+    });
+}
+rn_status rn_destroy_scene_buffer(rn_renderer* renderer,uint32_t id) noexcept {
+    return Invoke("rn_destroy_scene_buffer",[&] { return Owner(renderer) && renderer->renderer->DestroySceneBuffer(id); });
+}
 rn_status rn_upload_texture(rn_renderer* renderer,const rn_texture_upload_desc* desc) noexcept {
     return Invoke("rn_upload_texture",[&] {
         if(!Owner(renderer)) return false;
@@ -297,4 +321,21 @@ rn_status rn_upload_texture(rn_renderer* renderer,const rn_texture_upload_desc* 
 }
 rn_status rn_destroy_texture(rn_renderer* renderer,uint32_t id) noexcept {
     return Invoke("rn_destroy_texture",[&] { return Owner(renderer) && renderer->renderer->DestroyTexture(id); });
+}
+rn_status rn_poll_capture(rn_renderer* renderer,uint64_t sequence,rn_capture_info* info,void* pixels,uint64_t capacity) noexcept {
+    return Invoke("rn_poll_capture",[&] {
+        if(!Owner(renderer)) return false;
+        if(!info || info->struct_size!=sizeof(*info) || info->reserved || (!pixels && capacity)) {
+            RADRAY_ERR_LOG("Invalid capture result layout or destination"); return false;
+        }
+        rn_capture_info result{};
+        if(!renderer->renderer->PollCapture(sequence,result,pixels,capacity)) return false;
+        *info=result; return true;
+    });
+}
+rn_status rn_request_capture(rn_renderer* renderer,const rn_capture_request* request) noexcept {
+    return Invoke("rn_request_capture",[&] {
+        if(!Owner(renderer) || !request) { RADRAY_ERR_LOG("Invalid capture request or renderer"); return false; }
+        return renderer->renderer->RequestCapture(*request);
+    });
 }

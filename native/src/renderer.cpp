@@ -5,6 +5,7 @@
 #include <radray/logger.h>
 #include <radray/scope_guard.h>
 #include <span>
+#include <chrono>
 #include <utility>
 
 namespace raynium {
@@ -49,16 +50,32 @@ bool Renderer::Present(Swapchain& target,const rn_render_frame_desc& frame,rn_pr
     using namespace radray::render;
     auto markFrame=radray::MakeScopeGuard([]() noexcept { RADRAY_PROFILE_FRAME(); });
     RADRAY_PROFILE_SCOPE_N("Raynium.Present");
+    if((frame.flags&RN_FRAME_WIREFRAME) && !SupportsWireframe()) { RADRAY_ERR_LOG("Terrain wireframe is unavailable on this device"); return false; }
     if(!target.Validate(frame.output_sequence)) return false;
+    const bool measure=(frame.flags&RN_FRAME_MEASURE)!=0;
+    const auto now=[&]() -> uint64_t { return measure?uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()):0; };
+    const auto start=now();
     auto& slot=_scheduler->BeginFrame();
+    _pipeline->BeginMeasurements(slot,measure);
+    const auto waited=now();
+    auto clearScene=radray::MakeScopeGuard([&]() noexcept { _pipeline->ClearSceneInput(slot); });
     TerrainFrame prepared;
     auto uploads=_pipeline->GetUploads(slot);
     if(!_terrain.PrepareFrame(_uploaded,frame,_pipeline->Resources(),uploads,prepared)) return false;
     prepared.textures=&_uploaded;
     const auto outputDesc=target.Chain().GetDesc();
-    if(!_pipeline->PrepareGui(slot,_uploaded,frame,outputDesc.Width,outputDesc.Height)) return false;
+    const bool offscreen=frame.render_width || frame.render_height;
+    const auto limit=_device.GetDevice().GetCapabilities().Limits.MaxTexture2DDimension;
+    if(((frame.flags&RN_FRAME_WORLD_ONLY) && !offscreen) || (offscreen && (!frame.render_width || !frame.render_height || frame.render_width>limit || frame.render_height>limit))) {
+        RADRAY_ERR_LOG("Invalid offscreen render extent: {}x{}",frame.render_width,frame.render_height); return false;
+    }
+    prepared.width=offscreen?frame.render_width:outputDesc.Width; prepared.height=offscreen?frame.render_height:outputDesc.Height;
+    if(!_pipeline->PrepareCapture(slot,frame,prepared.width,prepared.height)) return false;
+    if(!_pipeline->PrepareGui(slot,_uploaded,frame,prepared.width,prepared.height)) return false;
+    if(!_pipeline->PrepareScene(slot,_uploaded,frame)) return false;
+    const auto preparedAt=now();
     SwapChainAcquireResult acquired{.Status=SwapChainStatus::RetryLater};
-    if(target.IsPresentable()) {
+    if(!offscreen && target.IsPresentable()) {
         acquired=target.Chain().AcquireNext(100);
         if(acquired.Status==SwapChainStatus::RetryLater) {
             target.TimedOut();
@@ -72,7 +89,9 @@ bool Renderer::Present(Swapchain& target,const rn_render_frame_desc& frame,rn_pr
     } else if(acquired.Status==SwapChainStatus::Success) RADRAY_ABORT("Successful swapchain acquisition has no frame");
     _pipeline->SetInput(prepared);
     auto clear=radray::MakeScopeGuard([&]() noexcept { _pipeline->ClearInput(); });
+    const auto rdgStart=now();
     _scheduler->RunFrame();
+    const auto rdgEnd=now();
     auto outcome=acquired.Status==SwapChainStatus::RequireRecreate?RN_PRESENT_RECREATE:RN_PRESENT_SKIPPED;
     if(acquired.Frame) {
         const auto presented=target.Chain().Present(std::move(*acquired.Frame));
@@ -81,6 +100,9 @@ bool Renderer::Present(Swapchain& target,const rn_render_frame_desc& frame,rn_pr
             presented.Status==SwapChainStatus::RequireRecreate?RN_PRESENT_RECREATE:RN_PRESENT_SKIPPED;
     }
     target.Commit(frame.output_sequence);
-    result={sizeof(result),outcome,target.Timeouts()}; return true;
+    result={sizeof(result),outcome,target.Timeouts(),measure?_pipeline->GpuSequence():0,measure?_pipeline->GpuNanoseconds():0,
+        waited-start,preparedAt-waited,rdgEnd-rdgStart,now()-rdgEnd,_pipeline->Measurements(slot)};
+    if(measure) _terrain.MeasureGeometry(result.metrics);
+    return true;
 }
 }

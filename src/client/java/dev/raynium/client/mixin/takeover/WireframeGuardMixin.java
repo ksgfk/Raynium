@@ -6,5 +6,5 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(RenderSystem.class)
 abstract class WireframeGuardMixin {
     @Inject(method="isWireframeAvailable",at=@At("HEAD"),cancellable=true)
-    private static void raynium$unsupported(CallbackInfoReturnable<Boolean> ci) { ci.setReturnValue(false); }
+    private static void raynium$available(CallbackInfoReturnable<Boolean> ci) { ci.setReturnValue(dev.raynium.client.takeover.TakeoverRuntime.wireframeAvailable()); }
 }

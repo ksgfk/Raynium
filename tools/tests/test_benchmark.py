@@ -31,8 +31,25 @@ class BenchmarkCompletionTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'missing required evidence'):
                 benchmark.check_result(session, 0, 0, False)
 
-    def test_gradle_properties_keep_sampling_implicit(self):
+    def test_scene_decode_fallback_is_not_a_successful_benchmark(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session=Path(directory); (session/'game/logs').mkdir(parents=True)
+            (session/'game/logs/latest.log').write_text('Serialization errors: missing block id')
+            (session/'client-result.json').write_text(json.dumps({'status':'completed','routeNativeFrames':10}))
+            with self.assertRaisesRegex(RuntimeError,'invalid Minecraft input'):
+                benchmark.check_result(session,0,0,False,False,'vanilla')
+
+    def test_primary_build_has_no_profiler_and_diagnostics_are_explicit(self):
         properties = benchmark.gradle_properties({'backend': 'vulkan', 'terrainSubmission': 'indirect'})
-        self.assertIn('-PnativeProfiler=true', properties)
+        self.assertIn('-PnativeProfiler=false', properties)
         self.assertIn('-PrhiBackend=vulkan', properties)
         self.assertFalse(any('terrainProfile' in value or 'terrainDisableFaceCull' in value for value in properties))
+        self.assertIn('-PnativeProfiler=true',benchmark.gradle_properties({'backend':'d3d12','terrainSubmission':'auto','profilerEnabled':True}))
+
+    def test_primary_reference_does_not_require_native_shutdown_or_tracy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session=Path(directory); (session/'game/logs').mkdir(parents=True)
+            (session/'game/logs/latest.log').write_text('Vanilla shutdown\n')
+            result={'status':'completed','routeNativeFrames':10}
+            (session/'client-result.json').write_text(json.dumps(result))
+            self.assertEqual(result,benchmark.check_result(session,0,0,False,False,'vanilla'))
