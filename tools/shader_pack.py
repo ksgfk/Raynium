@@ -35,7 +35,7 @@ def verify_shader_pack(data):
         artifact = data[offset:offset + length]
         require(zlib.crc32(artifact) == checksum, 'artifact checksum')
         artifact_magic, schema, header_size, artifact_size, artifact_target = struct.unpack_from('<IHHIB', artifact)
-        require(artifact_magic == 0x59524452 and schema == 8 and header_size == 152
+        require(artifact_magic == 0x59524452 and schema == 10 and header_size == 152
                 and artifact_size == length and artifact_target == target, 'artifact envelope')
         require(artifact[136:152] == identity, 'artifact identity')
         for section in range(16, 80, 8):

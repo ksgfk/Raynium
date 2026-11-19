@@ -3,11 +3,11 @@
 #include <radray/logger.h>
 
 namespace raynium {
-using namespace radray::render;
+using namespace radray::gpu;
 bool OutputPassResources::Create(Device& device,std::span<const radray::byte> shaders,radray::unique_ptr<OutputPassResources>& out) {
     if(out) RADRAY_ABORT("Output pass resource output occupied");
     auto objects=radray::make_unique<Objects>(); auto& p=*objects;
-    const bool vk=device.GetBackend()==RenderBackend::Vulkan;
+    const bool vk=device.GetBackend()==GpuBackend::Vulkan;
     if(!ShaderProgram::Create(shaders,"output",vk?radray::shader::ShaderTarget::SPIRV:radray::shader::ShaderTarget::DXIL,p.program)) return false;
     const auto& artifact=p.program->Artifact();
     if(!ValidateOutputShader(artifact)) return false;
@@ -30,26 +30,21 @@ bool OutputPassResources::Create(Device& device,std::span<const radray::byte> sh
     if(!p.pipeline) return false;
     out=radray::unique_ptr<OutputPassResources>{new OutputPassResources(std::move(objects))}; return true;
 }
-radray::unique_ptr<ShaderParameterSet> OutputPassResources::CreateParameters(Device& device) const {
-    return device.CreateShaderParameterSet({_objects->bindings.get()}).Release();
-}
-void OutputPassResources::AddPass(radray::RDGBuilder& graph,OutputBinding& binding,TextureResource& owner,
-    radray::RDGTextureHandle source,radray::RDGTextureHandle destination,uint32_t width,uint32_t height) const {
-    struct Data { OutputBinding* binding; TextureResource* owner; GraphicsPipelineState* pipeline; uint32_t width,height; };
-    graph.AddRasterPass("Raynium Output",Data{&binding,&owner,_objects->pipeline.get(),width,height},
+void OutputPassResources::AddPass(radray::RDGBuilder& graph,radray::RDGTextureHandle source,
+    radray::RDGTextureHandle destination,uint32_t width,uint32_t height) const {
+    struct Data { const Objects* objects; radray::RDGTextureHandle source; uint32_t width,height; ShaderParameterSet* parameters{}; };
+    graph.AddRasterPass("Raynium Output",Data{_objects.get(),source,width,height},
         +[](const Data& data,radray::RDGRasterPassContext& context) noexcept {
             auto& encoder=context.GetEncoder();
             encoder.SetViewport({0,0,float(data.width),float(data.height),0,1}); encoder.SetScissor({0,0,data.width,data.height});
-            encoder.BindGraphicsPipelineState(data.pipeline); encoder.BindShaderParameterSet(0,data.binding->parameters.get());
+            encoder.BindGraphicsPipelineState(data.objects->pipeline.get()); encoder.BindShaderParameterSet(0,data.parameters);
             encoder.Draw(3,1,0,0); return encoder.IsValid();
-        },+[](Data& data,radray::RDGPrepareContext&) noexcept {
-            try {
-                auto& binding=*data.binding;
-                if(binding.texture.Get()==data.owner) return true;
-                binding.parameters->ResetBindingsForReuse();
-                binding.texture=radray::IntrusivePtr<TextureResource>{data.owner};
-                return binding.parameters->Set(0,0,data.owner->GetDefaultView()) && binding.parameters->FlushWrites();
-            } catch(...) { AbortUnexpectedException("Output pass prepare"); }
+        },+[](Data& data,radray::RDGPrepareContext& context) noexcept {
+            auto view=context.ResolveView(data.source,TextureViewUsage::Resource);
+            if(!view) return false;
+            const radray::TransientParameterBinding binding{0,0,view.Get()};
+            data.parameters=context.GetSlot().AcquireParameterSet(data.objects->bindings,{&binding,1}).Get();
+            return data.parameters!=nullptr;
         }).ReadTexture(source).WriteColor(0,destination,LoadAction::DontCare,StoreAction::Store);
 }
 }

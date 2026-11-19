@@ -7,7 +7,7 @@
 ## 资产与编译
 
 默认资产为 `assets/raynium/shaderpacks/default.rnsp`，资源标识为 `raynium:shaderpacks/default.rnsp`。
-它保存八个地形、三个 GUI、一个输出程序和 125 个原版转换程序的 DXIL 和 SPIR-V artifact，每个程序按后端索引。原版程序覆盖 195 个静态管线身份，渲染状态相同与否不影响 shader 源码/宏组合去重。地形程序为：
+它保存八个地形、三个 GUI、一个输出程序和 133 个原版转换程序的 DXIL 和 SPIR-V artifact，每个程序按后端索引。原版程序覆盖 195 个静态管线身份，渲染状态相同与否不影响 shader 源码/宏组合去重。地形程序为：
 `terrain`、`terrain_cutout`、`terrain_translucent`、`terrain_oit_bounds`、`terrain_oit_transmittance`、
 `terrain_oit_accumulate`、`oit_bounds_cull` 和 `oit_composite`。
 各入口文件共享顶点、采样、雾和 OIT include；alpha-only 程序不采样 lightmap。
@@ -15,9 +15,9 @@ GUI 程序为 `gui_color`、`gui_textured`、`gui_text`，共享 `gui_common.hls
 `output` 使用无顶点缓冲的全屏三角形和像素 Load，将内部 RGBA8 颜色输出至 BGRA8 交换链，由 ValidateOutputShader 校验单纹理接口。
 当前没有纹理、材质资产或 keyword variant 选择。
 
-离线工具调用锁定 RadRay 的 `shader_compiler::Client`，对带 `[shader]` 阶段标记的 HLSL 执行 source discovery 和双 target 编译。
+离线工具调用锁定 RadRay 的 `radray::shader::Client`，对带 `[shader]` 阶段标记的 HLSL 执行 source discovery 和双 target 编译。
 每份 RadRay metadata artifact 原样包含阶段字节码、入口、绑定、类型树与顶点输入。
-当前消费上游 metadata schema 8；精确依赖以 `native/radray.lock.json` 为准，上游契约入口为
+当前消费上游 metadata schema 10，资源绑定种类通过 `DecodeBindingKind` 解码。类型记录区分数组步长、元素大小和矩阵步长。精确依赖以 `native/radray.lock.json` 为准，上游契约入口为
 `modules/shader/include/radray/shader/shader_compiler_contract.h` 与 `shader_artifact.h`。
 
 工具验证所有 artifact、terrain 与 GUI 接口后才写入临时包；Python 入口在成功后替换目标资源。

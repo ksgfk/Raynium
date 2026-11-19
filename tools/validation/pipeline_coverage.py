@@ -13,8 +13,8 @@ JAVA = 'src/client/java/dev/raynium/client/'
 ROUTES = {
     'features': ([JAVA+'takeover/scene/SceneFeatures.java', JAVA+'mixin/takeover/FeatureDispatcherSceneMixin.java'], ['native/src/scene_pass.cpp'], None),
     'particles': ([JAVA+'takeover/scene/SceneFeatures.java'], ['native/src/scene_pass.cpp'], None),
-    'atlas': ([JAVA+'takeover/TakeoverAtlas.java'], ['native/src/texture_resources.cpp'], []),
-    'lightmap': ([JAVA+'takeover/CpuLightmap.java'], ['native/src/texture_resources.cpp'], []),
+    'atlas': ([JAVA+'takeover/TakeoverAtlas.java'], ['native/src/texture_registry.cpp'], []),
+    'lightmap': ([JAVA+'takeover/CpuLightmap.java'], ['native/src/texture_registry.cpp'], []),
     'terrain': ([JAVA+'terrain/TakeoverTerrain.java'], ['native/src/terrain_draw.cpp', 'native/src/mesh_pass.cpp'],
                 ['terrain','terrain_cutout','terrain_translucent','terrain_oit_bounds','terrain_oit_transmittance','terrain_oit_accumulate']),
     'gui': ([JAVA+'takeover/TakeoverGui.java'], ['native/src/gui_pass.cpp'], ['gui_color','gui_textured','gui_text']),

@@ -19,6 +19,8 @@
 | 2026-11-09 | [Java 渲染准备与 Native 可见批次开销重构计划](2026-11-09-java-native-overhead-refactoring-plan.md)：基于 26,831 帧 JFR + Tracy 联合采样的分配/GC 与 TimSort 归因，确认 C ABI `element_mask` 直传、稳态零排序与堆外直写重构方案 |
 | 2026-11-10 | [原版渲染切断与 Raynium 完全接管：执行计划](2026-11-10-vanilla-render-cutover-plan.md)：放弃渐进替换与 RenderPearl 后端方案，`RenderSystem` 设备保持为空；面向执行者的硬约束与停止条件、身份句柄与改写配方、阶段 1 的 S0–S8 步骤与逐步验收、总验收、风险规避表，以及后续逐项接入顺序（2026-11-11 提交前修订） |
 | 2026-11-12 | [渲染接管、GUI 与纹理接入最终计划](2026-11-12-render-takeover-gui-texture-final-plan.md)：整合逐轮审查；正式帧入口获取前准备与窗口判断、BGRA8 输出及读回、CPU 图集与动画、GUI 和三层地形、N1–M6 阶段与逐项验收；归档时尚未实施 |
+| 2026-11-19 | [RadRay 与 Raynium 五阶段协同演进总体计划](2026-11-19-radray-raynium-coevolution-master-plan.md)：面向可维护性与高性能通用架构的探索性总蓝图；确立双轨渲染（RenderPearl 堆外 CommandTape 兼容轨 + 常驻世界快轨）、三通道 C ABI、插件化 IRenderFeature/FrameBlackboard，以及 RadRay 从资源/PSO/参数池底座到 MDI、Bindless、异步流式与硬件光追的五阶段协同路线及中途转向条款 |
+| 2026-11-19 | [Raynium 第一阶段：接入上游 RadRay 底座与清理 Native 基础设施样板计划](2026-11-19-phase1-native-runtime-convergence-plan.md)：冻结 Java 生产代码与 ABI 18 外部契约（沿用 `AcquireNext()` 前输入校验与 `RunFrame()` fail-fast 边界，保留 `RN_FRAME_FLIP_Y` 与旧 `.rnsp`/转换场景布局不返工），同步 Debug/Release CMake 包发现、`raynium_shader_pack` 与 Schema 10 解码/负例夹具，并用 `GpuTexture`、`GetOrCreateSampler`、内聚于 `FrameSlot` 的 `TransientParameterSetPool`、四态 `AsyncReadbackQueue` 及按 `MEASURE`/`PROFILE` 分档的内建 GPU 时间戳替换私有样板的实施计划 |
 
 ## 源码调查与早期上下文
 

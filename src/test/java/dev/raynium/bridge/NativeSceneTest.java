@@ -16,6 +16,25 @@ import static org.junit.jupiter.api.Assertions.*;
 @Tag("native")
 class NativeSceneTest {
     @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void exposesCompletedGpuSequenceOnlyWhenCurrentFrameRequestsMeasurement(NativeEnvironment.Backend backend) throws Exception {
+        try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var window=new NativeSwapchainTest.Window(); var runtime=environment.createRuntime();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
+            var chain=renderer.createSwapchain(window.hwnd,128,64,NativeSwapchain.PresentMode.IMMEDIATE)) {
+            int[] flags={NativeRenderer.MEASURE,NativeRenderer.PROFILE,0,NativeRenderer.MEASURE,NativeRenderer.MEASURE,NativeRenderer.MEASURE};
+            long[] completed={0,0,0,2,2,4};
+            for(int i=0;i<flags.length;++i) {
+                var frame=NativeTestSupport.solidFrame(i+1);
+                frame.flags=flags[i]; frame.renderWidth=128; frame.renderHeight=64;
+                renderer.present(chain,frame);
+                assertEquals(completed[i],chain.measurement(0),"completed GPU sequence on frame "+(i+1));
+                if(completed[i]==0) assertEquals(0,chain.measurement(1));
+                else assertTrue(chain.measurement(1)>0);
+            }
+        }
+    }
+
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
     void postMosaicPreservesBottomAnchoredTexelsAtNonPowerOfTwoExtent(NativeEnvironment.Backend backend) throws Exception {
         int width=170,height=98;
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));

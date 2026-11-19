@@ -78,7 +78,7 @@ bool ValidateOutputShader(const ShaderArtifactView& artifact) {
     if(artifact.Entries().size()!=2 || !artifact.FindStageBytecode(ShaderStage::Vertex) || !artifact.FindStageBytecode(ShaderStage::Pixel) ||
        !artifact.VertexInputs().empty() || !artifact.RootConstants().empty() || !artifact.Samplers().empty() ||
        !artifact.SerializedRootSignature().empty() || artifact.Bindings().size()!=1 || !texture ||
-       texture->Record.Type!=uint32_t(ShaderBindingKind::Texture) || texture->Record.Group || texture->Record.Binding ||
+       DecodeBindingKind(texture->Record.Type)!=radray::gpu::BindingKind::Texture || texture->Record.Group || texture->Record.Binding ||
        texture->Record.Count!=1 || texture->Record.StageMask!=2 || texture->Record.Placement!=uint32_t(ShaderBindingPlacement::Table)) {
         RADRAY_ERR_LOG("Output shader interface is incompatible"); return false;
     }
@@ -91,13 +91,13 @@ bool ValidateGuiShader(const ShaderArtifactView& artifact,std::string_view progr
        !artifact.FindStageBytecode(ShaderStage::Vertex) || !artifact.FindStageBytecode(ShaderStage::Pixel)) { RADRAY_ERR_LOG("{}: GUI shader requires known vertex/pixel program",program); return false; }
     if(!artifact.RootConstants().empty() || !artifact.Samplers().empty() || !artifact.SerializedRootSignature().empty() ||
        artifact.Bindings().size()!=(textured?3u:1u)) { RADRAY_ERR_LOG("{}: GUI shader binding policy is incompatible",program); return false; }
-    const auto binding=[&](const char* name,ShaderBindingKind kind,uint32_t group,uint32_t dx,uint32_t slot,uint32_t stages) {
+    const auto binding=[&](const char* name,radray::gpu::BindingKind kind,uint32_t group,uint32_t dx,uint32_t slot,uint32_t stages) {
         auto found=artifact.FindBinding(name);
-        return found && found->Record.Type==uint32_t(kind) && found->Record.Group==group && found->Record.Binding==(vk?slot:dx) &&
+        return found && DecodeBindingKind(found->Record.Type)==kind && found->Record.Group==group && found->Record.Binding==(vk?slot:dx) &&
             found->Record.Count==1 && found->Record.StageMask==stages && found->Record.Placement==uint32_t(ShaderBindingPlacement::Table);
     };
-    if(!binding("GuiFrame",ShaderBindingKind::CBuffer,0,0,0,text?3u:1u) ||
-       (textured && (!binding("GuiTexture",ShaderBindingKind::Texture,1,0,0,2) || !binding("GuiSampler",ShaderBindingKind::Sampler,1,0,1,2))))
+    if(!binding("GuiFrame",radray::gpu::BindingKind::CBuffer,0,0,0,text?3u:1u) ||
+       (textured && (!binding("GuiTexture",radray::gpu::BindingKind::Texture,1,0,0,2) || !binding("GuiSampler",radray::gpu::BindingKind::Sampler,1,0,1,2))))
         { RADRAY_ERR_LOG("{}: GUI shader resource binding is incompatible",program); return false; }
     auto frame=artifact.FindBinding("GuiFrame"); auto types=artifact.Types();
     if(frame->Record.TypeIndex>=types.size() || types[frame->Record.TypeIndex].Size!=16) { RADRAY_ERR_LOG("{}: GUI constant size is incompatible",program); return false; }
@@ -124,32 +124,32 @@ bool ValidateTerrainShader(const ShaderArtifactView& artifact,std::string_view p
     if(artifact.Entries().size()!=2 || !artifact.FindStageBytecode(ShaderStage::Vertex) || !artifact.FindStageBytecode(ShaderStage::Pixel))
         { RADRAY_ERR_LOG("{}: Terrain shader requires vertex and pixel stages",program); return false; }
     const bool vk=artifact.Envelope().Target==uint8_t(ShaderTarget::SPIRV);
-    struct Binding { const char* name; ShaderBindingKind kind; uint32_t group,dx,vk,stages; };
+    struct Binding { const char* name; radray::gpu::BindingKind kind; uint32_t group,dx,vk,stages; };
     const bool alpha=program=="terrain_oit_bounds" || program=="terrain_oit_transmittance";
     const bool screen=program=="oit_bounds_cull" || program=="oit_composite";
     const bool composite=program=="oit_composite";
     radray::vector<Binding> bindings;
-    if(!composite) bindings.push_back({"Frame",ShaderBindingKind::CBuffer,0,0,0,screen?2u:3u});
+    if(!composite) bindings.push_back({"Frame",radray::gpu::BindingKind::CBuffer,0,0,0,screen?2u:3u});
     if(!screen) {
-        bindings.push_back({"Atlas",ShaderBindingKind::Texture,1,0,1,2});
-        bindings.push_back({"AtlasSampler",ShaderBindingKind::Sampler,1,0,3,2});
+        bindings.push_back({"Atlas",radray::gpu::BindingKind::Texture,1,0,1,2});
+        bindings.push_back({"AtlasSampler",radray::gpu::BindingKind::Sampler,1,0,3,2});
         if(!alpha) {
-            bindings.push_back({"Lightmap",ShaderBindingKind::Texture,1,1,2,1});
-            bindings.push_back({"LightSampler",ShaderBindingKind::Sampler,1,1,4,1});
+            bindings.push_back({"Lightmap",radray::gpu::BindingKind::Texture,1,1,2,1});
+            bindings.push_back({"LightSampler",radray::gpu::BindingKind::Sampler,1,1,4,1});
         }
     }
     if(program=="terrain_oit_transmittance" || program=="terrain_oit_accumulate" || screen)
-        bindings.push_back({"DepthBounds",ShaderBindingKind::Texture,2,0,0,2});
+        bindings.push_back({"DepthBounds",radray::gpu::BindingKind::Texture,2,0,0,2});
     if(program=="terrain_oit_accumulate" || composite) {
-        bindings.push_back({"Coeff0",ShaderBindingKind::Texture,2,1,1,2});
-        bindings.push_back({"Coeff1",ShaderBindingKind::Texture,2,2,2,2});
+        bindings.push_back({"Coeff0",radray::gpu::BindingKind::Texture,2,1,1,2});
+        bindings.push_back({"Coeff1",radray::gpu::BindingKind::Texture,2,2,2,2});
     }
-    if(composite) bindings.push_back({"Accumulation",ShaderBindingKind::Texture,2,3,3,2});
+    if(composite) bindings.push_back({"Accumulation",radray::gpu::BindingKind::Texture,2,3,3,2});
     if(artifact.Bindings().size()!=std::size(bindings) || !artifact.RootConstants().empty() || !artifact.Samplers().empty() ||
        !artifact.SerializedRootSignature().empty()) { RADRAY_ERR_LOG("{}: Terrain shader binding policy is incompatible",program); return false; }
     for(const auto& expected:bindings) {
         auto found=artifact.FindBinding(expected.name);
-        if(!found || found->Record.Type!=uint32_t(expected.kind) || found->Record.Group!=expected.group ||
+        if(!found || DecodeBindingKind(found->Record.Type)!=expected.kind || found->Record.Group!=expected.group ||
            found->Record.Binding!=(vk?expected.vk:expected.dx) || found->Record.Count!=1 || found->Record.StageMask!=expected.stages ||
            found->Record.Placement!=uint32_t(ShaderBindingPlacement::Table)) { RADRAY_ERR_LOG("{}: Terrain shader resource binding is incompatible",program); return false; }
     }
@@ -162,7 +162,8 @@ bool ValidateTerrainShader(const ShaderArtifactView& artifact,std::string_view p
             {"CameraFraction",144,16,1,1},{"FogColor",160,16,1,1},{"FogDistances",176,16,1,1}};
         for(const auto& member:members) {
             auto found=std::find_if(types.begin(),types.end(),[&](const auto& type){return type.ParentIndex==root && artifact.GetName(type.Name)==member.name;});
-            if(found==types.end() || found->Offset!=member.offset || found->Size!=member.size || found->Stride!=member.size ||
+            if(found==types.end() || found->Offset!=member.offset || found->Size!=member.size || found->ElementSize!=member.size ||
+               found->Stride!=0 || found->MatrixStride!=(member.rows==4?16u:0u) ||
                found->ScalarKind!=member.scalar || found->RowCount!=member.rows || found->ColumnCount!=4 || found->ElementCount!=1 ||
                found->Flags || found->Kind!=uint32_t(member.rows==4?ShaderTypeKind::Matrix:ShaderTypeKind::Vector))
                 { RADRAY_ERR_LOG("{}: Terrain Frame constant member layout is incompatible",program); return false; }

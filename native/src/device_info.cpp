@@ -5,10 +5,10 @@
 
 namespace raynium {
 void QueryDeviceInfo(radray::DeviceContext& runtime,rn_device_info& info) {
-    using namespace radray::render;
+    using namespace radray::gpu;
     auto& device=runtime.GetDevice(); const auto& caps=device.GetCapabilities();
     info={}; info.struct_size=sizeof(info);
-    info.backend=device.GetBackend()==RenderBackend::Vulkan?RN_BACKEND_VULKAN:RN_BACKEND_D3D12;
+    info.backend=device.GetBackend()==GpuBackend::Vulkan?RN_BACKEND_VULKAN:RN_BACKEND_D3D12;
     info.vendor_id=caps.Detail.VendorId;
     info.device_type=caps.Detail.IsSoftware?3:caps.Detail.IsUMA?1:2;
     info.uniform_offset_alignment=std::max(uint64_t(1),caps.Limits.CBufferOffsetAlignment);

@@ -70,12 +70,13 @@ $env:HTTPS_PROXY = 'http://127.0.0.1:10808'
 $env:ALL_PROXY = 'http://127.0.0.1:10808'
 $env:NO_PROXY = ''
 python external/RadRay/tools/fetch_third_party.py restore
+python external/RadRay/tools/fetch_sdks.py restore --only radray_dxc
 python tools/build_debug_dependencies.py --parallel 8
 python external/RadRay/tools/build_third_party.py build --triplet windows-x64-msvc-staticcrt --config Release --parallel 8
 ```
 
 Debug 用于默认开发启动，Release 用于分发；只运行相应步骤也可以。构建本身离线，缺包则停止。
-普通构建验证并复制已提交的 `.rnsp` 资源，native 只链接 RadRay shader decoder，关闭 compiler/tools，不要求 DXC SDK。资源验证使用 Python。
+Debug 和 Release 配置都从 `RADRAY_DXC_ROOT` 发现 RadRayDXC，默认位置为 RadRay 源码树的 `SDKs/radray_dxc/extracted`。普通构建通过 Python 校验并复制已提交的 `.rnsp`。发布的 runtime DLL 使用静态 shader 解码代码，离线打包工具在编译 shader 时动态加载 DXC。
 Debug 使用 `/MTd`、Debug CRT 和默认 STL iterator 检查；Release 使用 `/MT`。两配置均静态链接 mimalloc，不复用 MD 包。
 锁定 RadRay 的 `staticcrt` 三元组在 Debug 也固定 MT，因此 Debug 使用 Raynium 的显式离线脚本，
 按上游依赖 catalog 准备当前所需的 16 个包；构建和 SDK 位于 `build/native-dependencies/windows-x64-msvc-mtd/`。

@@ -9,7 +9,7 @@ DLL 静态消费锁定的 `RadRay::runtime`，当前 ABI 18。精确依赖版本
 ## 设备与所有权
 
 环境和设备会话直接使用 `radray::Environment` 与 `radray::DeviceContext`，不设置 Raynium 类型别名。
-环境创建 DXGI factory 或 Vulkan instance，不创建设备。runtime 创建高性能适配器设备和一条 Direct 队列，不开启外部共享或匹配宿主 GPU。
+环境创建 DXGI factory 或 Vulkan instance。`DeviceContext` 按高性能偏好选择适配器，创建设备和一条 Direct 队列。Raynium 不匹配宿主 GPU，也不调用 `Device::CreateExternalResourceExtension()` 创建外部资源扩展。
 设备信息来自普通 RHI DeviceDetail/Capabilities，包含 GPU 名称、厂商、后端原生驱动版本字符串及能力。
 环境晚于设备和资源关闭；后端与 driver validation 在环境创建时固定，不自动切换后端。
 
@@ -62,7 +62,7 @@ OIT 三次透明几何 pass 共用一次参数构建及透明层资源声明。G
 
 ## 帧槽、上传与交换链
 
-BeginFrame 等待该槽 completion，先重置命令存储，再逆序析构 Emplace 对象并重置线性 PMR。
+BeginFrame 等待该槽 completion，重置命令分配器，随即由 FrameSlot 的参数池解除上一轮绑定。之后才逆序析构 Emplace 对象并重置帧内存。
 旧网格、索引子分配和材质 owner 由槽对象保活；整页 GpuBuffer 的引用不代替子区间退役。
 帧对象与重排分组数据使用槽内存；阶段局部去重容器使用 scratch PMR，不将其引用交给录制回调。
 可见列表、排序 scratch、参数数组和批次按槽保留容量。
@@ -76,17 +76,17 @@ PrepareFrame 校验输入、计算分组和可见参数；同步 RunFrame 的 RD
 每槽 UploadArena 使用 8 MiB 页，统一承载几何 staging、纹理 staging、实例、indirect、常量及 GUI 动态切片。
 页持久映射，槽完成并重置命令后复用；RDG 汇总 Flush 和共享页只读状态。大分配可使用独立大页，已有切片不搬移。
 所有缓冲绑定和 indirect 地址使用 RDGBufferSlice 的物理 Buffer、Offset 与逻辑 Size；零大小切片不绑定或绘制，清屏仍执行。
-Prepare 解析切片并更新参数集，常量绑定在物理页或范围改变时重写。
+RDG Prepare 按物理缓冲、偏移和范围构造常量绑定。FrameSlot 以共享布局及完整绑定内容去重，同槽本帧的相同参数共享只读参数集。
 Record 只消费准备好的数据并编码命令，不创建资源、不上传、不写参数集；几何提交统计在构图期计算。
-GPU 计时启用时，一次提交包含图前 timestamp、图命令和图后 resolve；样本在槽完成后发布。
-整帧测量只发出和读取两个时间戳；阶段计时另由 PROFILE 标志开启，实际执行 Prepare 的 pass 登记其查询范围，未保留的 pass 不进入 resolve。
+GPU 计时由 RenderGraphFramePipeline 在图命令缓冲内录制。槽的提交 fence 完成后，运行时发布带原始 output_sequence 的纳秒快照。
+仅设置 MEASURE 时录制整帧首尾时间戳。PROFILE 同时测量存活 pass，地形阶段按名称累计 120 个样本后输出分位数。两个标志皆空时关闭采样，仅请求 MEASURE 的调用返回 gpu_sequence 与 gpu_nanoseconds。
 
 交换链固定 BGRA8，申请三张后备缓冲，不持有预创建 View。
 Renderer 先 BeginFrame 并校验、准备上传描述及 GUI，再检查窗口可呈现性，以 100 ms 获取后备缓冲。
 每槽持有可采样、可读回的 RGBA8 主颜色目标，地形与 GUI 写入该目标；OutputPassResources 以无采样器的 Load 输出到 BGRA8 后备缓冲。
 后备缓冲按 Undefined → Present 导入；RDG 自动创建 attachment view。
-输出参数集按槽保留持久 view 和纹理 owner；来源变化时才重写绑定，resize 先解除旧绑定，再释放 owner。
-View owner 属于当前槽内 RDG 图，等待 GPU 且重置命令存储后才销毁。
+输出 pass 在 RDG Prepare 解析主颜色采样视图，从槽参数池获取匹配布局和该视图的参数集。
+后备缓冲的附件 view 属于当前槽的图。GPU 完成并重置命令、解除参数绑定之后，图释放该 view。
 已获取帧沿用 RunFrame fail-fast 契约，并随后 Present，不遗留获取令牌。
 
 resize/destroy 先 Finish（含帧槽 WaitIdle、命令重置和 View 销毁），再等待 Direct 队列，最后重建/销毁交换链。
@@ -95,46 +95,46 @@ OK 的隐藏/最小化/获取超时帧仍消费上传；FAILED 后不得在原 r
 
 ## 上传纹理
 
-`UploadedTextures` 属于 renderer，以 16 及以上的 uint32 编号管理 TextureResource 及已用编号集合。世界 epoch 不影响纹理表。
+`TextureRegistry` 属于 renderer，以 16 及以上的 uint32 编号管理 ABI 描述、GpuTexture 强引用及已用编号集合。世界 epoch 不影响纹理表。
 颜色格式包括 RGBA8/R8/RGBA16F/RGBA32F；可创建 D32F 深度附件，但不支持 CPU 深度上传。
-TextureResource 统一持有纹理和完整 mip 采样 view。普通 2D/数组上传资源使用上游 GpuTexture；立方体、附件及读回资源使用 RHI owner，导入图时由槽内强引用保活，实际提交后发布 ShaderRead 终态。
+GpuTexture 持有底层纹理及采样视图。ABI 的附件、读回和立方体标志映射到显式用途和维度。首次采样或局部写入新的单层单 mip 二维颜色附件前，图插入一次透明黑整面清屏。
 提交状态不表示全部区域已初始化或 GPU 已完成。上传入口校验数组层、mip、区域、行距和字节容量，立即复制有效像素；构图时将已有字节数组移给 OwnedBytes，不额外复制快照。
 RDG Prepare 负责源行距、staging pitch/placement 对齐与最终映射写入，自动上传节点负责复制与屏障，图末恢复 ShaderRead。
 拥有式导入在图登记时保活目标，包含已删除编号但仍待上传的纹理，直至 GPU 完成且命令已重置。
-锁定 RadRay 的区域上传接口不接受 Cube；立方体上传先由 RDG 上传到临时 2D 数组，再以显式复制 pass 写入目标子资源。临时数组按实际目标在同图复用，复制目标显式 MarkOutput。
-纹理表按值保存描述和 TextureResource owner，查找返回仅在同步准备期间借用的指针。待上传项、材质绑定和 GUI 参数缓存持有 IntrusivePtr<TextureResource>；删除编号后在途使用继续保活，新帧查找该编号失败。
-纹理编号 0–15 保留，材质和带纹理的 GUI 只接受 16 及以上的上传编号。未上传的像素内容未定义，由调用方初始化需要采样的区域和 mip。
-地形及现有 GUI shader 仍只接受单层颜色 2D 采样输入；场景程序可通过对应 shader 类型采样立方体，当前采样 view 为完整 mip 范围。
+所有维度均通过 RDGBuilder::UploadTexture 直接写入指定层与 mip。立方体面沿用 ABI 的层编号，上传目标显式标为图输出。
+待上传项、材质和待绘制记录持有 IntrusivePtr<GpuTexture>。删除编号后，新的查找失败，已登记的图及截图请求继续保活原纹理。
+纹理编号 0–15 保留。除上述首次透明清屏的附件外，调用方需初始化将要采样的区域和 mip。
+地形及 GUI shader 接受单层颜色 2D 纹理。场景程序也可采样立方体。完整视图及指定 mip 范围的视图由 GpuTexture 提供，采样器由 Device 按描述符复用。
 
 ## 按请求读回
 
-请求登记时复制标量并持有来源 owner；准备阶段分配 ReadBack 缓冲，RDG Copy pass 复制指定颜色子资源并转为 HostRead。当前帧截图位于 GUI 之后、交换链输出之前；上一帧截图位于当前帧清屏之前；世界读回位于第一人称之后、轮廓与世界后处理之前。纹理导出指定 mip/数组层，在相关上传/离屏更新之后复制。
-提交 completion 对应截图完成序号。轮询只在 fence 完成后 Map/Invalidate，逐行移除设备行距填充，复制成功后释放请求表中的 owner；槽内 owner 保留到命令重置。
+登记截图时检查待入图表及 AsyncReadbackQueue，拒绝重复 ID，同时最多保留 4096 个请求。指定纹理和上一帧颜色在登记时取得强引用。AcquireNext 前预留读回缓冲，后续准备失败时取消未提交预留。构图时先将来源以 ImportPersistentOwned 移交 RDG，再登记拷贝。当前帧截图在 GUI 之后、交换链输出之前，上一帧截图在清屏之前，世界截图在第一人称之后、轮廓与后处理之前。指定层和 mip 在上传及离屏更新后复制。
+队列以本次提交的 completion fence 关联已入图请求。待入图请求可立即轮询，返回未就绪。空目标指针可重复查询尺寸，非空但容量不足的调用失败并保留请求。完成后成功复制才消费请求，队列负责刷新映射和移除行距填充。
 普通帧不创建读回资源、不读取像素。隐藏窗口上的截图请求仍执行所需离屏绘制与复制；关闭等待在途工作后回收未消费截图。
 
 ## GUI pass
 
-GuiPassResources 独立拥有三个程序、布局、采样器和十二种混合状态的 RGBA8 输出 PSO。
-每槽 GuiFrameSlot 复用绘制列表及参数集；纹理参数缓存持有纹理 owner、mip view 和完整 sampler 身份，内容变化才重写，未使用的缓存解除绑定并释放 owner。
-绘制记录和图导入借用该槽缓存保活的 TextureResource；该槽 GPU 工作完成、命令与图数据重置后，才更新或释放缓存中的旧 owner。
-获取后备缓冲前验证完整四边形范围、纹理编号、采样器位、逻辑尺寸与裁剪，并准备纹理参数集。
+GuiPassResources 持有三个程序、共享绑定组布局和十二种混合状态的 RGBA8 输出 PSO。
+GuiFrameSlot 保存本帧绘制记录。每条贴图绘制记录保活 GpuTexture，并保存由纹理和设备分别提供的 mip view 与 sampler。
+每个 GUI pass 以拥有式导入声明所读纹理。Prepare 从槽池获取本段常量与纹理参数集。
+获取后备缓冲前验证四边形范围、纹理编号、采样器位、逻辑尺寸与裁剪，并解析持久采样视图和采样器。
 GUI 顶点借用到 RDG Prepare；quad 索引及普通/灰度文字两份常量直接生成到动态切片，常量偏移由 RDG 对齐。
 native 按后端设置 GUI 的 Y 方向。帧描述中的 clear_color 决定输出清屏色。
 GUI 在普通地形或 OIT 合成之后加入无深度 raster pass，仅声明自身使用的纹理，按输入顺序绘制；逻辑裁剪缩放到物理输出。末地传送门/折跃门 GUI 使用原版场景程序，有序标记把平面 GUI 拆段并在对应位置插入场景 pass，保留模糊边界；各段持有独立、按槽复用的绘制列表，特殊 GUI 使用独立深度。
-参数集先重置绑定，再释放旧纹理 owner；关闭时参数集先于 owner 销毁。常量参数集先于所属 UploadArena 关闭。
+命令存储重置后，槽池统一解绑 GUI 参数集，之后释放图及其持有的资源。
 
 ## 场景绘制
 
-TextureResource 按 mip 范围缓存采样 view；view 先于所属纹理 owner 销毁，槽绑定保持 owner 至命令重置。
+GpuTexture 按维度、格式、子资源范围和用途缓存视图，视图的寿命受纹理所有者约束。
 ScenePassResources 按完整原版管线编号及离屏/GUI 反射方向缓存 PSO，按 shader 程序复用 shader 和 binding group layout。离屏投影反射与正面绕序一起切换，保留物品正面的法线和光照。几何、常量和绑定经一组帧表提交，资源创建和参数写入发生在准备阶段。
-SceneFrameSlot 保留绘制、阶段批次和纹理绑定容量；纹理 owner、mip view、完整采样器及绑定位置不变时复用参数。常量和图内纹理绑定通过槽内 RAII 在命令重置后解除，随后才释放图资源；图内 view 解除后对应缓存标记失效。
+SceneFrameSlot 准备几何与纹理描述。每个存活 pass 持有各自的参数集借用，Prepare 从同一帧槽按完整绑定内容获取，支持同一深度拷贝管线在一帧内读取不同来源。
 RDG 按实际引用声明各 blob 的顶点、索引或常量用途，借用至同步 Prepare 消费；未引用 blob 不上传。几何块不携带无关的常量用途与范围限制。quad 与三角扇索引直接写入上传区间。Prepare 解析 Buffer/Offset/Size，Record 只绑定与编码。各阶段只声明实际批次的纹理。
 持久场景几何由 ScenePassResources 注册表持有 GpuBuffer，独立上传入口复制为 Owned 来源；隐藏帧仍执行 MarkOutput 上传。帧槽持有绘制引用，RDG 持有上传引用，注册表删除不使在途缓冲失效。状态由实际提交后的 RDG 发布。天空与标题全景顶点、索引不逐帧重传；世界边界沿用原版失效条件更新顶点。
 普通场景使用主 RGBA8/D32 目标并保留输入顺序；always-on-top 与第一人称阶段分别清理深度。存在世界后处理时，两阶段各用独立深度并按原版 INTEGRATE_DEPTH 规则将非零像素写回主深度，各有独立参数集。没有世界后处理时直接清理主深度。动态对象与地形共享 OIT 范围、系数和累积目标，即使没有透明地形也执行动态 OIT 合成。
 普通透明在地形透明层之前把水体遮罩写入主深度。OIT 通过原版深度 blit 将主深度写入独立地形深度，再绘制遮罩；范围裁剪修改主深度后重复这一过程。动态 OIT 使用主深度，遮罩仅影响地形。仅写深度的原版管线移除颜色附件；这也避免向锁定 RadRay 的 Vulkan 颜色掩码转换传入未覆盖的零值。云 OIT 使用独立深度，见下文。
-OIT 多次绘制复用借用几何和前缀索引；所有 view、切片和参数在 Prepare 解析，Record 仅编码。管线声明绑定和编译产物实际绑定分别验证，允许编译器消除已声明但未使用的常量块或整组纹理，拒绝未声明编号。只有实际保留的图内纹理绑定才准备采样器和参数清理，覆盖 additive 透射率阶段被编译器消除的采样输入。
+OIT 多次绘制复用借用几何和前缀索引；所有 view、切片和参数在 Prepare 解析，Record 仅编码。管线声明绑定和编译产物实际绑定分别验证，允许编译器消除已声明但未使用的常量块或整组纹理，拒绝未声明编号。只有实际保留的图内纹理绑定才准备对应采样器和参数绑定，覆盖 additive 透射率阶段被编译器消除的采样输入。
 
 场景离屏表按连续绘制范围更新持久采样纹理。每个更新使用池内 RGBA8/D32 tile，整 tile 清屏后绘制，再复制到 atlas 或画中画缓存的指定区域；未更新区域和后续帧复用原有内容。图内更新显式 MarkOutput，窗口隐藏时仍执行。新建单层颜色附件首次导入时整面清屏，满足 D3D12 首次使用初始化要求，状态仅在提交后发布。
-云面使用持久 R8_SINT texel buffer，绑定缓存包含 owner、binding 与完整范围；RDG 声明 ShaderRead。云 OIT 在裁剪后复制主深度，随后在独立云深度上执行 bounds、transmittance、accumulate。
+云面使用持久 R8_SINT texel buffer，参数池按绑定位置、缓冲、格式与范围区分绑定。RDG 声明 ShaderRead。云 OIT 在裁剪后复制主深度，随后在独立云深度上执行 bounds、transmittance、accumulate。
 
-内置后处理从离线生成的链表及 std140 常量描述构建 RDG，临时颜色目标由槽池分配，PSO、采样器和参数集按槽缓存。每个 pass 的 Prepare 解析切片和采样 view 并 FlushWrites，Record 只编码全屏绘制。实体轮廓的 sobel/模糊/合成与 GUI 模糊使用同一实现；GUI 两个范围共享一次顶点/索引/常量上传。
+内置后处理从链表及 std140 常量描述构建 RDG。槽内瞬态池提供临时颜色目标，场景程序持有 PSO，设备共享采样器。Prepare 按切片与采样视图获取参数集，Record 编码全屏绘制。实体轮廓的 sobel、模糊、合成与 GUI 模糊共用这条路径，GUI 两个范围共享一次顶点、索引和常量上传。

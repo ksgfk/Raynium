@@ -4,36 +4,24 @@ bool ScenePassResources::PrepareTracy(Device& device,SceneFrameSlot& frame) {
         draw.pipeline=GetPipeline(device,184,false,true);
         if(!draw.pipeline) return false;
     }
-    for(uint32_t group=0;group<2;++group) if(!draw.parameters[group]) {
-        draw.parameters[group]=device.CreateShaderParameterSet({draw.pipeline->program->groups[group].get()}).Release();
-        if(!draw.parameters[group]) return false;
-    }
-    draw.graphSampler=GetTextureSampler(device,_samplers,12,{0,0,0,1});
+    draw.graphSampler=GetTextureSampler(device,12,{0,0,0,1});
     return draw.graphSampler!=nullptr;
 }
 radray::RDGTextureHandle ScenePassResources::AddTracy(radray::RDGBuilder& graph,radray::FrameSlot& slot,SceneFrameSlot& frame,
     radray::RDGTextureHandle source,uint32_t width,uint32_t height) {
     const auto target=graph.CreateTexture({.Dim=TextureDimension::Dim2D,.Width=width,.Height=height,.DepthOrArraySize=1,
         .MipLevels=1,.SampleCount=1,.Format=TextureFormat::RGBA8_UNORM,.Memory=MemoryType::Device,.Usage=TextureUse::RenderTarget|TextureUse::CopySource});
-    const float clip=slot.GetDevice().GetBackend()==RenderBackend::Vulkan?1.f:-1.f;
+    const float clip=slot.GetDevice().GetBackend()==GpuBackend::Vulkan?1.f:-1.f;
     const auto backend=graph.CreateBuffer({.MaxSize=256,.Usage=BufferUse::CBuffer},radray::RDGUploadSource::Generated(256,clip,
         +[](const float& clip,radray::RDGUploadWriteContext& context) noexcept {
             std::memset(context.Bytes.data(),0,context.Bytes.size()); std::memcpy(context.Bytes.data(),&clip,sizeof(clip)); return true;
         }));
-    struct Data { SceneDraw* draw; radray::RDGTextureHandle source; radray::RDGBufferHandle backend; uint32_t width,height; };
+    struct Data { SceneDraw* draw; radray::RDGTextureHandle source; radray::RDGBufferHandle backend; uint32_t width,height; SceneBindings groups{}; };
     graph.AddRasterPass("Raynium Tracy Image",Data{&frame.tracy,source,backend,width,height},
         +[](const Data& data,radray::RDGRasterPassContext& context) noexcept {
-            return RecordSceneScreen(*data.draw,data.width,data.height,context.GetEncoder());
+            return RecordSceneScreen(*data.draw,data.groups,data.width,data.height,context.GetEncoder());
         },+[](Data& data,radray::RDGPrepareContext& context) noexcept {
-            auto& draw=*data.draw;
-            struct Cleanup { SceneDraw* draw; ~Cleanup() noexcept { for(auto& p:draw->parameters) p->ResetBindingsForReuse(); } };
-            context.GetSlot().Emplace<Cleanup>(&draw);
-            for(auto& group:draw.parameters) group->ResetBindingsForReuse();
-            const auto slice=context.ResolveBuffer(data.backend);
-            const auto view=context.ResolveView(data.source,TextureViewUsage::Resource);
-            return view && draw.parameters[0]->Set(31,0,ShaderBufferBinding{slice.Buffer.Get(),{slice.Offset,256}})
-                && draw.parameters[1]->Set(0,0,view.Get()) && draw.parameters[1]->Set(1,0,draw.graphSampler)
-                && draw.parameters[0]->FlushWrites() && draw.parameters[1]->FlushWrites();
+            return PrepareScreenBindings(context,*data.draw,data.backend,0,data.source,data.groups);
         }).ReadTexture(source).ReadBuffer(backend,BufferState::CBuffer).WriteColor(0,target,LoadAction::DontCare,StoreAction::Store);
     return target;
 }
@@ -58,24 +46,10 @@ bool ScenePassResources::PreparePostEffects(Device& device,SceneFrameSlot& frame
         for(size_t j=0;j<effect.chain.passes.size();++j) {
             auto& pass=effect.passes[j]; pass.description=&effect.chain.passes[j];
             auto* pipeline=GetPipeline(device,pass.description->pipeline); if(!pipeline) return false;
-            auto& draw=pass.draw;
-            if(draw.pipeline!=pipeline) {
-                for(auto& parameters:draw.parameters) parameters.reset();
-                draw.pipeline=pipeline;
-                for(uint32_t group=0;group<2;++group) if(pipeline->program->groups[group]) {
-                    draw.parameters[group]=device.CreateShaderParameterSet({pipeline->program->groups[group].get()}).Release();
-                    if(!draw.parameters[group]) return false;
-                }
-            }
+            pass.draw.pipeline=pipeline;
         }
     }
-    for(uint32_t bits:{0u,12u}) {
-        auto& sampler=_samplers[(1ull<<32)|bits];
-        if(!sampler) sampler=device.CreateSampler({.AddressS=AddressMode::ClampToEdge,.AddressT=AddressMode::ClampToEdge,.AddressR=AddressMode::ClampToEdge,
-            .MinFilter=bits?FilterMode::Linear:FilterMode::Nearest,.MagFilter=bits?FilterMode::Linear:FilterMode::Nearest,
-            .MipmapFilter=FilterMode::Nearest,.LodMax=0,.AnisotropyClamp=1}).Release();
-        if(!sampler) return false;
-    }
+    if(!GetPostSampler(device,false) || !GetPostSampler(device,true)) return false;
     frame.effectCount=count; return true;
 }
 void ScenePassResources::AddPostEffects(radray::RDGBuilder& graph,radray::FrameSlot& slot,SceneFrameSlot& frame,uint32_t phase,
@@ -89,6 +63,7 @@ void ScenePassResources::AddPostEffects(radray::RDGBuilder& graph,radray::FrameS
         radray::array<Texture,4> textures{};
         rn_frame_metrics* metrics{};
         uint32_t backendOffset{};
+        SceneBindings groups{};
     };
     for(auto& effect:std::span{frame.effects}.first(frame.effectCount)) {
         if(effect.desc.phase!=phase) continue;
@@ -117,31 +92,31 @@ void ScenePassResources::AddPostEffects(radray::RDGBuilder& graph,radray::FrameS
                 data.constants[data.constantCount++]={constant.binding,buffer};
             }
             for(const auto& source:desc.inputs) if(draw.pipeline->program->activeBindings[1]&(1ull<<source.binding))
-                data.textures[data.textureCount++]={source.binding,targets[source.target],_samplers[(1ull<<32)|(source.linear?12u:0u)].get()};
+                data.textures[data.textureCount++]={source.binding,targets[source.target],GetPostSampler(slot.GetDevice(),source.linear)};
             auto raster=graph.AddRasterPass("Raynium Post Effect",data,+[](const Data& data,radray::RDGRasterPassContext& context) noexcept {
-                return RecordSceneScreen(*data.draw,data.width,data.height,context.GetEncoder());
+                return RecordSceneScreen(*data.draw,data.groups,data.width,data.height,context.GetEncoder());
             },+[](Data& data,radray::RDGPrepareContext& context) noexcept {
-                auto& draw=*data.draw;
-                struct Cleanup { SceneDraw* draw; ~Cleanup() noexcept { for(auto& p:draw->parameters) if(p) p->ResetBindingsForReuse(); } };
-                context.GetSlot().Emplace<Cleanup>(&draw);
-                for(auto& group:draw.parameters) if(group) group->ResetBindingsForReuse();
-                auto backend=context.ResolveBuffer(data.backend);
-                if(!draw.parameters[0]->Set(31,0,ShaderBufferBinding{backend.Buffer.Get(),{backend.Offset+data.backendOffset,256}})) return false;
+                auto& program=*data.draw->pipeline->program;
+                radray::array<radray::TransientParameterBinding,9> constants;
+                radray::array<radray::TransientParameterBinding,8> textures;
+                auto backend=context.ResolveBuffer(data.backend); backend.Offset+=data.backendOffset; backend.Size=256;
+                constants[0]=FrameConstantBinding(31,backend);
+                size_t constantCount=1,textureCount=0;
                 for(const auto& constant:std::span{data.constants}.first(data.constantCount)) {
-                    auto slice=context.ResolveBuffer(constant.buffer);
-                    if(!draw.parameters[0]->Set(constant.binding,0,ShaderBufferBinding{slice.Buffer.Get(),{slice.Offset,256}})) return false;
+                    auto slice=context.ResolveBuffer(constant.buffer); slice.Size=256;
+                    constants[constantCount++]=FrameConstantBinding(constant.binding,slice);
                 }
                 for(const auto& texture:std::span{data.textures}.first(data.textureCount)) {
                     auto view=context.ResolveView(texture.texture,TextureViewUsage::Resource);
-                    if(!view || !draw.parameters[1]->Set(texture.binding,0,view.Get())) return false;
-                    const auto& samplers=draw.pipeline->program->samplers;
-                    if(std::find(samplers.begin(),samplers.end(),texture.binding+1)!=samplers.end()
-                        && !draw.parameters[1]->Set(texture.binding+1,0,texture.sampler)) return false;
+                    if(!view) return false;
+                    textures[textureCount++]={texture.binding,0,view.Get()};
+                    if(UsesSampler(program,texture.binding+1)) textures[textureCount++]={texture.binding+1,0,texture.sampler};
                 }
-                for(auto& group:draw.parameters) if(group && !group->FlushWrites()) return false;
+                if(!AcquireSceneBindings(context.GetSlot(),program,std::span{constants}.first(constantCount),
+                    std::span{textures}.first(textureCount),data.groups)) return false;
                 if(data.metrics) {
                     ++data.metrics->scene_calls;
-                    data.metrics->bind_calls+=1+uint64_t(bool(draw.parameters[0]))+uint64_t(bool(draw.parameters[1]));
+                    data.metrics->bind_calls+=1+uint64_t(bool(data.groups.constants))+uint64_t(bool(data.groups.textures));
                 }
                 return true;
             });
@@ -154,13 +129,11 @@ void ScenePassResources::AddPostEffects(radray::RDGBuilder& graph,radray::FrameS
     }
 }
 void ScenePassResources::AddOutline(radray::RDGBuilder& graph,radray::FrameSlot& slot,SceneFrameSlot& frame,
-    radray::RDGTextureHandle color,radray::RDGTextureHandle depth,uint32_t width,uint32_t height,radray::vector<TextureResource*>& imports) {
+    radray::RDGTextureHandle color,radray::RDGTextureHandle depth,uint32_t width,uint32_t height,FrameTextureImports& imports) {
     if(!frame.phaseCounts[RN_SCENE_OUTLINE]) return;
     auto outline=graph.CreateTexture({.Dim=TextureDimension::Dim2D,.Width=width,.Height=height,.DepthOrArraySize=1,.MipLevels=1,.SampleCount=1,
         .Format=TextureFormat::RGBA8_UNORM,.Memory=MemoryType::Device,.Usage=TextureUse::RenderTarget|TextureUse::Resource});
-    struct Clear {};
-    graph.AddRasterPass("Raynium Outline Clear",Clear{},+[](const Clear&,radray::RDGRasterPassContext&) noexcept { return true; },
-        +[](Clear&,radray::RDGPrepareContext&) noexcept { return true; }).WriteColor(0,outline,LoadAction::Clear,StoreAction::Store);
+    graph.AddClearColor(outline,{});
     AddPass(graph,slot,frame,RN_SCENE_OUTLINE,outline,depth,width,height,imports);
     AddPostEffects(graph,slot,frame,2,outline,depth,width,height,color);
 }

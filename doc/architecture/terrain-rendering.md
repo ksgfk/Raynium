@@ -54,8 +54,8 @@ Native 每帧一次求逆 projection × view，变换 (0,0,1,0) 得到有效视�
 
 renderer 创建时由 `raynium.terrain.submission=auto|direct|indirect` 选择专用提交模式，默认 auto。设备条件、错误和帧槽契约见 [Native runtime](native-runtime.md#提交模式与参数)。
 
-[Shader pack](shader-pack.md) 提供离线 DXIL/SPIR-V 程序。Group 0 保存每槽 Frame，Group 1 保存图集、lightmap 和 sampler；Group 2 保存每槽 OIT 阶段输入。
-驻留绘制模板不保存瞬态 view。OIT 参数在 RDG Prepare 绑定，在槽命令 epoch 回收后、图及 view 清理前解除；Record 只编码已准备数据。
+[Shader pack](shader-pack.md) 提供离线 DXIL/SPIR-V 程序。Group 0 绑定本帧常量，Group 1 的持久材质参数集共享图集、lightmap 与设备采样器。Group 2 绑定当前 OIT 阶段输入。
+驻留绘制模板不保存瞬态 view。Frame 与 OIT 参数集在 RDG Prepare 按内容从 FrameSlot 获取，命令重置后由槽池统一解绑，再回收图及视图；Record 只编码已准备数据。
 模式切换选择已有 pass，不重新加载包、创建材质或上传顶点。仅复用 MC 可见列表，没有额外 GPU 可见性或异步计算队列。
 
 先绘制 SOLID，再绘制 CUTOUT。二者使用反向 Z（clear=0、GreaterEqual）、背面剔除和深度写入；CUTOUT 丢弃 alpha<0.5 的片元。

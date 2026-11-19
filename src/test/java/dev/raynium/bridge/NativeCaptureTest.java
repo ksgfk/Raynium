@@ -1,5 +1,8 @@
 package dev.raynium.bridge;
 
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Path;
@@ -12,10 +15,53 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.lwjgl.sdl.SDLVideo;
+import static java.lang.foreign.ValueLayout.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 @Tag("native")
 class NativeCaptureTest {
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void rawPollOnlyConsumesAfterSuccessfulCopy(NativeEnvironment.Backend backend) throws Throwable {
+        try (var environment = new NativeEnvironment(NativeTestSupport.locate(gameDirectory), backend,
+                     NativeTestSupport.recordingLogger(new ArrayList<>()));
+             var window = new NativeSwapchainTest.Window();
+             var runtime = environment.createRuntime();
+             var renderer = runtime.createRenderer(NativeTestSupport.shaders());
+             var chain = renderer.createSwapchain(window.hwnd, 127, 65, NativeSwapchain.PresentMode.IMMEDIATE);
+             var arena = Arena.ofConfined()) {
+            var handleField = MethodHandles.privateLookupIn(NativeRenderer.class, MethodHandles.lookup())
+                    .findVarHandle(NativeRenderer.class, "handle", MemorySegment.class);
+            var handle = (MemorySegment) handleField.get(renderer);
+            var poll = renderer.bindings.pollCapture;
+            long id = 8100L;
+            var info = arena.allocate(32, 8);
+            info.set(JAVA_INT, 0, 32);
+            renderer.requestCapture(id, NativeRenderer.CAPTURE_FINAL, 0, 0, 0);
+            assertEquals(0, (int) poll.invokeExact(handle, id, info, MemorySegment.NULL, 0L));
+            assertEquals(0, info.get(JAVA_INT, 4));
+            var frame = NativeTestSupport.solidFrame(1);
+            frame.clearColor = new float[]{1, 0, 0, 1};
+            renderer.present(chain, frame);
+            long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+            do {
+                assertEquals(0, (int) poll.invokeExact(handle, id, info, MemorySegment.NULL, 0L));
+                if (info.get(JAVA_INT, 4) == 1) break;
+                LockSupport.parkNanos(1_000_000);
+            } while (System.nanoTime() < deadline);
+            assertEquals(1, info.get(JAVA_INT, 4));
+            assertEquals(0, (int) poll.invokeExact(handle, id, info, MemorySegment.NULL, 0L));
+            assertEquals(1, info.get(JAVA_INT, 4));
+            long size = info.get(JAVA_LONG, 16);
+            assertEquals(127L * 65 * 4, size);
+            var pixels = arena.allocate(size);
+            assertEquals(1, (int) poll.invokeExact(handle, id, info, pixels, 0L));
+            assertEquals(1, (int) poll.invokeExact(handle, id, info, pixels, size - 1));
+            assertEquals(0, (int) poll.invokeExact(handle, id, info, pixels, size));
+            assertEquals(255, Byte.toUnsignedInt(pixels.get(JAVA_BYTE, 0)));
+            assertEquals(1, (int) poll.invokeExact(handle, id, info, MemorySegment.NULL, 0L));
+        }
+    }
+
     @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
     void capturesRequestedTracyThumbnailAfterGuiAcrossResize(NativeEnvironment.Backend backend) throws Exception {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
@@ -107,6 +153,39 @@ class NativeCaptureTest {
             var previous=awaitCapture(renderer,8004); assertEquals(127,previous.width()); pixel(previous,10,10,0,0,255,255);
         }
     }
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void capturesInitializedAttachmentAfterLastPublicReferenceCloses(NativeEnvironment.Backend backend) throws Exception {
+        try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var window=new NativeSwapchainTest.Window(); var runtime=environment.createRuntime();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
+            var chain=renderer.createSwapchain(window.hwnd,127,65,NativeSwapchain.PresentMode.IMMEDIATE)) {
+            try(var texture=renderer.createTexture(7,5,1,1,NativeTexture.Format.RGBA8,NativeTexture.ATTACHMENT|NativeTexture.READBACK)) {
+                renderer.requestCapture(8201,NativeRenderer.CAPTURE_TEXTURE,texture.id(),0,0);
+            }
+            renderer.present(chain,NativeTestSupport.solidFrame(1));
+            var image=awaitCapture(renderer,8201);
+            assertEquals(7,image.width()); assertEquals(5,image.height());
+            assertArrayEquals(new byte[7*5*4],image.rgba());
+        }
+    }
+
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void lastCaptureUsesMostRecentHiddenRenderedSlot(NativeEnvironment.Backend backend) throws Exception {
+        try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var window=new NativeSwapchainTest.Window(); var runtime=environment.createRuntime();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
+            var chain=renderer.createSwapchain(window.hwnd,127,65,NativeSwapchain.PresentMode.IMMEDIATE)) {
+            var red=NativeTestSupport.solidFrame(1); red.clearColor=new float[]{1,0,0,1}; renderer.present(chain,red);
+            assertTrue(SDLVideo.SDL_HideWindow(window.handle)); window.pump();
+            renderer.requestCapture(8301,NativeRenderer.CAPTURE_FINAL,0,0,0);
+            var green=NativeTestSupport.solidFrame(2); green.clearColor=new float[]{0,1,0,1}; renderer.present(chain,green);
+            pixel(awaitCapture(renderer,8301),0,0,0,255,0,255);
+            renderer.requestCapture(8302,NativeRenderer.CAPTURE_LAST,0,0,0);
+            renderer.present(chain,NativeTestSupport.solidFrame(3));
+            pixel(awaitCapture(renderer,8302),0,0,0,255,0,255);
+        }
+    }
+
     @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
     void closesWithUnreadCaptureAndWithAllocatedButUnsubmittedReadback(NativeEnvironment.Backend backend) throws Exception {
         for(boolean fail:new boolean[]{false,true}) {

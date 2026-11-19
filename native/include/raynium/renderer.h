@@ -12,7 +12,7 @@ public:
     ~Renderer() noexcept;
     static bool Create(radray::DeviceContext&,std::span<const radray::byte>,uint32_t flags,radray::unique_ptr<Renderer>&);
     bool Present(Swapchain&,const rn_render_frame_desc&,rn_present_result&);
-    bool PrepareOutput(radray::render::TextureFormat format) {
+    bool PrepareOutput(radray::gpu::TextureFormat format) {
         return _pipeline->PrepareOutput(format,_device.GetDevice());
     }
     void Finish();
@@ -34,6 +34,6 @@ private:
     radray::unique_ptr<radray::FrameScheduler> _scheduler;
     TerrainResidency _terrain;
     SolidFramePipeline* _pipeline;
-    UploadedTextures _uploaded;
+    TextureRegistry _uploaded;
 };
 }

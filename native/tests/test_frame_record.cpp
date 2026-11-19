@@ -5,7 +5,7 @@
 
 namespace raynium {
 namespace {
-using namespace radray::render;
+using namespace radray::gpu;
 class BufferProbe final : public Buffer {
 public:
     bool IsValid() const noexcept override { return true; }
@@ -58,16 +58,12 @@ void ExpectReadOnly(const BufferProbe& buffer,const ParametersProbe& parameters)
     EXPECT_EQ(buffer.maps+buffer.unmaps+buffer.flushes+buffer.invalidates+buffer.deviceQueries,0u);
     EXPECT_EQ(parameters.writes+parameters.flushes+parameters.resets,0u);
 }
-TEST(TerrainFrameUpload, ConstantsRebindOnlyForChangedPhysicalSlice) {
-    BufferProbe first,second; ParametersProbe parameters; radray::RDGBufferSlice cached;
-    ASSERT_TRUE(BindFrameConstants(parameters,cached,{&first,512,256}));
-    ASSERT_TRUE(BindFrameConstants(parameters,cached,{&first,512,256}));
-    EXPECT_EQ(parameters.writes,1u); EXPECT_EQ(parameters.flushes,1u);
-    ASSERT_TRUE(BindFrameConstants(parameters,cached,{&first,1024,256}));
-    ASSERT_TRUE(BindFrameConstants(parameters,cached,{&second,1024,256}));
-    EXPECT_EQ(parameters.writes,3u); EXPECT_EQ(parameters.flushes,3u);
-    EXPECT_EQ(cached.Buffer.Get(),&second); EXPECT_EQ(cached.Offset,1024u);
-    EXPECT_FALSE(BindFrameConstants(parameters,cached,{})); EXPECT_EQ(parameters.writes,3u);
+TEST(TerrainFrameRecord, FrameConstantCarriesBindingAndPhysicalSlice) {
+    BufferProbe buffer;
+    const auto entry=FrameConstantBinding(31,{&buffer,512,256});
+    EXPECT_EQ(entry.BindingId,31u); EXPECT_EQ(entry.ArrayElement,0u);
+    const auto value=std::get<ShaderBufferBinding>(entry.Value);
+    EXPECT_EQ(value.Target,&buffer); EXPECT_EQ(value.Range.Offset,512u); EXPECT_EQ(value.Range.Size,256u);
 }
 TEST(TerrainFrameUpload, QuadIndicesWriteOnlyTheFinalUnalignedRange) {
     radray::vector<radray::byte> storage(50,radray::byte{0x7f});
@@ -108,7 +104,7 @@ TEST(TerrainFrameRecord, DirectAndIndirectConsumePreparedListsWithoutResourceMut
 }
 TEST(TerrainFrameRecord, GuiUsesSliceBasesAndSkipsEmptyDrawsWithoutResourceMutation) {
     BufferProbe buffer; GuiFrameSlot frame; auto parameters=radray::make_unique<ParametersProbe>(); auto* probe=parameters.get();
-    frame.passParameters[0]=std::move(parameters);
+    frame.passParameters[0]=probe;
     frame.draws.push_back({.desc={.pipeline=RN_GUI_COLOR,.first_vertex=4,.vertex_count=8},.scissor={0,0,640,360}});
     frame.draws.push_back({.desc={.pipeline=RN_GUI_COLOR,.vertex_count=4},.scissor={0,0,0,360}});
     const radray::array<GraphicsPipelineState*,12> pipelines{};
@@ -121,10 +117,10 @@ TEST(TerrainFrameRecord, GuiUsesSliceBasesAndSkipsEmptyDrawsWithoutResourceMutat
 TEST(SceneFrameRecord, UsesAllSliceOffsetsAndKeepsResourcesReadOnly) {
     BufferProbe buffer; ScenePipeline pipeline; SceneDraw draw;
     auto parameters=radray::make_unique<ParametersProbe>(); auto* probe=parameters.get();
-    draw.parameters[0]=std::move(parameters); draw.pipeline=&pipeline;
+    draw.pipeline=&pipeline;
     draw.desc.index_count=6; draw.desc.index_stride=2; draw.desc.instance_count=3;
     draw.vertices={&buffer,768,144}; draw.indices={&buffer,2048,12}; draw.instances={&buffer,4096,48};
-    const radray::array<SceneFrameSlot::PhaseDraw,1> draws{{{&draw,{}}}};
+    const radray::array<SceneFrameSlot::PhaseDraw,1> draws{{{&draw,{},{probe,nullptr}}}};
     EncoderProbe encoder; ASSERT_TRUE(RecordSceneDraws(draws,encoder));
     ASSERT_EQ(encoder.direct.size(),1u); EXPECT_EQ(encoder.direct[0].IndexCount,6u); EXPECT_EQ(encoder.direct[0].InstanceCount,3u);
     ASSERT_EQ(encoder.vertices.size(),2u); EXPECT_EQ(encoder.vertices[0].View.Offset,768u); EXPECT_EQ(encoder.vertices[0].View.Size,144u);
@@ -134,8 +130,8 @@ TEST(SceneFrameRecord, UsesAllSliceOffsetsAndKeepsResourcesReadOnly) {
 }
 TEST(SceneFrameRecord, PostAndDepthEncodeOnlyPreparedScreenDraws) {
     BufferProbe buffer; ScenePipeline pipeline; SceneDraw draw; draw.pipeline=&pipeline;
-    auto parameters=radray::make_unique<ParametersProbe>(); auto* probe=parameters.get(); draw.parameters[0]=std::move(parameters);
-    EncoderProbe encoder; ASSERT_TRUE(RecordSceneScreen(draw,128,64,encoder));
+    auto parameters=radray::make_unique<ParametersProbe>(); auto* probe=parameters.get();
+    EncoderProbe encoder; ASSERT_TRUE(RecordSceneScreen(draw,{probe,nullptr},128,64,encoder));
     EXPECT_EQ(encoder.parameterBinds,1u); EXPECT_TRUE(encoder.vertices.empty()); EXPECT_TRUE(encoder.indices.empty());
     ExpectReadOnly(buffer,*probe);
 }

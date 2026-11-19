@@ -16,7 +16,7 @@ CPU 上传路径覆盖独立贴图、字形、动态图、全部图集和光照�
 地形使用驻留绘制模板、每槽可见记录/参数数组和双槽 FrameScheduler。
 SolidFramePipeline 基于 RenderGraphFramePipeline，通过 RDG 和 RHI 提交专用 direct/indirect 绘制；Raynium 负责队列提交。
 Java 复用扁平采集和堆外帧缓冲，按事件同步驻留状态，传递原始 quad 流和 section 可见项；Native 完成分组与保守剔除；上传预算和回退回收契约见[地形渲染](terrain-rendering.md)。
-主颜色目标使用 RGBA8，再由输出 pass 写入 BGRA8 交换链；按请求读回支持普通截图与 GPU 像素断言。
+主颜色目标使用 RGBA8，再由输出 pass 写入 BGRA8 交换链；截图通过 RadRay 的 AsyncReadbackQueue 读回，图、参数集及 GPU 计时共享渲染槽的完成边界。
 独立原版参考入口关闭接管与 native 加载。操作与测试入口见[构建与测试](../guide/build-test.md)。
 
 ## 职责与源码地图

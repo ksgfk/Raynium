@@ -103,7 +103,7 @@ void TerrainBindingStates::Release(uint32_t id) noexcept {
     _states[id]={}; entry.nextFree=_freeHead; _freeHead=id;
 }
 uint32_t TerrainIndirectChunk(uint32_t remaining,uint32_t nativeLimit) noexcept { return std::min(remaining,nativeLimit); }
-bool SelectTerrainSubmission(uint32_t flags,const radray::render::RenderDeviceCapabilities& caps,bool& indirect) {
+bool SelectTerrainSubmission(uint32_t flags,const radray::gpu::GpuDeviceCapabilities& caps,bool& indirect) {
     indirect=false;
     if(flags>RN_RENDERER_INDIRECT) { RADRAY_ERR_LOG("Unknown or mutually exclusive terrain submission flags: {}",flags); return false; }
     const std::string_view reason=!caps.Features.IndirectDraw?"indirect draws unsupported":

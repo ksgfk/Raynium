@@ -10,7 +10,7 @@
 #include <utility>
 
 namespace raynium {
-using namespace radray::render;
+using namespace radray::gpu;
 RenderBuffer CreateBuffer(Device& d,uint64_t bytes,MemoryType memory,BufferUses uses,ResourceHints hints) {
     RADRAY_PROFILE_SCOPE_N("Raynium.Buffer.Create");
     if(memory==MemoryType::Upload) uses|=BufferUse::MapWrite;

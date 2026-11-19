@@ -1,7 +1,7 @@
 #pragma once
 #include <radray/types.h>
 #include <raynium/bridge.h>
-#include <radray/render/rhi.h>
+#include <radray/gpu/types.h>
 #include <span>
 #include <memory_resource>
 #include <radray/runtime/gpu_resource.h>
@@ -35,16 +35,16 @@ TerrainEye ComputeTerrainEye(const rn_render_frame_desc&) noexcept;
 uint32_t TerrainVisibleMask(const TerrainMeshLayout&,const TerrainEye&,const rn_render_frame_desc&,
                             std::span<const rn_instance>) noexcept;
 struct TerrainDrawTemplate {
-    radray::render::VertexBufferView vertices{};
-    radray::render::IndexBufferView indices{};
+    radray::gpu::VertexBufferView vertices{};
+    radray::gpu::IndexBufferView indices{};
     radray::vector<TerrainDrawRange> ranges;
     uint32_t fullMask{},validMask{},mergeMask{};
     radray::GpuBuffer* vertexPage{};
     radray::GpuBuffer* indexPage{};
 };
 struct TerrainBindingState {
-    radray::render::VertexBufferView vertices{};
-    radray::render::IndexBufferView indices{};
+    radray::gpu::VertexBufferView vertices{};
+    radray::gpu::IndexBufferView indices{};
     const MeshMaterialBinding* material{};
     radray::GpuBuffer* vertexPage{};
     radray::GpuBuffer* indexPage{};
@@ -59,9 +59,9 @@ public:
     uint32_t Count() const noexcept { return uint32_t(_lookup.size()); }
 private:
     struct Key {
-        radray::render::VertexBufferView vertices{};
-        radray::render::IndexBufferView indices{};
-        const radray::render::ShaderParameterSet* parameters{};
+        radray::gpu::VertexBufferView vertices{};
+        radray::gpu::IndexBufferView indices{};
+        const radray::gpu::ShaderParameterSet* parameters{};
         uint64_t materialVersion{};
         bool operator==(const Key&) const noexcept;
     };
@@ -83,8 +83,8 @@ struct TerrainSortItem {
 };
 static_assert(sizeof(TerrainVisible)==32 && sizeof(TerrainSortItem)==16);
 struct TerrainDrawBatch {
-    radray::render::VertexBufferView vertices{};
-    radray::render::IndexBufferView indices{};
+    radray::gpu::VertexBufferView vertices{};
+    radray::gpu::IndexBufferView indices{};
     const MeshMaterialBinding* material{};
     uint32_t first{},count{};
     radray::GpuBuffer* vertexPage{};
@@ -95,7 +95,7 @@ struct TerrainFrameLists {
     radray::array<radray::vector<TerrainVisible>,3> visible;
     radray::array<radray::vector<TerrainSortItem>,3> order;
     radray::vector<TerrainSortItem> sortScratch;
-    radray::vector<radray::render::DrawIndexedIndirectArguments> arguments;
+    radray::vector<radray::gpu::DrawIndexedIndirectArguments> arguments;
     radray::vector<TerrainDrawBatch> batches;
     radray::array<TerrainDrawLayer,3> layers;
 };
@@ -104,5 +104,5 @@ bool BuildTerrainDraws(TerrainFrameLists&,std::span<const TerrainBindingState>,b
 // Returns the next native-call record count; zero means unsupported or no remaining records.
 uint32_t TerrainIndirectChunk(uint32_t remaining,uint32_t nativeLimit) noexcept;
 // Logs the selected mode and any auto fallback; forced unsupported modes fail before resource creation.
-bool SelectTerrainSubmission(uint32_t flags,const radray::render::RenderDeviceCapabilities&,bool& indirect);
+bool SelectTerrainSubmission(uint32_t flags,const radray::gpu::GpuDeviceCapabilities&,bool& indirect);
 }

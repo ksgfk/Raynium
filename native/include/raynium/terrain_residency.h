@@ -46,18 +46,18 @@ struct TerrainFrame {
     const TerrainFrameLists* lists{};
     radray::vector<GeometryUpload>* geometry{};
     std::span<const rn_instance> instances;
-    UploadedTextures* textures{};
+    TextureRegistry* textures{};
     rn_render_frame_desc parameters{};
     bool hasTranslucent{};
     uint32_t width{},height{};
-    radray::render::Texture* color{};
-    radray::render::SwapChainSyncObject* waitToDraw{};
-    radray::render::SwapChainSyncObject* readyToPresent{};
+    radray::gpu::Texture* color{};
+    radray::gpu::SwapChainSyncObject* waitToDraw{};
+    radray::gpu::SwapChainSyncObject* readyToPresent{};
 };
 class TerrainResidency final {
 public:
     TerrainResidency(radray::DeviceContext&,radray::unique_ptr<radray::VertexBufferPool>,radray::unique_ptr<radray::IndexBufferPool>);
-    bool PrepareFrame(const UploadedTextures&,const rn_render_frame_desc&,const MeshPassResources&,SlotUploads,TerrainFrame&);
+    bool PrepareFrame(const TextureRegistry&,const rn_render_frame_desc&,const MeshPassResources&,SlotUploads,TerrainFrame&);
     void Reset() noexcept;
     uint64_t ResidentBytes() const noexcept;
     void MeasureGeometry(rn_frame_metrics&) const noexcept;
@@ -66,7 +66,7 @@ private:
     radray::unique_ptr<radray::VertexBufferPool> _vertices;
     radray::unique_ptr<radray::IndexBufferPool> _indices;
     TerrainState _state;
-    radray::unordered_set<radray::render::Buffer*> _vertexPages,_indexPages;
+    radray::unordered_set<radray::gpu::Buffer*> _vertexPages,_indexPages;
     uint64_t _vertexReservedBytes{},_indexReservedBytes{};
 };
 }

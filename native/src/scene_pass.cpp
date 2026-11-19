@@ -8,7 +8,7 @@
 #include <limits>
 
 namespace raynium {
-using namespace radray::render;
+using namespace radray::gpu;
 namespace {
 #include "scene_catalog.inc"
 #include "post_catalog.inc"
@@ -62,7 +62,7 @@ ScenePipeline* ScenePassResources::GetPipeline(Device& device,uint32_t id,bool f
     if(auto found=_pipelines.find(key);found!=_pipelines.end()) return found->second.get();
     auto pipeline=radray::make_unique<ScenePipeline>(); auto& desc=pipeline->description;
     if(!DescribeScenePipeline(id,desc) && !DescribePostPipeline(id,desc)) { RADRAY_ERR_LOG("Unknown vanilla pipeline id={}",id); return nullptr; }
-    const bool vk=device.GetBackend()==RenderBackend::Vulkan;
+    const bool vk=device.GetBackend()==GpuBackend::Vulkan;
     auto& cached=_programs[radray::string(desc.program)];
     if(!cached) {
         auto program=radray::make_unique<SceneProgram>();
@@ -71,14 +71,14 @@ ScenePipeline* ScenePassResources::GetPipeline(Device& device,uint32_t id,bool f
         if(!artifact.RootConstants().empty() || !artifact.Samplers().empty()) { RADRAY_ERR_LOG("Unexpected vanilla shader root/static bindings"); return nullptr; }
         radray::array<radray::vector<BindingDescriptor>,2> bindings;
         for(const auto& binding:artifact.Bindings()) {
-            const auto kind=static_cast<radray::shader::ShaderBindingKind>(binding.Type);
-            const bool cb=kind==radray::shader::ShaderBindingKind::CBuffer,texture=kind==radray::shader::ShaderBindingKind::Texture;
-            const bool texel=kind==radray::shader::ShaderBindingKind::TypedBuffer;
-            if(binding.Group!=(cb?0u:1u) || binding.Count!=1 || (!cb && !texture && !texel && kind!=radray::shader::ShaderBindingKind::Sampler)) {
+            const auto kind=radray::shader::DecodeBindingKind(binding.Type);
+            const bool cb=kind==BindingKind::CBuffer,texture=kind==BindingKind::Texture;
+            const bool texel=kind==BindingKind::TypedBuffer;
+            if(binding.Group!=(cb?0u:1u) || binding.Count!=1 || (!cb && !texture && !texel && kind!=BindingKind::Sampler)) {
                 RADRAY_ERR_LOG("Unsupported vanilla shader binding: {}",desc.program); return nullptr;
             }
             const uint32_t logical=cb || vk?binding.Binding:binding.Binding*2+(texture || texel?0u:1u);
-            bindings[binding.Group].push_back({logical,cb?BindingKind::CBuffer:texture?BindingKind::Texture:texel?BindingKind::TypedBuffer:BindingKind::Sampler,1,Stages(binding.StageMask),
+            bindings[binding.Group].push_back({logical,*kind,1,Stages(binding.StageMask),
                 D3D12BindingDescriptor{cb?BindingRegisterClass::CBV:texture || texel?BindingRegisterClass::SRV:BindingRegisterClass::Sampler,
                     cb?logical:logical/2,binding.Group},VulkanBindingDescriptor{binding.Group,logical}});
             if(cb || texture || texel) { program->required[binding.Group].push_back(logical); program->activeBindings[binding.Group]|=1ull<<logical; }
@@ -119,7 +119,37 @@ ScenePipeline* ScenePassResources::GetPipeline(Device& device,uint32_t id,bool f
     if(!pipeline->pipeline) { RADRAY_ERR_LOG("Cannot create vanilla pipeline: {}",id); return nullptr; }
     auto* result=pipeline.get(); _pipelines.emplace(key,std::move(pipeline)); return result;
 }
-bool ScenePassResources::Prepare(Device& device,SceneFrameSlot& slot,const UploadedTextures& textures,const rn_render_frame_desc& frame) {
+namespace {
+bool UsesSampler(const SceneProgram& program,uint32_t binding) {
+    return std::find(program.samplers.begin(),program.samplers.end(),binding)!=program.samplers.end();
+}
+bool AcquireSceneBindings(radray::FrameSlot& slot,const SceneProgram& program,
+    std::span<const radray::TransientParameterBinding> constants,std::span<const radray::TransientParameterBinding> textures,SceneBindings& out) {
+    out.constants=slot.AcquireParameterSet(program.groups[0],constants).Get();
+    if(!out.constants) return false;
+    if(program.groups[1]) {
+        out.textures=slot.AcquireParameterSet(program.groups[1],textures).Get();
+        if(!out.textures) return false;
+    }
+    return true;
+}
+bool PrepareScreenBindings(radray::RDGPrepareContext& context,const SceneDraw& draw,radray::RDGBufferHandle backend,
+    uint32_t offset,radray::RDGTextureHandle source,SceneBindings& groups) {
+    auto slice=context.ResolveBuffer(backend); slice.Offset+=offset; slice.Size=256;
+    const auto view=context.ResolveView(source,TextureViewUsage::Resource);
+    if(!view) return false;
+    const auto constant=FrameConstantBinding(31,slice);
+    const radray::TransientParameterBinding textures[]{{0,0,view.Get()},{1,0,draw.graphSampler}};
+    return AcquireSceneBindings(context.GetSlot(),*draw.pipeline->program,{&constant,1},
+        {textures,UsesSampler(*draw.pipeline->program,1)?2u:1u},groups);
+}
+Sampler* GetPostSampler(Device& device,bool linear) {
+    const auto filter=linear?FilterMode::Linear:FilterMode::Nearest;
+    return device.GetOrCreateSampler({.AddressS=AddressMode::ClampToEdge,.AddressT=AddressMode::ClampToEdge,.AddressR=AddressMode::ClampToEdge,
+        .MinFilter=filter,.MagFilter=filter,.MipmapFilter=FilterMode::Nearest,.LodMax=0,.AnisotropyClamp=1}).Get();
+}
+}
+bool ScenePassResources::Prepare(Device& device,SceneFrameSlot& slot,const TextureRegistry& textures,const rn_render_frame_desc& frame) {
     slot.ClearBorrowed(); slot.drawCount=0; slot.targetCount=0; slot.phaseCounts.fill(0);
     const auto fail=[] { RADRAY_ERR_LOG("Invalid scene arrays, geometry, bindings or phase"); return false; };
     if(frame.scene_reserved || frame.scene_target_reserved || frame.scene_target_count>65536 || frame.scene_blob_count>1048576 || frame.scene_binding_count>4194304 || frame.scene_draw_count>1048576 ||
@@ -137,17 +167,11 @@ bool ScenePassResources::Prepare(Device& device,SceneFrameSlot& slot,const Uploa
         for(uint32_t draw=input.first_draw;draw<targetEnd;++draw) if(frame.scene_draws[draw].phase!=RN_SCENE_OFFSCREEN) return fail();
         slot.targets[i].desc=input; slot.targets[i].texture=texture->texture;
     }
-    for(size_t i=frame.scene_target_count;i<slot.targets.size();++i) { slot.targets[i].texture.Reset(); slot.targets[i].draws.clear(); }
+    for(size_t i=frame.scene_target_count;i<slot.targets.size();++i) { slot.targets[i].texture.Reset(); }
     uint32_t targetIndex=0;
     if(frame.scene_blob_count) slot.blobs.assign(frame.scene_blobs,frame.scene_blobs+frame.scene_blob_count);
     for(const auto& blob:slot.blobs) if((blob.size && !blob.bytes) || blob.size>(1ull<<30)) return fail();
-    while(slot.draws.size()<frame.scene_draw_count) slot.draws.emplace_back();
-    for(size_t i=frame.scene_draw_count;i<slot.draws.size();++i) {
-        auto& draw=slot.draws[i];
-        for(auto& parameters:draw.parameters) if(parameters) parameters->ResetBindingsForReuse();
-        draw.textures.clear(); draw.samplers.clear(); draw.textureViews.clear(); draw.textureBindings.clear(); draw.bindings.clear(); draw.texturesBound=false;
-        draw.owners={}; draw.geometry={}; draw.texels.clear();
-    }
+    slot.draws.resize(frame.scene_draw_count);
     for(uint32_t i=0;i<frame.scene_draw_count;++i) {
         const auto& input=frame.scene_draws[i]; auto& draw=slot.draws[i];
         if(input.reserved || input.phase>=RN_SCENE_PHASE_COUNT || !Range(input.first_binding,input.binding_count,frame.scene_binding_count) ||
@@ -189,15 +213,8 @@ bool ScenePassResources::Prepare(Device& device,SceneFrameSlot& slot,const Uploa
             input.index_offset%input.index_stride ||
             !Range(input.index_offset,uint64_t(input.index_count)*input.index_stride,sizes[1]))) return fail();
         if(input.indices==UINT32_MAX && (((desc.topology==1 || desc.topology==5) && input.vertex_count%4) || (desc.topology==3 && input.vertex_count<3))) return fail();
-        if(draw.pipeline!=pipeline) {
-            for(auto& parameters:draw.parameters) parameters.reset();
-            draw.textures.clear(); draw.samplers.clear(); draw.textureViews.clear(); draw.textureBindings.clear(); draw.texels.clear(); draw.texturesBound=false;
-            for(uint32_t group=0;group<2;++group) if(pipeline->program->groups[group]) {
-                draw.parameters[group]=device.CreateShaderParameterSet({pipeline->program->groups[group].get()}).Release();
-                if(!draw.parameters[group]) return false;
-            }
-            draw.pipeline=pipeline;
-        }
+        draw.pipeline=pipeline;
+        draw.textures.clear(); draw.textureBindings.clear(); draw.texels.clear();
         draw.desc=input; draw.bindings.clear();
         if(input.binding_count) draw.bindings.assign(frame.scene_bindings+input.first_binding,frame.scene_bindings+input.first_binding+input.binding_count);
         std::sort(draw.bindings.begin(),draw.bindings.end(),[](const auto& a,const auto& b){return std::pair{a.kind,a.binding}<std::pair{b.kind,b.binding};});
@@ -221,54 +238,30 @@ bool ScenePassResources::Prepare(Device& device,SceneFrameSlot& slot,const Uploa
                 if(!oit || oitPhase==RN_SCENE_OIT_BOUNDS || (binding.binding&1) || binding.offset || binding.size || binding.sampler_bits ||
                     !binding.resource || binding.resource>3 || (oitPhase==RN_SCENE_OIT_TRANSMITTANCE && binding.resource!=1)) return fail();
                 if(!(pipeline->program->activeBindings[1]&(1ull<<binding.binding))) continue;
-                auto& sampler=_samplers[1ull<<32];
-                if(!sampler) sampler=device.CreateSampler({.AddressS=AddressMode::ClampToEdge,.AddressT=AddressMode::ClampToEdge,.AddressR=AddressMode::ClampToEdge,
-                    .MinFilter=FilterMode::Nearest,.MagFilter=FilterMode::Nearest,.MipmapFilter=FilterMode::Nearest,.LodMax=0,.AnisotropyClamp=1}).Release();
+                auto* sampler=GetPostSampler(device,false);
                 if(!sampler) return false;
-                draw.graphSampler=sampler.get();
+                draw.graphSampler=sampler;
             }
         }
         present[0]|=1ull<<31;
         for(uint32_t group=0;group<2;++group) for(auto binding:pipeline->program->required[group]) if(!(present[group]&(1ull<<binding))) return fail();
         // DXIL and SPIR-V may eliminate different declared blocks in alpha-only variants.
         std::erase_if(draw.bindings,[&](const auto& binding) { return !(pipeline->program->activeBindings[binding.kind==0?0:1]&(1ull<<binding.binding)); });
-        // Texture parameter sets remain cached by position and identity across this slot's frames.
-        size_t textureIndex=0; bool changed=!draw.texturesBound && bool(draw.parameters[1]);
-        for(const auto& binding:draw.bindings) if(binding.kind==1) {
-            const auto* texture=textures.Find(binding.resource);
-            auto* sampler=GetTextureSampler(device,_samplers,binding.sampler_bits,binding.sampling);
-            auto* view=texture->texture->GetSamplingView(device,binding.sampling);
-            if(!sampler || !view || !draw.parameters[1]) return fail();
-            if(textureIndex>=draw.textures.size()) { draw.textures.push_back({}); draw.samplers.push_back(nullptr); draw.textureViews.push_back(nullptr); draw.textureBindings.push_back(UINT32_MAX); }
-            changed|=draw.textures[textureIndex]!=texture->texture || draw.samplers[textureIndex]!=sampler || draw.textureViews[textureIndex]!=view || draw.textureBindings[textureIndex]!=binding.binding;
-            ++textureIndex;
-        }
-        changed|=textureIndex!=draw.textures.size();
-        size_t texelIndex=0;
-        for(const auto& binding:draw.bindings) if(binding.kind==3) {
-            const auto& owner=_buffers.at(binding.resource&0x7fffffffu);
-            changed|=texelIndex>=draw.texels.size() || draw.texels[texelIndex].owner!=owner || draw.texels[texelIndex].binding!=binding.binding ||
-                draw.texels[texelIndex].range!=BufferRange{binding.offset,binding.size};
-            ++texelIndex;
-        }
-        changed|=texelIndex!=draw.texels.size();
-        if(changed) {
-            draw.parameters[1]->ResetBindingsForReuse(); draw.textures.clear(); draw.samplers.clear(); draw.textureViews.clear(); draw.textureBindings.clear(); draw.texels.clear();
-            for(const auto& binding:draw.bindings) if(binding.kind==1) {
-                const auto* texture=textures.Find(binding.resource);
-                auto* sampler=GetTextureSampler(device,_samplers,binding.sampler_bits,binding.sampling);
-                auto* view=texture->texture->GetSamplingView(device,binding.sampling);
-                draw.textures.push_back(texture->texture); draw.samplers.push_back(sampler); draw.textureViews.push_back(view); draw.textureBindings.push_back(binding.binding);
-                if(!draw.parameters[1]->Set(binding.binding,0,view)) return false;
-                const auto& requiredSamplers=draw.pipeline->program->samplers;
-                if(std::find(requiredSamplers.begin(),requiredSamplers.end(),binding.binding+1)!=requiredSamplers.end() && !draw.parameters[1]->Set(binding.binding+1,0,sampler)) return false;
+        for(const auto& binding:draw.bindings) {
+            if(binding.kind==1) {
+                const auto& texture=textures.Find(binding.resource)->texture;
+                auto* sampler=GetTextureSampler(device,binding.sampler_bits,binding.sampling);
+                auto* view=GetSamplingView(device,*texture,binding.sampling);
+                if(!sampler || !view) return fail();
+                draw.textures.push_back(texture);
+                draw.textureBindings.push_back({binding.binding,0,view});
+                if(UsesSampler(*pipeline->program,binding.binding+1))
+                    draw.textureBindings.push_back({binding.binding+1,0,sampler});
+            } else if(binding.kind==3) {
+                const auto& owner=_buffers.at(binding.resource&0x7fffffffu);
+                draw.texels.push_back({owner,{}});
+                draw.textureBindings.push_back({binding.binding,0,ShaderTexelBufferBinding{owner->GetBuffer(),{binding.offset,binding.size},TextureFormat::R8_SINT}});
             }
-            for(const auto& binding:draw.bindings) if(binding.kind==3) {
-                auto& texel=draw.texels.emplace_back(binding.binding,_buffers.at(binding.resource&0x7fffffffu),BufferRange{binding.offset,binding.size},radray::RDGBufferHandle{});
-                if(!draw.parameters[1]->Set(binding.binding,0,ShaderTexelBufferBinding{texel.owner->GetBuffer(),texel.range,TextureFormat::R8_SINT})) return false;
-            }
-            if(!draw.graphSampler && !draw.parameters[1]->FlushWrites()) return false;
-            draw.texturesBound=true;
         }
         ++slot.phaseCounts[input.phase];
     }
@@ -285,14 +278,8 @@ bool ScenePassResources::Prepare(Device& device,SceneFrameSlot& slot,const Uploa
     const auto prepareDepth=[&](SceneDraw& target,uint32_t id) {
         if(target.pipeline) return true;
         SceneDraw copy; copy.pipeline=GetPipeline(device,id); if(!copy.pipeline) return false;
-        for(uint32_t group=0;group<2;++group) {
-            copy.parameters[group]=device.CreateShaderParameterSet({copy.pipeline->program->groups[group].get()}).Release();
-            if(!copy.parameters[group]) return false;
-        }
-        auto& sampler=_samplers[1ull<<32];
-        if(!sampler) sampler=device.CreateSampler({.AddressS=AddressMode::ClampToEdge,.AddressT=AddressMode::ClampToEdge,.AddressR=AddressMode::ClampToEdge,
-            .MinFilter=FilterMode::Nearest,.MagFilter=FilterMode::Nearest,.MipmapFilter=FilterMode::Nearest,.LodMax=0,.AnisotropyClamp=1}).Release();
-        if(!sampler) return false; copy.graphSampler=sampler.get(); target=std::move(copy); return true;
+        auto* sampler=GetPostSampler(device,false);
+        if(!sampler) return false; copy.graphSampler=sampler; target=std::move(copy); return true;
     };
     if((frame.flags&RN_FRAME_IMPROVED_TRANSPARENCY) && (slot.phaseCounts[RN_SCENE_WATER_MASK] || slot.phaseCounts[RN_SCENE_CLOUD_BOUNDS]) &&
         !prepareDepth(slot.depthCopy,9)) return false;
@@ -328,7 +315,7 @@ void ScenePassResources::Upload(radray::RDGBuilder& graph,radray::FrameSlot& slo
         for(uint32_t index=0;index<3;++index) if(references[index]!=UINT32_MAX)
             draw.geometry[index]=draw.owners[index]?graph.ImportPersistentOwned(draw.owners[index]):frame.buffers[references[index]];
     }
-    const radray::array<float,4> backend{slot.GetDevice().GetBackend()==RenderBackend::Vulkan?-1.f:1.f,0,0,0};
+    const radray::array<float,4> backend{slot.GetDevice().GetBackend()==GpuBackend::Vulkan?-1.f:1.f,0,0,0};
     if(frame.metrics) frame.metrics->scene_upload_bytes+=512;
     frame.backend=graph.CreateBuffer({.MaxSize=512,.Usage=BufferUse::CBuffer},radray::RDGUploadSource::Generated(512,backend,
         +[](const radray::array<float,4>& values,radray::RDGUploadWriteContext& context) noexcept {
@@ -358,10 +345,11 @@ void ScenePassResources::Upload(radray::RDGBuilder& graph,radray::FrameSlot& slo
     }
 }
 void ScenePassResources::AddPass(radray::RDGBuilder& graph,radray::FrameSlot& slot,SceneFrameSlot& frame,rn_scene_phase phase,
-    radray::RDGTextureHandle color,radray::RDGTextureHandle depth,uint32_t width,uint32_t height,radray::vector<TextureResource*>& imports,
+    radray::RDGTextureHandle color,radray::RDGTextureHandle depth,uint32_t width,uint32_t height,FrameTextureImports& imports,
     radray::RDGTextureHandle second,radray::array<radray::RDGTextureHandle,3> inputs,bool clearDepth,SceneFrameSlot::Target* target) {
-    struct Data { SceneFrameSlot* frame; std::span<const SceneFrameSlot::PhaseDraw> draws; uint32_t width,height; radray::array<radray::RDGTextureHandle,3> inputs; };
-    auto& draws=target?target->draws:frame.phases[phase]; draws.clear();
+    struct Data { SceneFrameSlot* frame; std::span<SceneFrameSlot::PhaseDraw> draws; uint32_t width,height; radray::array<radray::RDGTextureHandle,3> inputs; };
+    if(!frame.phaseCounts[phase]) return;
+    auto& draws=*slot.Emplace<std::pmr::vector<SceneFrameSlot::PhaseDraw>>(&slot.GetMemoryResource());
     radray::array<bool,3> generated{};
     const uint32_t first=target?target->desc.first_draw:0,last=target?first+target->desc.draw_count:frame.drawCount;
     for(uint32_t i=first;i<last;++i) {
@@ -376,11 +364,16 @@ void ScenePassResources::AddPass(radray::RDGBuilder& graph,radray::FrameSlot& sl
         draws.push_back({&draw,indices});
     }
     if(draws.empty()) return;
+    std::pmr::unordered_set<radray::GpuTexture*> textures{&slot.GetScratchMemoryResource()};
+    std::pmr::vector<radray::RDGTextureHandle> textureReads{&slot.GetScratchMemoryResource()};
+    for(const auto& item:draws) for(const auto& texture:item.draw->textures)
+        if(textures.insert(texture.Get()).second) textureReads.push_back(imports.Import(texture));
     auto pass=graph.AddRasterPass("Raynium Scene",Data{&frame,draws,width,height,inputs},+[](const Data& data,radray::RDGRasterPassContext& context) noexcept {
         auto& encoder=context.GetEncoder(); encoder.SetViewport({0,0,float(data.width),float(data.height),0,1});
         return RecordSceneDraws(data.draws,encoder);
     },+[](Data& data,radray::RDGPrepareContext& context) noexcept {
         auto& frame=*data.frame;
+        radray::vector<radray::TransientParameterBinding> constants,textures;
         for(auto& item:data.draws) {
             auto& draw=*item.draw; const auto& input=draw.desc;
             const auto fail=[&](std::string_view operation,uint32_t binding=UINT32_MAX) {
@@ -402,33 +395,31 @@ void ScenePassResources::AddPass(radray::RDGBuilder& graph,radray::FrameSlot& sl
             }
             if(draw.indices.Size) draw.indices.Size=uint64_t(input.index_count)*input.index_stride;
             if(draw.indices.Offset>UINT32_MAX) return fail("index offset");
-            auto& parameters=*draw.parameters[0]; parameters.ResetBindingsForReuse();
-            struct Cleanup { ShaderParameterSet* parameters; ~Cleanup() noexcept { parameters->ResetBindingsForReuse(); } };
-            context.GetSlot().Emplace<Cleanup>(&parameters);
             auto backend=context.ResolveBuffer(frame.backend); backend.Size=256;
             if(draw.pipeline->description.screen) backend.Offset+=256;
-            if(!parameters.Set(31,0,ShaderBufferBinding{backend.Buffer.Get(),{backend.Offset,backend.Size}})) return fail("backend constant",31);
+            constants.clear(); constants.push_back(FrameConstantBinding(31,backend));
             for(const auto& binding:draw.bindings) if(binding.kind==0) {
-                const auto slice=resolve(binding.resource,binding.offset);
-                if(!parameters.Set(binding.binding,0,ShaderBufferBinding{slice.Buffer.Get(),{slice.Offset,binding.size}})) return fail("constant",binding.binding);
+                auto slice=resolve(binding.resource,binding.offset); slice.Size=binding.size;
+                constants.push_back(FrameConstantBinding(binding.binding,slice));
             }
-            if(!parameters.FlushWrites()) return fail("constant flush");
+            std::span<const radray::TransientParameterBinding> textureBindings=draw.textureBindings;
             if(draw.graphSampler) {
-                auto& textures=*draw.parameters[1];
-                struct TextureCleanup { SceneDraw* draw; ~TextureCleanup() noexcept { draw->parameters[1]->ResetBindingsForReuse(); draw->texturesBound=false; } };
-                context.GetSlot().Emplace<TextureCleanup>(&draw);
+                textures.assign(draw.textureBindings.begin(),draw.textureBindings.end());
                 for(const auto& binding:draw.bindings) if(binding.kind==2) {
-                    if(!data.inputs[binding.resource-1].IsValid()) return fail("graph input",binding.binding);
-                    auto view=context.ResolveView(data.inputs[binding.resource-1],TextureViewUsage::Resource);
-                    if(!view || !textures.Set(binding.binding,0,view.Get())) return fail("graph texture",binding.binding);
-                    const auto& samplers=draw.pipeline->program->samplers;
-                    if(std::find(samplers.begin(),samplers.end(),binding.binding+1)!=samplers.end() && !textures.Set(binding.binding+1,0,draw.graphSampler)) return fail("graph sampler",binding.binding+1);
+                    const auto source=data.inputs[binding.resource-1];
+                    if(!source.IsValid()) return fail("graph input",binding.binding);
+                    auto view=context.ResolveView(source,TextureViewUsage::Resource);
+                    if(!view) return fail("graph texture",binding.binding);
+                    textures.push_back({binding.binding,0,view.Get()});
+                    if(UsesSampler(*draw.pipeline->program,binding.binding+1))
+                        textures.push_back({binding.binding+1,0,draw.graphSampler});
                 }
-                if(!textures.FlushWrites()) return fail("texture flush");
+                textureBindings=textures;
             }
+            if(!AcquireSceneBindings(context.GetSlot(),*draw.pipeline->program,constants,textureBindings,item.groups)) return fail("parameter sets");
             if(frame.metrics) {
                 ++frame.metrics->scene_calls;
-                frame.metrics->bind_calls+=1+uint64_t(bool(draw.parameters[0]))+uint64_t(bool(draw.parameters[1]))
+                frame.metrics->bind_calls+=1+uint64_t(bool(item.groups.constants))+uint64_t(bool(item.groups.textures))
                     +uint64_t(draw.vertices.Size!=0)+uint64_t(draw.indices.Size!=0)+uint64_t(draw.instances.Size!=0);
             }
         }
@@ -442,7 +433,7 @@ void ScenePassResources::AddPass(radray::RDGBuilder& graph,radray::FrameSlot& sl
     pass.ReadBuffer(frame.backend,BufferState::CBuffer);
     for(uint32_t type=0;type<3;++type) if(generated[type]) pass.ReadBuffer(frame.generatedIndices[type],BufferState::Index);
     for(auto input:inputs) if(input.IsValid()) pass.ReadTexture(input);
-    std::pmr::unordered_set<TextureResource*> unique{&slot.GetScratchMemoryResource()};
+    for(auto handle:textureReads) pass.ReadTexture(handle);
     // Declarations follow only the actual draws in this phase.
     for(const auto& item:draws) {
         const auto& draw=*item.draw;
@@ -450,24 +441,20 @@ void ScenePassResources::AddPass(radray::RDGBuilder& graph,radray::FrameSlot& sl
         if(draw.geometry[2].IsValid()) pass.ReadBuffer(draw.geometry[2],BufferState::Vertex);
         if(draw.geometry[1].IsValid()) pass.ReadBuffer(draw.geometry[1],BufferState::Index);
         for(const auto& binding:draw.bindings) if(binding.kind==0) pass.ReadBuffer(frame.buffers[binding.resource],BufferState::CBuffer);
-        for(const auto& texture:draw.textures) if(unique.insert(texture.Get()).second) pass.ReadTexture(texture->Import(graph,slot,imports));
         for(const auto& texel:draw.texels) pass.ReadBuffer(texel.handle,BufferState::ShaderRead);
     }
 }
-void ScenePassResources::AddOffscreenPasses(radray::RDGBuilder& graph,radray::FrameSlot& slot,SceneFrameSlot& frame,radray::vector<TextureResource*>& imports) {
+void ScenePassResources::AddOffscreenPasses(radray::RDGBuilder& graph,radray::FrameSlot& slot,SceneFrameSlot& frame,FrameTextureImports& imports) {
     for(auto& target:std::span{frame.targets}.first(frame.targetCount)) {
         const auto& tile=target.desc;
         const auto color=graph.CreateTexture({.Dim=TextureDimension::Dim2D,.Width=tile.width,.Height=tile.height,.DepthOrArraySize=1,
             .MipLevels=1,.SampleCount=1,.Format=TextureFormat::RGBA8_UNORM,.Memory=MemoryType::Device,.Usage=TextureUse::RenderTarget|TextureUse::CopySource});
         const auto depth=graph.CreateTexture({.Dim=TextureDimension::Dim2D,.Width=tile.width,.Height=tile.height,.DepthOrArraySize=1,
             .MipLevels=1,.SampleCount=1,.Format=TextureFormat::D32_FLOAT,.Memory=MemoryType::Device,.Usage=TextureUse::DepthStencilWrite|TextureUse::DepthStencilRead});
-        struct Clear {};
-        graph.AddRasterPass("Raynium Offscreen Clear",Clear{},+[](const Clear&,radray::RDGRasterPassContext&) noexcept { return true; },
-            +[](Clear&,radray::RDGPrepareContext&) noexcept { return true; })
-            .WriteColor(0,color,LoadAction::Clear,StoreAction::Store,{{0,0,0,0}})
-            .SetDepthStencil(depth,TextureState::DepthWrite,LoadAction::Clear,StoreAction::Store,LoadAction::DontCare,StoreAction::Discard,{0,0});
+        graph.AddClearColor(color,{{0,0,0,0}});
+        graph.AddClearDepthStencil(depth,{0,0},true,false);
         AddPass(graph,slot,frame,RN_SCENE_OFFSCREEN,color,depth,tile.width,tile.height,imports,{},{},false,&target);
-        const auto destination=target.texture->Import(graph,slot,imports);
+        const auto destination=imports.Import(target.texture);
         struct Copy { radray::RDGTextureHandle source,target; rn_scene_target tile; TextureCopyDescriptor copy{}; };
         graph.AddCopyPass("Raynium Offscreen Cache",Copy{color,destination,tile},+[](const Copy& data,radray::RDGCopyPassContext& context) noexcept {
             context.GetCommandBuffer().CopyTextureToTexture(data.copy); return true;
@@ -480,23 +467,13 @@ void ScenePassResources::AddOffscreenPasses(radray::RDGBuilder& graph,radray::Fr
 }
 void ScenePassResources::AddDepthCopy(radray::RDGBuilder& graph,SceneFrameSlot& frame,radray::RDGTextureHandle source,
     radray::RDGTextureHandle target,uint32_t width,uint32_t height,int integrate) {
-    struct Data { SceneDraw* draw; radray::RDGBufferHandle backend; radray::RDGTextureHandle source; uint32_t width,height; rn_frame_metrics* metrics; };
+    struct Data { SceneDraw* draw; radray::RDGBufferHandle backend; radray::RDGTextureHandle source; uint32_t width,height; rn_frame_metrics* metrics; SceneBindings groups{}; };
     graph.AddRasterPass(integrate<0?"Raynium Depth Blit":"Raynium Depth Integrate",
         Data{integrate<0?&frame.depthCopy:&frame.depthIntegrate[size_t(integrate)],frame.backend,source,width,height,frame.metrics},
         +[](const Data& data,radray::RDGRasterPassContext& context) noexcept {
-            return RecordSceneScreen(*data.draw,data.width,data.height,context.GetEncoder());
+            return RecordSceneScreen(*data.draw,data.groups,data.width,data.height,context.GetEncoder());
         },+[](Data& data,radray::RDGPrepareContext& context) noexcept {
-            auto& draw=*data.draw;
-            struct Cleanup { SceneDraw* draw; ~Cleanup() noexcept { for(auto& group:draw->parameters) group->ResetBindingsForReuse(); } };
-            context.GetSlot().Emplace<Cleanup>(&draw);
-            for(auto& group:draw.parameters) group->ResetBindingsForReuse();
-            auto slice=context.ResolveBuffer(data.backend);
-            auto view=context.ResolveView(data.source,TextureViewUsage::Resource);
-            if(!view || !draw.parameters[0]->Set(31,0,ShaderBufferBinding{slice.Buffer.Get(),{slice.Offset+256,256}}) || !draw.parameters[0]->FlushWrites()
-                || !draw.parameters[1]->Set(0,0,view.Get())) return false;
-            const auto& samplers=draw.pipeline->program->samplers;
-            if(std::find(samplers.begin(),samplers.end(),1u)!=samplers.end() && !draw.parameters[1]->Set(1,0,draw.graphSampler)) return false;
-            if(!draw.parameters[1]->FlushWrites()) return false;
+            if(!PrepareScreenBindings(context,*data.draw,data.backend,256,data.source,data.groups)) return false;
             if(data.metrics) { ++data.metrics->scene_calls; data.metrics->bind_calls+=3; }
             return true;
         }).ReadBuffer(frame.backend,BufferState::CBuffer).ReadTexture(source)

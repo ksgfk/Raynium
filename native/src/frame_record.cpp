@@ -4,7 +4,7 @@
 #include <radray/logger.h>
 
 namespace raynium {
-using namespace radray::render;
+using namespace radray::gpu;
 bool RecordTerrainDraws(const TerrainRecord& data,GraphicsCommandEncoder& encoder) noexcept try {
     const auto& draws=data.lists->layers[data.layer];
     if(draws.recordCount && (!data.instances.Size || (data.useIndirect && !data.indirect.Size)))
@@ -42,7 +42,7 @@ bool RecordGuiDraws(const GuiFrameSlot& frame,std::span<GraphicsPipelineState* c
         encoder.SetScissor(draw.scissor);
         encoder.BindGraphicsPipelineState(pipelines[draw.desc.pipeline]);
         encoder.BindVertexBuffers({&vertices,1}); encoder.BindIndexBuffer(FrameIndexView(indexSlice));
-        encoder.BindShaderParameterSet(0,frame.passParameters[draw.desc.pipeline==RN_GUI_TEXT_GRAYSCALE?1:0].get());
+        encoder.BindShaderParameterSet(0,frame.passParameters[draw.desc.pipeline==RN_GUI_TEXT_GRAYSCALE?1:0]);
         if(draw.parameters) encoder.BindShaderParameterSet(1,draw.parameters);
         encoder.DrawIndexed(draw.desc.vertex_count/4*6,1,draw.desc.first_vertex/4*6,0,0);
     }
@@ -53,7 +53,8 @@ bool RecordSceneDraws(std::span<const SceneFrameSlot::PhaseDraw> draws,GraphicsC
             const auto& draw=*item.draw; const auto& input=draw.desc;
             encoder.BindGraphicsPipelineState(draw.pipeline->pipeline.get());
             encoder.SetScissor({input.scissor[0],input.scissor[1],uint32_t(input.scissor[2]),uint32_t(input.scissor[3])});
-            for(uint32_t group=0;group<2;++group) if(draw.parameters[group]) encoder.BindShaderParameterSet(group,draw.parameters[group].get());
+            if(item.groups.constants) encoder.BindShaderParameterSet(0,item.groups.constants);
+            if(item.groups.textures) encoder.BindShaderParameterSet(1,item.groups.textures);
             if(draw.vertices.Size) { const VertexBufferBinding binding{0,FrameVertexView(draw.vertices)}; encoder.BindVertexBuffers({&binding,1}); }
             if(draw.instances.Size) { const VertexBufferBinding binding{1,FrameVertexView(draw.instances)}; encoder.BindVertexBuffers({&binding,1}); }
             if(draw.indices.Size) {
@@ -63,10 +64,11 @@ bool RecordSceneDraws(std::span<const SceneFrameSlot::PhaseDraw> draws,GraphicsC
         }
     return encoder.IsValid();
 } catch(...) { AbortUnexpectedException("RecordSceneDraws"); }
-bool RecordSceneScreen(const SceneDraw& draw,uint32_t width,uint32_t height,GraphicsCommandEncoder& encoder) noexcept try {
+bool RecordSceneScreen(const SceneDraw& draw,const SceneBindings& groups,uint32_t width,uint32_t height,GraphicsCommandEncoder& encoder) noexcept try {
     encoder.SetViewport({0,0,float(width),float(height),0,1}); encoder.SetScissor({0,0,width,height});
     encoder.BindGraphicsPipelineState(draw.pipeline->pipeline.get());
-    for(uint32_t group=0;group<2;++group) if(draw.parameters[group]) encoder.BindShaderParameterSet(group,draw.parameters[group].get());
+    if(groups.constants) encoder.BindShaderParameterSet(0,groups.constants);
+    if(groups.textures) encoder.BindShaderParameterSet(1,groups.textures);
     encoder.Draw(3,1,0,0); return encoder.IsValid();
 } catch(...) { AbortUnexpectedException("RecordSceneScreen"); }
 

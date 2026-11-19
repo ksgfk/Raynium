@@ -7,7 +7,7 @@
 #include <utility>
 
 namespace raynium {
-using namespace radray::render;
+using namespace radray::gpu;
 namespace {
 radray::unique_ptr<GraphicsPipelineState> CreateTerrainPipeline(Device& device,const ShaderProgram& program,
     Shader* vs,Shader* ps,PipelineLayout* layout,uint32_t i,TextureFormat format,bool flipY=false,bool wireframe=false) {
@@ -46,7 +46,7 @@ bool MeshPassResources::Create(Device& device,std::span<const radray::byte> shad
     RADRAY_PROFILE_SCOPE_N("Raynium.MeshPass.Create");
     if(output) RADRAY_ABORT("Pass resources output occupied");
     auto objects=radray::make_unique<Objects>(); auto& p=*objects;
-    const bool vk=device.GetBackend()==RenderBackend::Vulkan;
+    const bool vk=device.GetBackend()==GpuBackend::Vulkan;
     radray::vector<ShaderPackEntry> entries;
     if(!ReadShaderPack(shaders,entries)) return false;
     for(size_t i=0;i<TerrainPrograms.size();++i) {
@@ -107,7 +107,7 @@ bool MeshPassResources::PrepareOutput(Device& device,TextureFormat format) {
     }
     return true;
 }
-bool MeshPassResources::CreateMaterialBinding(Device& device,const rn_render_frame_desc& desc,const UploadedTextures& uploaded,
+bool MeshPassResources::CreateMaterialBinding(Device& device,const rn_render_frame_desc& desc,const TextureRegistry& uploaded,
     MeshMaterialBinding& binding) const {
     RADRAY_PROFILE_SCOPE_N("Raynium.Material.CreateBinding");
     const auto resolve=[&](uint32_t id,size_t index,TextureView*& view,uint32_t& mips) {
@@ -115,7 +115,7 @@ bool MeshPassResources::CreateMaterialBinding(Device& device,const rn_render_fra
         const auto* owner=uploaded.Find(id);
         if(!owner) { RADRAY_ERR_LOG("Material references missing uploaded texture: {}",id); return false; }
         if(owner->desc.array_layers!=1 || owner->desc.format==RN_PIXEL_DEPTH32F) { RADRAY_ERR_LOG("Terrain requires a color 2D texture: {}",id); return false; }
-        view=owner->texture->GetDefaultView(); mips=owner->desc.mip_levels; binding.textures[index]=owner->texture; return true;
+        view=owner->texture->GetDefaultView().Get(); mips=owner->desc.mip_levels; binding.textures[index]=owner->texture; return true;
     };
     TextureView* albedo{}; TextureView* light{}; uint32_t albedoMips{},lightMips{};
     if(!resolve(desc.terrain_albedo_texture,0,albedo,albedoMips) || !resolve(desc.terrain_light_texture,1,light,lightMips)) return false;
@@ -123,13 +123,13 @@ bool MeshPassResources::CreateMaterialBinding(Device& device,const rn_render_fra
         .MinFilter=FilterMode::Linear,.MagFilter=FilterMode::Linear,.MipmapFilter=FilterMode::Linear,
         .LodMax=float(albedoMips-1),
         .AnisotropyClamp=std::clamp(desc.terrain_anisotropy,1u,uint32_t(device.GetCapabilities().Limits.MaxSamplerAnisotropy))};
-    binding.albedoSampler=device.CreateSampler(sampler).Release();
+    auto* albedoSampler=device.GetOrCreateSampler(sampler).Get();
     sampler.LodMax=float(lightMips-1); sampler.AnisotropyClamp=1;
-    binding.lightSampler=device.CreateSampler(sampler).Release();
+    auto* lightSampler=device.GetOrCreateSampler(sampler).Get();
     binding.parameters=device.CreateShaderParameterSet({_objects->materialGroupLayout.get()}).Release();
-    if(!binding.albedoSampler || !binding.lightSampler || !binding.parameters ||
+    if(!albedoSampler || !lightSampler || !binding.parameters ||
        !binding.parameters->Set(1,0,albedo) || !binding.parameters->Set(2,0,light) ||
-       !binding.parameters->Set(3,0,binding.albedoSampler.get()) || !binding.parameters->Set(4,0,binding.lightSampler.get()) ||
+       !binding.parameters->Set(3,0,albedoSampler) || !binding.parameters->Set(4,0,lightSampler) ||
        !binding.parameters->FlushWrites()) { RADRAY_ERR_LOG("Cannot create SOLID material bindings"); return false; }
     return true;
 }

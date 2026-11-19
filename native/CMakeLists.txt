@@ -39,7 +39,7 @@ set(RADRAY_SOURCE_DIR "${RAYNIUM_MANAGED_RADRAY_DIR}" CACHE PATH "RadRay source 
 get_filename_component(RADRAY_SOURCE_DIR "${RADRAY_SOURCE_DIR}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 
 if(NOT EXISTS "${RADRAY_SOURCE_DIR}/CMakeLists.txt" OR
-   NOT EXISTS "${RADRAY_SOURCE_DIR}/modules/render/include/radray/render/rhi.h")
+   NOT EXISTS "${RADRAY_SOURCE_DIR}/modules/gpu/include/radray/gpu/types.h")
     message(FATAL_ERROR "RadRay source is missing at ${RADRAY_SOURCE_DIR}. Run: python ${RAYNIUM_ROOT}/tools/fetch_radray.py restore. CMake never downloads dependencies.")
 endif()
 
@@ -129,12 +129,14 @@ set(RADRAY_BUILD_EXAMPLES OFF)
 set(RADRAY_BUILD_BENCHMARKS OFF)
 set(RADRAY_BUILD_COMPILE_COMMANDS OFF)
 set(RADRAY_BUILD_WINDOW OFF)
-set(RADRAY_BUILD_RENDER ON)
+set(RADRAY_BUILD_GPU_IMPL ON)
 set(RADRAY_BUILD_RUNTIME ON)
 set(RADRAY_ENABLE_D3D12 ON)
 set(RADRAY_ENABLE_VULKAN ON)
 set(RADRAY_BUILD_SHADER ON)
-set(RADRAY_BUILD_SHADER_COMPILER ${RAYNIUM_BUILD_SHADER_TOOLS})
+if(NOT RADRAY_DXC_ROOT)
+    set(RADRAY_DXC_ROOT "${RADRAY_SOURCE_DIR}/SDKs/radray_dxc/extracted")
+endif()
 set(RADRAY_BUILD_SHADER_TOOLS OFF)
 set(RADRAY_ENABLE_MIMALLOC ON)
 set(RADRAY_ENABLE_PROFILER ${RAYNIUM_ENABLE_PROFILER})
@@ -160,7 +162,7 @@ add_library(rayniumruntime SHARED
     src/frame_record.cpp include/raynium/frame_record.h
     src/render_resources.cpp include/raynium/render_resources.h
     src/device_info.cpp
-    src/texture_resources.cpp include/raynium/texture_resources.h
+    src/texture_registry.cpp include/raynium/texture_registry.h
     src/gui_pass.cpp include/raynium/gui_pass.h
     src/output_pass.cpp include/raynium/output_pass.h
     src/scene_pass.cpp include/raynium/scene_pass.h src/scene_catalog.inc
@@ -197,7 +199,7 @@ endif()
 if(RAYNIUM_BUILD_SHADER_TOOLS)
     add_executable(raynium_shader_pack tools/shader_pack.cpp src/shader_pack.cpp)
     target_include_directories(raynium_shader_pack PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
-    target_link_libraries(raynium_shader_pack PRIVATE RadRay::shadercompiler)
+    target_link_libraries(raynium_shader_pack PRIVATE RadRay::shader)
     target_compile_features(raynium_shader_pack PRIVATE cxx_std_20)
     target_compile_options(raynium_shader_pack PRIVATE /W4 /permissive- /Zc:preprocessor /utf-8)
     set_target_properties(raynium_shader_pack PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

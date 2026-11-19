@@ -13,11 +13,11 @@
 
 namespace raynium {
 namespace {
-class Parameters final : public radray::render::ShaderParameterSet {
+class Parameters final : public radray::gpu::ShaderParameterSet {
 public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
-    bool Set(uint32_t,uint32_t,radray::render::ShaderParameterValue) noexcept override { return true; }
+    bool Set(uint32_t,uint32_t,radray::gpu::ShaderParameterValue) noexcept override { return true; }
     bool FlushWrites() noexcept override { return true; }
     void ResetBindingsForReuse() noexcept override {}
 };
@@ -192,9 +192,9 @@ TEST_F(TerrainDrawTest, BindingReferencesPreserveLiveStateAndReuseReleasedIDs) {
 TEST_F(TerrainDrawTest, BindingIdentityIncludesEveryViewFieldAndMaterialVersion) {
     uint32_t base=0; ASSERT_TRUE(bindings.Acquire(geometry,material,base));
     radray::vector<TerrainDrawTemplate> variants(6,geometry);
-    variants[0].vertices.Target=reinterpret_cast<radray::render::Buffer*>(uintptr_t(1));
+    variants[0].vertices.Target=reinterpret_cast<radray::gpu::Buffer*>(uintptr_t(1));
     variants[1].vertices.Offset++; variants[2].vertices.Size++;
-    variants[3].indices.Target=reinterpret_cast<radray::render::Buffer*>(uintptr_t(1));
+    variants[3].indices.Target=reinterpret_cast<radray::gpu::Buffer*>(uintptr_t(1));
     variants[4].indices.Offset++; variants[5].indices.Stride=2;
     radray::vector<uint32_t> ids{base};
     for(const auto& view:variants) { uint32_t id=0; ASSERT_TRUE(bindings.Acquire(view,material,id)); ids.push_back(id); }
@@ -237,7 +237,7 @@ TEST(TerrainIndirect, SmallNativeLimitSplitsAllRecordsWithoutLosingOffset) {
     EXPECT_EQ(TerrainIndirectChunk(8,0),0); EXPECT_EQ(TerrainIndirectChunk(8,1),1);
 }
 TEST(TerrainSubmission, AutoRequiresEveryCapabilityAndForcedModesRespectFailures) {
-    radray::render::RenderDeviceCapabilities caps;
+    radray::gpu::GpuDeviceCapabilities caps;
     bool indirect=true;
     EXPECT_TRUE(SelectTerrainSubmission(0,caps,indirect)); EXPECT_FALSE(indirect);
     caps.Features.IndirectDraw=true; caps.Features.IndirectFirstInstance=true;

@@ -146,10 +146,10 @@ rn_status rn_init_env(const rn_env_desc* desc) noexcept {
         if(desc->flags & ~static_cast<uint32_t>(RN_ENV_VALIDATION)) {
             RADRAY_ERR_LOG("Invalid environment flags: {}",static_cast<uint32_t>(desc->flags)); return false;
         }
-        radray::render::RenderBackend backend;
+        radray::gpu::GpuBackend backend;
         switch(desc->backend) {
-            case RN_BACKEND_D3D12: backend=radray::render::RenderBackend::D3D12; break;
-            case RN_BACKEND_VULKAN: backend=radray::render::RenderBackend::Vulkan; break;
+            case RN_BACKEND_D3D12: backend=radray::gpu::GpuBackend::D3D12; break;
+            case RN_BACKEND_VULKAN: backend=radray::gpu::GpuBackend::Vulkan; break;
             default:
                 RADRAY_ERR_LOG("Unknown RHI backend {}; expected 1 (D3D12) or 2 (Vulkan)",static_cast<uint32_t>(desc->backend)); return false;
         }
@@ -251,7 +251,7 @@ rn_status rn_create_swapchain(rn_renderer* renderer,const rn_swapchain_desc* des
     return Invoke("rn_create_swapchain",[&] {
         if(!Owner(renderer)) return false;
         if(!desc || !output || renderer->swapchain) { RADRAY_ERR_LOG("Invalid swapchain output or existing swapchain"); return false; }
-        if(!renderer->renderer->PrepareOutput(radray::render::TextureFormat::BGRA8_UNORM)) return false;
+        if(!renderer->renderer->PrepareOutput(radray::gpu::TextureFormat::BGRA8_UNORM)) return false;
         auto owned=radray::unique_ptr<rn_swapchain>(new rn_swapchain{renderer,{}});
         if(!raynium::Swapchain::Create(renderer->renderer->Runtime(),*desc,owned->swapchain)) return false;
         renderer->swapchain=owned.release(); *output=renderer->swapchain; return true;

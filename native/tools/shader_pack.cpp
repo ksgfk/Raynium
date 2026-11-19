@@ -2,7 +2,7 @@
 #include <radray/types.h>
 #include <raynium/exception.h>
 #include <radray/logger.h>
-#include <radray/shader_compiler/client.h>
+#include <radray/shader/client.h>
 #include <radray/file.h>
 #include <algorithm>
 #include <cstdio>
@@ -78,7 +78,7 @@ int main(int argc,char** argv) {
             "usage: raynium_shader_pack --root <dir> --include <dir> --program <name=source.hlsl>... --output <file.rnsp> | --verify <file.rnsp>");
         includes.insert(includes.begin(),root);
         std::sort(programs.begin(),programs.end(),[](const auto& a,const auto& b){return a.name<b.name;});
-        radray::shader_compiler::Client compiler;
+        radray::shader::Client compiler;
         Require(compiler.IsAvailable(),"Pinned RadRay DXC compiler is unavailable; restore the SDK and add its bin directory to PATH");
         radray::vector<Compiled> compiled;
         for(const auto& program:programs) {

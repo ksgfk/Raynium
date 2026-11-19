@@ -10,7 +10,7 @@
 #include <utility>
 
 namespace raynium {
-using namespace radray::render;
+using namespace radray::gpu;
 namespace {
 template<class T> bool Array(const T* p,uint32_t n,uint32_t limit=1048576) { return n<=limit && (!n || p); }
 void ReleaseMeshBindings(TerrainMesh& mesh,TerrainBindingStates& bindings) noexcept {
@@ -47,7 +47,7 @@ bool ResolveMesh(TerrainMesh& mesh,TerrainState& state) {
 TerrainResidency::TerrainResidency(radray::DeviceContext& device,radray::unique_ptr<radray::VertexBufferPool> vertices,
     radray::unique_ptr<radray::IndexBufferPool> indices)
     :_device(device),_vertices(std::move(vertices)),_indices(std::move(indices)) { _state.meshes.reserve(4096); }
-bool TerrainResidency::PrepareFrame(const UploadedTextures& uploaded,const rn_render_frame_desc& f,
+bool TerrainResidency::PrepareFrame(const TextureRegistry& uploaded,const rn_render_frame_desc& f,
     const MeshPassResources& resources,SlotUploads slot,TerrainFrame& frame) {
     RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.Prepare");
 

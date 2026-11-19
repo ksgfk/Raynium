@@ -12,17 +12,17 @@ namespace raynium {
 bool Renderer::Create(radray::DeviceContext& device,std::span<const radray::byte> shaders,uint32_t flags,radray::unique_ptr<Renderer>& out) {
     RADRAY_PROFILE_SCOPE_N("Raynium.Renderer.Create");
     if(out) RADRAY_ABORT("Renderer output occupied");
-    using namespace radray::render;
+    using namespace radray::gpu;
     const auto& caps=device.GetDevice().GetCapabilities();
     bool indirect=false;
     if(!SelectTerrainSubmission(flags,caps,indirect)) return false;
     const radray::array layouts{VertexBufferLayout{0,28,VertexStepMode::Vertex},VertexBufferLayout{1,16,VertexStepMode::Instance}};
-    const radray::array attributes{radray::VertexInputAttribute{0,0,"POSITION",0,VertexFormat::FLOAT32X3,0},
-        radray::VertexInputAttribute{0,12,"COLOR",0,VertexFormat::UNORM8X4,1},
-        radray::VertexInputAttribute{0,16,"TEXCOORD",0,VertexFormat::FLOAT32X2,2},
-        radray::VertexInputAttribute{0,24,"TEXCOORD",1,VertexFormat::UINT16X2,3},
-        radray::VertexInputAttribute{1,0,"TEXCOORD",2,VertexFormat::SINT32X3,4},
-        radray::VertexInputAttribute{1,12,"TEXCOORD",3,VertexFormat::FLOAT32,5}};
+    const radray::array attributes{radray::VertexInputAttribute{0,0,"POSITION",0,VertexFormat::FLOAT32X3},
+        radray::VertexInputAttribute{0,12,"COLOR",0,VertexFormat::UNORM8X4},
+        radray::VertexInputAttribute{0,16,"TEXCOORD",0,VertexFormat::FLOAT32X2},
+        radray::VertexInputAttribute{0,24,"TEXCOORD",1,VertexFormat::UINT16X2},
+        radray::VertexInputAttribute{1,0,"TEXCOORD",2,VertexFormat::SINT32X3},
+        radray::VertexInputAttribute{1,12,"TEXCOORD",3,VertexFormat::FLOAT32}};
     auto vertices=radray::VertexBufferPool::Create(device.GetDevice(),{.VertexStride=28,.PageVertexCapacity=(32u<<20)/28,
         .Layouts=layouts,.Attributes=attributes,.DebugNamePrefix="TerrainVertices"}).Release();
     auto indices=radray::IndexBufferPool::Create(device.GetDevice(),{.PageIndexCapacity=(32u<<20)/sizeof(uint32_t),
@@ -47,7 +47,7 @@ void Renderer::Finish() {
     _scheduler->WaitIdle();
 }
 bool Renderer::Present(Swapchain& target,const rn_render_frame_desc& frame,rn_present_result& result) {
-    using namespace radray::render;
+    using namespace radray::gpu;
     auto markFrame=radray::MakeScopeGuard([]() noexcept { RADRAY_PROFILE_FRAME(); });
     RADRAY_PROFILE_SCOPE_N("Raynium.Present");
     if((frame.flags&RN_FRAME_WIREFRAME) && !SupportsWireframe()) { RADRAY_ERR_LOG("Terrain wireframe is unavailable on this device"); return false; }
@@ -70,6 +70,7 @@ bool Renderer::Present(Swapchain& target,const rn_render_frame_desc& frame,rn_pr
         RADRAY_ERR_LOG("Invalid offscreen render extent: {}x{}",frame.render_width,frame.render_height); return false;
     }
     prepared.width=offscreen?frame.render_width:outputDesc.Width; prepared.height=offscreen?frame.render_height:outputDesc.Height;
+    auto cancelCaptures=radray::MakeScopeGuard([&]() noexcept { _pipeline->CancelUnsubmittedCaptures(); });
     if(!_pipeline->PrepareCapture(slot,frame,prepared.width,prepared.height)) return false;
     if(!_pipeline->PrepareGui(slot,_uploaded,frame,prepared.width,prepared.height)) return false;
     if(!_pipeline->PrepareScene(slot,_uploaded,frame)) return false;
@@ -91,6 +92,7 @@ bool Renderer::Present(Swapchain& target,const rn_render_frame_desc& frame,rn_pr
     auto clear=radray::MakeScopeGuard([&]() noexcept { _pipeline->ClearInput(); });
     const auto rdgStart=now();
     _scheduler->RunFrame();
+    cancelCaptures.Dismiss();
     const auto rdgEnd=now();
     auto outcome=acquired.Status==SwapChainStatus::RequireRecreate?RN_PRESENT_RECREATE:RN_PRESENT_SKIPPED;
     if(acquired.Frame) {
