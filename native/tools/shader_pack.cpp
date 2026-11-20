@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <string>
 #include <string_view>
 #include <span>
 #include <utility>
@@ -21,11 +23,10 @@ void Require(bool condition,std::string_view message,std::source_location locati
         throw ToolFailure{};
     }
 }
-bool Verify(std::span<const radray::byte> data) {
+bool Verify(std::span<const radray::byte> data,std::string_view standalone) {
     radray::vector<raynium::ShaderPackEntry> entries;
     if(!raynium::ReadShaderPack(data,entries)) return false;
-    bool required[8][2]{};
-    bool gui[3][2]{};
+    bool required[raynium::TerrainPrograms.size()][2]{};
     bool output[2]{};
     for(const auto& entry:entries) {
         auto decoded=DecodeShaderArtifact(entry.data,{.Target=entry.target,.ExpectedGpuArtifact=entry.identity,.ExpectedToolchainIdentity=kShaderToolchainIdentity});
@@ -35,15 +36,10 @@ bool Verify(std::span<const radray::byte> data) {
             if(!raynium::ValidateTerrainShader(*decoded.Value,entry.name)) return false;
             required[i][uint8_t(entry.target)]=true;
         }
-        for(size_t i=0;i<raynium::GuiPrograms.size();++i) if(entry.name==raynium::GuiPrograms[i]) {
-            if(!raynium::ValidateGuiShader(*decoded.Value,entry.name)) return false;
-            gui[i][uint8_t(entry.target)]=true;
-        }
     }
+    if(!standalone.empty()) return entries.size()==2 && entries[0].name==standalone && entries[1].name==standalone && entries[0].target!=entries[1].target;
     for(size_t i=0;i<raynium::TerrainPrograms.size();++i)
         Require(required[i][0] && required[i][1],"Shader pack requires every terrain program for DXIL and SPIR-V");
-    for(size_t i=0;i<raynium::GuiPrograms.size();++i)
-        Require(gui[i][0] && gui[i][1],"Shader pack requires every GUI program for DXIL and SPIR-V");
     Require(output[0] && output[1],"Shader pack requires the output program for DXIL and SPIR-V");
     return true;
 }
@@ -53,6 +49,7 @@ struct Compiled { radray::string name; ShaderTarget target; radray::vector<radra
 int main(int argc,char** argv) {
     try {
         std::filesystem::path root,output,verify;
+        radray::string standalone;
         radray::vector<std::filesystem::path> includes;
         radray::vector<Program> programs;
         for(int i=1;i<argc;i++) {
@@ -61,8 +58,20 @@ int main(int argc,char** argv) {
             radray::string value=argv[++i];
             if(key=="--root") root=value;
             else if(key=="--output") output=value;
+            else if(key=="--standalone") standalone=value;
             else if(key=="--verify") verify=value;
             else if(key=="--include") includes.emplace_back(value);
+            else if(key=="--program-list") {
+                std::ifstream manifest{std::filesystem::path(value)};
+                Require(manifest.is_open(),"Cannot open program list");
+                std::string line;
+                while(std::getline(manifest,line)) {
+                    if(!line.empty() && line.back()=='\\r') line.pop_back();
+                    auto split=line.find('=');
+                    Require(split!=std::string::npos,"Invalid program list entry");
+                    programs.push_back({radray::string(line.data(),split),radray::string(line.data()+split+1,line.size()-split-1)});
+                }
+            }
             else if(key=="--program") {
                 auto separator=value.find('=');
                 Require(separator!=radray::string::npos,"Program must be name=logical/source.hlsl");
@@ -72,7 +81,7 @@ int main(int argc,char** argv) {
         if(!verify.empty()) {
             auto bytes=radray::ReadBinaryFile(verify);
             Require(bytes.has_value(),"Cannot read shader pack");
-            if(!Verify(*bytes)) return 1; std::puts("Shader pack artifacts and terrain interfaces OK"); return 0;
+            if(!Verify(*bytes,standalone)) return 1; std::puts("Shader pack artifacts and terrain interfaces OK"); return 0;
         }
         Require(!root.empty() && !output.empty() && !programs.empty(),
             "usage: raynium_shader_pack --root <dir> --include <dir> --program <name=source.hlsl>... --output <file.rnsp> | --verify <file.rnsp>");
@@ -113,7 +122,7 @@ int main(int argc,char** argv) {
             bytes.insert(bytes.end(),item.data.begin(),item.data.end());
         }
         const raynium::ShaderPackHeader header{raynium::ShaderPackMagic,raynium::ShaderPackVersion,uint32_t(bytes.size()),uint32_t(compiled.size()),sizeof(raynium::ShaderPackHeader),0};
-        std::memcpy(bytes.data(),&header,sizeof(header)); if(!Verify(bytes)) return 1;
+        std::memcpy(bytes.data(),&header,sizeof(header)); if(!Verify(bytes,standalone)) return 1;
         Require(radray::WriteBinaryFile(output,bytes),"Cannot write shader pack");
         std::printf("Wrote shader pack: %zu programs, %zu bytes\n",programs.size(),bytes.size()); return 0;
     } catch(const ToolFailure&) {

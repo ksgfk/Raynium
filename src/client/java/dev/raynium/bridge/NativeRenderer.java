@@ -7,18 +7,17 @@ import static java.lang.foreign.ValueLayout.*;
 
 /** Persistent terrain residency owner. All frame arrays are borrowed only until present returns. */
 public final class NativeRenderer implements AutoCloseable {
-    public static final int RGSS=1, PROFILE=2, IMPROVED_TRANSPARENCY=4, FLIP_Y=8, CAPTURE=16, CAPTURE_PREVIOUS=32,WORLD_ONLY=64,WIREFRAME=128,MEASURE=256;
+    public static final int RGSS=1, IMPROVED_TRANSPARENCY=4, WIREFRAME=128;
     public record Capture(int width,int height,byte[] rgba) {}
-    public static final int CAPTURE_FINAL=0,CAPTURE_LAST=1,CAPTURE_WORLD=2,CAPTURE_TEXTURE=3,CAPTURE_TRACY=4;
+    public record SubmitResult(long sequence,int outcome,boolean success,boolean deviceLost,long[] measurements) {}
+    public record WaitResult(long completedSequence,boolean success,boolean deviceLost) {}
     public record Index(long meshId,int[] values) {}
     public record Mesh(long id,byte[] vertices,int vertexCount,int layer) {}
     public record Instance(int x,int y,int z,float visibility) {}
     public record Visible(long mesh,int elementMask,int sortKey,int firstInstance,int instanceCount) {}
-    public record GuiDraw(int pipeline,int texture,int samplerBits,int firstVertex,int vertexCount,int x,int y,int width,int height) {}
     public static final class Frame {
         public long epoch=1, outputSequence;
         public int flags;
-        public int renderWidth,renderHeight;
         public List<Index> indices=List.of();
         public List<Mesh> meshes=List.of();
         public List<Visible> visible=List.of();
@@ -27,20 +26,20 @@ public final class NativeRenderer implements AutoCloseable {
         public int terrainAlbedoTexture,terrainLightTexture,terrainAnisotropy=1;
         public float[] projection=identity(),view=identity(),cameraFraction=new float[3],fogColor=new float[4],fogDistances={1000,2000,1000,2000};
         public int[] cameraBlock=new int[3];
-        public byte[] guiVertices={};
-        public List<GuiDraw> guiDraws=List.of();
-        public float guiWidth,guiHeight;
-        public float[] clearColor;
         private static float[] identity() { return new float[]{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1}; }
     }
     private static final AtomicLong GENERATIONS=new AtomicLong();
-    private final NativeFrameBuffer frames=new NativeFrameBuffer();
     private final NativeRuntime owner;
     final NativeBindings bindings;
     private MemorySegment handle=MemorySegment.NULL;
-    private long lastEpoch;
+    private long completedSequence;
+    private boolean poisoned;
+    private Runnable releaseAcquiredSurface;
+    private final Set<NativeBuffer> buffers=new HashSet<>();
+    private final List<NativeBuffer.Mapping> writableMappings=new ArrayList<>();
+    private record Completion(long sequence,Runnable callback) {}
+    private final ArrayDeque<Completion> completions=new ArrayDeque<>();
     private long nextTextureId=16;
-    private int nextSceneBufferId=1;
     NativeSwapchain swapchain;
     private NativeRenderer(NativeRuntime owner,NativeBindings bindings) { this.owner=owner; this.bindings=bindings; }
     static NativeRenderer create(NativeRuntime owner,NativeBindings bindings,MemorySegment runtime,NativeShaderPack shaders,TerrainSubmission submission) {
@@ -52,7 +51,7 @@ public final class NativeRenderer implements AutoCloseable {
             var output=arena.allocate(ADDRESS);
             NativeBindings.call(bindings.createRenderer,"create renderer",runtime,desc,output);
             renderer.handle=output.get(ADDRESS,0); return renderer;
-        } catch(RuntimeException | Error failure) { renderer.frames.close(); throw failure; }
+        }
     }
     public NativeSwapchain createSwapchain(long hwnd,int width,int height,NativeSwapchain.PresentMode mode) {
         checkOpen(); if(swapchain!=null) throw new IllegalStateException("Renderer already has a swapchain");
@@ -61,7 +60,7 @@ public final class NativeRenderer implements AutoCloseable {
             var output=arena.allocate(ADDRESS);
             NativeBindings.call(bindings.createSwapchain,"create swapchain",handle,NativeSwapchain.descriptor(arena,hwnd,width,height,mode),output);
             value.handle=output.get(ADDRESS,0); swapchain=value; return value;
-        } catch(RuntimeException | Error failure) { value.closeScratch(); throw failure; }
+        }
     }
     public NativeTexture createTexture(int width,int height,int mips,NativeTexture.Format format) {
         return createTexture(width,height,mips,1,format);
@@ -70,6 +69,20 @@ public final class NativeRenderer implements AutoCloseable {
         return createTexture(width,height,mips,layers,format,0);
     }
     public NativeTexture createTexture(int width,int height,int mips,int layers,NativeTexture.Format format,int flags) {
+        int usage=NativeTexture.USAGE_COPY_DST|NativeTexture.USAGE_TEXTURE_BINDING;
+        if((flags&NativeTexture.ATTACHMENT)!=0) usage|=NativeTexture.USAGE_RENDER_ATTACHMENT;
+        if((flags&NativeTexture.READBACK)!=0) usage|=NativeTexture.USAGE_COPY_SRC;
+        if((flags&NativeTexture.CUBE)!=0) usage|=NativeTexture.USAGE_CUBEMAP_COMPATIBLE;
+        return createTexture(width,height,mips,layers,format,flags,usage,"");
+    }
+    public NativeTexture createTexture(String label,int usage,com.mojang.renderpearl.api.GpuFormat format,int width,int height,int layers,int mips) {
+        if(usage==0 || (usage&~31)!=0) throw new IllegalArgumentException("Invalid texture usage");
+        int flags=((usage&NativeTexture.USAGE_RENDER_ATTACHMENT)!=0?NativeTexture.ATTACHMENT:0) |
+            ((usage&NativeTexture.USAGE_COPY_SRC)!=0?NativeTexture.READBACK:0) |
+            ((usage&NativeTexture.USAGE_CUBEMAP_COMPATIBLE)!=0?NativeTexture.CUBE:0);
+        return createTexture(width,height,mips,layers,NativeTexture.Format.from(format),flags,usage,label);
+    }
+    private NativeTexture createTexture(int width,int height,int mips,int layers,NativeTexture.Format format,int flags,int usage,String label) {
         checkOpen();
         if(nextTextureId>0xffff_ffffL) throw new IllegalStateException("Texture ID space exhausted");
         int id=(int)nextTextureId++;
@@ -80,24 +93,10 @@ public final class NativeRenderer implements AutoCloseable {
             desc.set(JAVA_INT,28,flags);
             NativeBindings.call(bindings.createTexture,"create texture",handle,desc);
         }
-        return new NativeTexture(this,id,width,height,mips,layers,format);
+        return new NativeTexture(this,id,width,height,mips,layers,format,flags,usage,label);
     }
     void uploadTexture(MemorySegment descriptor) { checkOpen(); NativeBindings.call(bindings.uploadTexture,"upload texture",handle,descriptor); }
-    public NativeSceneBuffer createSceneBuffer(long size) {
-        checkOpen();
-        if(size<=0 || size>(1L<<30)) throw new IllegalArgumentException("Scene buffer size must be in [1, 1 GiB]");
-        if(nextSceneBufferId==Integer.MAX_VALUE) throw new IllegalStateException("Scene buffer ID space exhausted");
-        int id=nextSceneBufferId++;
-        try(var arena=Arena.ofConfined()) {
-            var desc=arena.allocate(16,8); desc.set(JAVA_INT,0,16); desc.set(JAVA_INT,4,id); desc.set(JAVA_LONG,8,size);
-            NativeBindings.call(bindings.createSceneBuffer,"create scene buffer",handle,desc);
-        }
-        return new NativeSceneBuffer(this,id,size);
-    }
-    void uploadSceneBuffer(MemorySegment desc) { checkOpen(); NativeBindings.call(bindings.uploadSceneBuffer,"upload scene buffer",handle,desc); }
-    void destroySceneBuffer(int id) { checkOpen(); NativeBindings.call(bindings.destroySceneBuffer,"destroy scene buffer",handle,id); }
-    void destroyTexture(int id) { checkOpen(); NativeBindings.call(bindings.destroyTexture,"destroy texture",handle,id); }
-    /** Empty while pending. Reading a completed capture consumes its output-sequence token. */
+    void destroyTexture(int id) { owner.checkOpen(); NativeBindings.call(bindings.destroyTexture,"destroy texture",handle,id); }
     public Optional<Capture> pollCapture(long sequence) {
         checkOpen();
         try(var arena=Arena.ofConfined()) {
@@ -110,40 +109,144 @@ public final class NativeRenderer implements AutoCloseable {
             return Optional.of(new Capture(info.get(JAVA_INT,8),info.get(JAVA_INT,12),pixels.toArray(JAVA_BYTE)));
         }
     }
-    public void requestCapture(long id,int source,int texture,int mip,int layer) {
-        checkOpen();
-        try(var arena=Arena.ofConfined()) {
-            var request=arena.allocate(32,8); request.set(JAVA_INT,0,32); request.set(JAVA_INT,4,source); request.set(JAVA_LONG,8,id);
-            request.set(JAVA_INT,16,texture); request.set(JAVA_INT,20,mip); request.set(JAVA_INT,24,layer);
-            NativeBindings.call(bindings.requestCapture,"request capture",handle,request);
-        }
-    }
     public static long nextFrameId() { return GENERATIONS.incrementAndGet(); }
     public long nextEpoch() {
         checkOpen();
-        return GENERATIONS.updateAndGet(value->Math.max(value,lastEpoch)+1);
+        return GENERATIONS.incrementAndGet();
     }
-    public NativeFrameBuffer frameBuffer() { checkOpen(); return frames; }
-    public NativeSwapchain.Presentation present(NativeSwapchain target,Frame frame) {
-        checkSwapchain(target); return present(target,frame,frames.marshal(frame));
+    public int registerPipeline(String program,int[] words,byte[] external) {
+        checkOpen();
+        try(var arena=Arena.ofConfined()) {
+            var desc=arena.allocate(40,8); var out=arena.allocate(JAVA_INT);
+            desc.set(JAVA_INT,0,40); desc.set(JAVA_INT,4,words.length);
+            if(external!=null) { desc.set(ADDRESS,24,arena.allocateFrom(JAVA_BYTE,external)); desc.set(JAVA_LONG,32,external.length); }
+            desc.set(ADDRESS,8,arena.allocateFrom(program)); desc.set(ADDRESS,16,arena.allocateFrom(JAVA_INT,words));
+            NativeBindings.call(bindings.registerPipeline,"register pipeline",handle,desc,out);
+            return out.get(JAVA_INT,0);
+        }
     }
-    public NativeSwapchain.Presentation presentPrepared(NativeSwapchain target,Frame frame) {
-        checkSwapchain(target); return present(target,frame,frames.finish(frame));
+    public void destroyPipeline(int id) {
+        checkThread();
+        if(!isClosed()) NativeBindings.call(bindings.destroyPipeline,"destroy pipeline",handle,id);
     }
-    private void checkSwapchain(NativeSwapchain target) {
-        checkOpen(); target.checkOpen();
-        if(target.owner!=this) throw new IllegalArgumentException("Swapchain owner mismatch");
+    public NativeBuffer createBuffer(int usage,long size,java.nio.ByteBuffer initial,java.util.function.Supplier<dev.raynium.client.renderpearl.CommandTape> currentBatch) {
+        checkOpen();
+        var buffer=NativeBuffer.create(this,handle,usage,size,initial,currentBatch);
+        buffers.add(buffer);
+        return buffer;
     }
-    private NativeSwapchain.Presentation present(NativeSwapchain target,Frame frame,MemorySegment descriptor) {
-        NativeBindings.callPresentFrame(bindings.presentFrame,handle,target.handle,descriptor,target.result);
-        lastEpoch=Math.max(lastEpoch,frame.epoch); return target.presentation();
+    void bufferReleased(NativeBuffer buffer) { buffers.remove(buffer); }
+    void destroyBuffer(int id) {
+        owner.checkThread();
+        if(!isClosed()) NativeBindings.call(bindings.destroyBuffer,"destroy buffer",handle,id);
     }
-    void checkOpen() { owner.checkOpen(); if(handle.equals(MemorySegment.NULL)) throw new IllegalStateException("Renderer is closed"); }
+    void trackWritable(NativeBuffer.Mapping mapping) { writableMappings.add(mapping); }
+    public void onCompleted(long sequence,List<Runnable> callbacks) {
+        for(var callback:callbacks) completions.addLast(new Completion(sequence,callback));
+    }
+    private void publishCompleted(long sequence) {
+        completedSequence=Math.max(completedSequence,sequence);
+        while(!completions.isEmpty() && completions.getFirst().sequence()<=completedSequence)
+            completions.removeFirst().callback().run();
+    }
+    public void pollCompleted() {
+        var result=waitSubmit(0,0);
+        if(!result.success()) terminalFailure(result.deviceLost());
+        publishCompleted(result.completedSequence());
+    }
+    public int createQueryPool(int count) {
+        checkOpen();
+        if(count<=0) throw new IllegalArgumentException("Query pool must have a positive size");
+        try(var arena=Arena.ofConfined()) {
+            var id=arena.allocate(JAVA_INT);
+            NativeBindings.call(bindings.createQueryPool,"create query pool",handle,count,id);
+            return id.get(JAVA_INT,0);
+        }
+    }
+    public void destroyQueryPool(int id) {
+        checkThread();
+        if(!isClosed()) NativeBindings.call(bindings.destroyQueryPool,"destroy query pool",handle,id);
+    }
+    public void syncQueryPool(int id,int first,int count,MemorySegment samples) {
+        checkOpen();
+        if(first<0 || count<0 || !samples.isNative() || samples.byteSize()<(long)count*16) throw new IllegalArgumentException("Invalid query result slice");
+        try(var arena=Arena.ofConfined()) {
+            var result=arena.allocate(16,8);
+            int status=(int)bindings.syncQueryPool.invokeExact(handle,id,first,count,samples,result);
+            if(status!=0) terminalFailure((result.get(JAVA_INT,8)&1)!=0);
+            publishCompleted(result.get(JAVA_LONG,0));
+        } catch(RuntimeException | Error failure) { throw failure; }
+        catch(Throwable failure) { throw new IllegalStateException("Cannot sync query pool",failure); }
+    }
+    public SubmitResult submitFrame(MemorySegment commands,MemorySegment uploads,NativeSwapchain surface) {
+        checkOpen();
+        return submitFrame(commands,uploads,surface,List.of(),false);
+    }
+    public SubmitResult submitFrame(MemorySegment commands,MemorySegment uploads,NativeSwapchain surface,List<MemorySegment> views,boolean measure) {
+        checkOpen();
+        if(surface!=null && surface!=swapchain) throw new IllegalArgumentException("Invalid submit surface");
+        try(var arena=Arena.ofConfined()) {
+            var desc=arena.allocate(80,8);
+            desc.set(JAVA_INT,0,80); desc.set(JAVA_INT,4,measure?1:0);
+            if(!views.isEmpty()) {
+                var records=arena.allocate((long)NativeFrameBuffer.BYTE_SIZE*views.size(),8);
+                for(int i=0;i<views.size();++i) records.asSlice((long)NativeFrameBuffer.BYTE_SIZE*i,NativeFrameBuffer.BYTE_SIZE).copyFrom(views.get(i));
+                desc.set(ADDRESS,64,records); desc.set(JAVA_INT,72,views.size());
+            }
+            desc.set(ADDRESS,8,surface==null?MemorySegment.NULL:surface.handle);
+            desc.set(ADDRESS,16,commands);
+            desc.set(JAVA_LONG,24,commands.byteSize());
+            desc.set(ADDRESS,32,uploads);
+            desc.set(JAVA_LONG,40,uploads.byteSize());
+            if(!writableMappings.isEmpty()) {
+                var dirty=arena.allocate(24L*writableMappings.size(),8);
+                for(int i=0;i<writableMappings.size();++i) writableMappings.get(i).encode(dirty,24L*i);
+                desc.set(ADDRESS,48,dirty);
+                desc.set(JAVA_INT,56,writableMappings.size());
+            }
+            var result=arena.allocate(160,8);
+            int status=(int)bindings.submitFrame.invokeExact(handle,desc,result);
+            writableMappings.removeIf(NativeBuffer.Mapping::releaseIfClosed);
+            return new SubmitResult(result.get(JAVA_LONG,0),result.get(JAVA_INT,8),status==0,(result.get(JAVA_INT,12)&1)!=0,measure?result.asSlice(16,144).toArray(JAVA_LONG):null);
+        } catch(RuntimeException | Error failure) { throw failure; }
+        catch(Throwable failure) { throw new IllegalStateException("Cannot submit command tape",failure); }
+    }
+    public boolean awaitSubmission(long sequence,long timeoutNs) {
+        checkOpen();
+        if(completedSequence<sequence) {
+            var wait=waitSubmit(sequence,timeoutNs);
+            if(!wait.success()) terminalFailure(wait.deviceLost());
+            publishCompleted(wait.completedSequence());
+        }
+        return completedSequence>=sequence;
+    }
+    public void onTerminalSurface(Runnable reset) { releaseAcquiredSurface=reset; }
+    public void terminalFailure(boolean deviceLost) {
+        poisoned=true;
+        if(releaseAcquiredSurface!=null) releaseAcquiredSurface.run();
+        if(deviceLost) throw new com.mojang.renderpearl.api.device.GpuDeviceLossException("Graphics device lost");
+        throw new IllegalStateException("Renderer submission failed");
+    }
+    public WaitResult waitSubmit(long sequence,long timeoutNs) {
+        checkOpen();
+        if(sequence<0) throw new IllegalArgumentException("Negative submission sequence");
+        try(var arena=Arena.ofConfined()) {
+            var result=arena.allocate(16,8);
+            int status=(int)bindings.waitSubmit.invokeExact(handle,sequence,timeoutNs,result);
+            return new WaitResult(result.get(JAVA_LONG,0),status==0,(result.get(JAVA_INT,8)&1)!=0);
+        } catch(RuntimeException | Error failure) { throw failure; }
+        catch(Throwable failure) { throw new IllegalStateException("Cannot wait for renderer submission",failure); }
+    }
+    public void checkOpen() { owner.checkOpen(); if(poisoned) throw new IllegalStateException("Renderer in terminal failure"); if(handle.equals(MemorySegment.NULL)) throw new IllegalStateException("Renderer is closed"); }
     void checkThread() { owner.checkThread(); }
     boolean isClosed() { return handle.equals(MemorySegment.NULL); }
     @Override public void close() {
         checkThread(); if(handle.equals(MemorySegment.NULL)) return;
         if(swapchain!=null) throw new IllegalStateException("Close outputs before renderer");
-        NativeBindings.call(bindings.destroyRenderer,"destroy renderer",handle); handle=MemorySegment.NULL; frames.close(); owner.releasedRenderer(this);
+        for(var buffer:buffers) buffer.endRenderer();
+        buffers.clear();
+        writableMappings.clear();
+        completions.clear();
+        NativeBindings.call(bindings.destroyRenderer,"destroy renderer",handle); handle=MemorySegment.NULL; owner.releasedRenderer(this);
     }
 }

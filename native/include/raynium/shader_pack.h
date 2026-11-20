@@ -27,11 +27,9 @@ struct ShaderPackEntry {
 };
 uint32_t ShaderPackCrc32(std::span<const radray::byte>) noexcept;
 bool ReadShaderPack(std::span<const radray::byte>,radray::vector<ShaderPackEntry>&);
-inline constexpr radray::array<std::string_view,8> TerrainPrograms{"terrain","terrain_cutout","terrain_translucent",
-    "terrain_oit_bounds","terrain_oit_transmittance","terrain_oit_accumulate","oit_bounds_cull","oit_composite"};
+inline constexpr radray::array<std::string_view,6> TerrainPrograms{"terrain","terrain_cutout","terrain_translucent",
+    "terrain_oit_bounds","terrain_oit_transmittance","terrain_oit_accumulate"};
 bool ValidateTerrainShader(const radray::shader::ShaderArtifactView&,std::string_view program);
-inline constexpr radray::array<std::string_view,3> GuiPrograms{"gui_color","gui_textured","gui_text"};
-bool ValidateGuiShader(const radray::shader::ShaderArtifactView&,std::string_view);
 bool ValidateOutputShader(const radray::shader::ShaderArtifactView&);
 
 class ShaderProgram final {

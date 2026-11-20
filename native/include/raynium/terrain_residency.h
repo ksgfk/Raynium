@@ -47,7 +47,7 @@ struct TerrainFrame {
     radray::vector<GeometryUpload>* geometry{};
     std::span<const rn_instance> instances;
     TextureRegistry* textures{};
-    rn_render_frame_desc parameters{};
+    rn_terrain_view_desc parameters{};
     bool hasTranslucent{};
     uint32_t width{},height{};
     radray::gpu::Texture* color{};
@@ -57,7 +57,7 @@ struct TerrainFrame {
 class TerrainResidency final {
 public:
     TerrainResidency(radray::DeviceContext&,radray::unique_ptr<radray::VertexBufferPool>,radray::unique_ptr<radray::IndexBufferPool>);
-    bool PrepareFrame(const TextureRegistry&,const rn_render_frame_desc&,const MeshPassResources&,SlotUploads,TerrainFrame&);
+    bool PrepareFrame(const TextureRegistry&,const rn_terrain_view_desc&,const MeshPassResources&,SlotUploads,TerrainFrame&);
     void Reset() noexcept;
     uint64_t ResidentBytes() const noexcept;
     void MeasureGeometry(rn_frame_metrics&) const noexcept;

@@ -28,9 +28,10 @@ final class NativeBindings {
     private final MethodHandle create;
     private final MethodHandle destroy;
     final MethodHandle createRenderer, destroyRenderer;
-    final MethodHandle queryDeviceInfo,createSwapchain,resizeSwapchain,destroySwapchain,presentFrame;
-    final MethodHandle createTexture,uploadTexture,destroyTexture,pollCapture,requestCapture;
-    final MethodHandle createSceneBuffer,uploadSceneBuffer,destroySceneBuffer;
+    final MethodHandle queryDeviceInfo,createSwapchain,resizeSwapchain,destroySwapchain;
+    final MethodHandle createBuffer,destroyBuffer,registerPipeline,destroyPipeline;
+    final MethodHandle createQueryPool,destroyQueryPool,syncQueryPool;
+    final MethodHandle createTexture,uploadTexture,destroyTexture,pollCapture,waitSubmit,submitFrame;
 
     NativeBindings(SymbolLookup library) {
         Linker linker = Linker.nativeLinker();
@@ -53,17 +54,25 @@ final class NativeBindings {
         createSwapchain=bind(linker,library,"rn_create_swapchain",signature(3));
         resizeSwapchain=bind(linker,library,"rn_resize_swapchain",signature(2));
         destroySwapchain=bind(linker,library,"rn_destroy_swapchain",signature(1));
-        presentFrame=bind(linker,library,"rn_present_frame",signature(4));
         createTexture=bind(linker,library,"rn_create_texture",signature(2));
-        createSceneBuffer=bind(linker,library,"rn_create_scene_buffer",signature(2));
-        uploadSceneBuffer=bind(linker,library,"rn_upload_scene_buffer",signature(2));
-        destroySceneBuffer=bind(linker,library,"rn_destroy_scene_buffer",FunctionDescriptor.of(ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
         uploadTexture=bind(linker,library,"rn_upload_texture",signature(2));
         destroyTexture=bind(linker,library,"rn_destroy_texture",FunctionDescriptor.of(ValueLayout.JAVA_INT,
             ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
         pollCapture=bind(linker,library,"rn_poll_capture",FunctionDescriptor.of(ValueLayout.JAVA_INT,
             ValueLayout.ADDRESS,ValueLayout.JAVA_LONG,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_LONG));
-        requestCapture=bind(linker,library,"rn_request_capture",signature(2));
+        registerPipeline=bind(linker,library,"rn_register_pipeline",signature(3));
+        destroyPipeline=bind(linker,library,"rn_destroy_pipeline",FunctionDescriptor.of(ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
+        createBuffer=bind(linker,library,"rn_create_buffer",signature(3));
+        destroyBuffer=bind(linker,library,"rn_destroy_buffer",FunctionDescriptor.of(ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
+        createQueryPool=bind(linker,library,"rn_create_query_pool",FunctionDescriptor.of(ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,ValueLayout.JAVA_INT,ValueLayout.ADDRESS));
+        destroyQueryPool=bind(linker,library,"rn_destroy_query_pool",FunctionDescriptor.of(ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
+        syncQueryPool=bind(linker,library,"rn_sync_query_pool",FunctionDescriptor.of(ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,ValueLayout.JAVA_INT,ValueLayout.JAVA_INT,ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.ADDRESS));
+        submitFrame=bind(linker,library,"rn_submit_frame",signature(3));
+        waitSubmit=bind(linker,library,"rn_wait_submit",FunctionDescriptor.of(ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,ValueLayout.JAVA_LONG,ValueLayout.JAVA_LONG,ValueLayout.ADDRESS));
     }
 
     private int requireCurrentVersion() {
@@ -175,15 +184,6 @@ final class NativeBindings {
         } catch(RuntimeException | Error failure) { throw failure; }
         catch(Throwable failure) { throw new IllegalStateException(operation,failure); }
     }
-    static void callPresentFrame(MethodHandle method,MemorySegment renderer,MemorySegment target,
-                                 MemorySegment frame,MemorySegment result) {
-        try {
-            int status=(int)method.invokeExact(renderer,target,frame,result);
-            checkStatus("present frame",status);
-        } catch(RuntimeException | Error failure) { throw failure; }
-        catch(Throwable failure) { throw new IllegalStateException("present frame",failure); }
-    }
-
     private MethodHandle bind(Linker linker, SymbolLookup library, String name, FunctionDescriptor descriptor) {
         MemorySegment address = library.find(name).orElseThrow(() -> new IllegalStateException("Native symbol is missing: " + name));
         return linker.downcallHandle(address, descriptor);

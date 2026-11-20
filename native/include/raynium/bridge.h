@@ -7,7 +7,10 @@
 #else
 #define RAYNIUM_API __declspec(dllimport)
 #endif
-#define RN_ABI_VERSION 18u
+#define RN_ABI_VERSION 19u
+
+enum rn_submit_flags : uint32_t { RN_SUBMIT_FLAG_DEVICE_LOST = 1u };
+struct rn_wait_result { uint64_t completed_sequence; uint32_t flags, reserved; };
 
 struct rn_runtime;
 struct rn_renderer;
@@ -52,26 +55,26 @@ struct rn_env_desc {
 struct rn_runtime_desc { uint32_t struct_size, reserved; };
 
 
-enum rn_frame_flags : uint32_t { RN_FRAME_RGSS = 1, RN_FRAME_PROFILE = 2, RN_FRAME_IMPROVED_TRANSPARENCY = 4,
-    RN_FRAME_FLIP_Y = 8, RN_FRAME_CAPTURE = 16, RN_FRAME_CAPTURE_PREVIOUS = 32, RN_FRAME_WORLD_ONLY = 64, RN_FRAME_WIREFRAME = 128, RN_FRAME_MEASURE = 256 }; // Reflect terrain clip Y and its front-face winding together.
+enum rn_frame_flags : uint32_t { RN_FRAME_RGSS=1, RN_FRAME_IMPROVED_TRANSPARENCY=4, RN_FRAME_WIREFRAME=128 };
 // Zero selects auto. Forced direct and indirect are mutually exclusive.
 enum rn_renderer_flags : uint32_t { RN_RENDERER_DIRECT = 1, RN_RENDERER_INDIRECT = 2 };
 // Pack bytes are borrowed only during rn_create_renderer; no pointer is retained.
 struct rn_renderer_desc { uint32_t struct_size, flags; const void* shader_pack; uint64_t shader_pack_size; };
 enum rn_present_mode : uint32_t { RN_PRESENT_IMMEDIATE = 0, RN_PRESENT_FIFO = 1 };
 struct rn_swapchain_desc { uint32_t struct_size, width, height; rn_present_mode present_mode; uint64_t hwnd; };
-enum rn_present_outcome : uint32_t { RN_PRESENTED = 0, RN_PRESENT_SKIPPED = 1, RN_PRESENT_RECREATE = 2 };
+enum rn_present_outcome : uint32_t { RN_PRESENTED = 0, RN_PRESENT_SKIPPED = 1, RN_PRESENT_RECREATE = 2, RN_PRESENT_NONE = 3, RN_PRESENTED_SUBOPTIMAL = 4, RN_PRESENT_SURFACE_LOST = 5 };
 // Opt-in measurement: completed GPU sequence/time, current wait/prepare/RDG/present wall times, all nanoseconds.
 struct rn_frame_metrics {
     uint64_t terrain_upload_bytes{},texture_upload_bytes{},scene_upload_bytes{},gui_upload_bytes{};
     uint64_t terrain_records{},terrain_calls{},scene_calls{},gui_calls{},bind_calls{};
     uint64_t vertex_capacity{},index_capacity{},geometry_allocated{};
 };
-struct rn_present_result { uint32_t struct_size; rn_present_outcome outcome; uint64_t acquire_timeouts; uint64_t gpu_sequence,gpu_ns,wait_ns,prepare_ns,rdg_ns,present_ns; rn_frame_metrics metrics; };
 // Capture pixels are packed RGBA8, top row first. A successful non-null read consumes the capture.
 struct rn_capture_info { uint32_t struct_size, ready, width, height; uint64_t byte_size; uint32_t row_pitch, reserved; };
-// Sources: final frame=0, last submitted output=1, world before outline/post/GUI=2, texture subresource=3, Tracy thumbnail=4.
-struct rn_capture_request { uint32_t struct_size,source; uint64_t id; uint32_t texture,mip,layer,reserved; };
+enum rn_device_features : uint32_t {
+    RN_DEVICE_WIREFRAME = 1u, RN_DEVICE_INDIRECT_DRAW = 2u, RN_DEVICE_INDIRECT_FIRST_INSTANCE = 4u,
+    RN_DEVICE_TIMESTAMP_QUERIES = 8u, RN_DEVICE_PERSISTENT_MAPPING = 16u
+};
 struct rn_device_info {
     uint32_t struct_size; rn_backend backend;
     uint32_t device_type, vendor_id; // 0 unknown, 1 integrated, 2 discrete, 3 software.
@@ -79,8 +82,26 @@ struct rn_device_info {
     uint32_t max_texture_size, max_color_attachments;
     float max_anisotropy; uint32_t flags; // Bit 0: active renderer has the optional terrain wireframe pipelines.
     char name[256], vendor[64], driver[128];
+    uint64_t max_buffer_size, max_uniform_buffer_range, max_storage_buffer_range;
+    uint64_t storage_offset_alignment, texel_offset_alignment, buffer_copy_offset_alignment, texture_placement_alignment;
+    uint32_t texture_pitch_alignment, max_texture_1d, max_texture_3d, max_array_layers;
+    uint32_t max_vertex_bindings, max_push_constant_bytes, max_draw_indirect_count, timestamp_valid_bits;
+    uint64_t timestamp_frequency;
+    double timestamp_period_ns;
 };
-enum rn_pixel_format : uint32_t { RN_PIXEL_RGBA8 = 0, RN_PIXEL_R8 = 1, RN_PIXEL_RGBA16F = 2, RN_PIXEL_RGBA32F = 3, RN_PIXEL_DEPTH32F = 4 };
+enum rn_pixel_format : uint32_t {
+    RN_PIXEL_RGBA8 = 0, RN_PIXEL_R8 = 1, RN_PIXEL_RGBA16F = 2, RN_PIXEL_RGBA32F = 3,
+    RN_PIXEL_DEPTH32F = 4, RN_PIXEL_R8_SNORM = 5, RN_PIXEL_RG8_UNORM = 6, RN_PIXEL_RG8_SNORM = 7,
+    RN_PIXEL_RGBA8_SNORM = 8, RN_PIXEL_R16_UNORM = 9, RN_PIXEL_R16_SNORM = 10, RN_PIXEL_RG16_UNORM = 11,
+    RN_PIXEL_RG16_SNORM = 12, RN_PIXEL_RGBA16_UNORM = 13, RN_PIXEL_RGBA16_SNORM = 14, RN_PIXEL_R8_UINT = 15,
+    RN_PIXEL_R8_SINT = 16, RN_PIXEL_RG8_UINT = 17, RN_PIXEL_RG8_SINT = 18, RN_PIXEL_RGBA8_UINT = 19,
+    RN_PIXEL_RGBA8_SINT = 20, RN_PIXEL_R16_UINT = 21, RN_PIXEL_R16_SINT = 22, RN_PIXEL_RG16_UINT = 23,
+    RN_PIXEL_RG16_SINT = 24, RN_PIXEL_RGBA16_UINT = 25, RN_PIXEL_RGBA16_SINT = 26, RN_PIXEL_R32_UINT = 27,
+    RN_PIXEL_R32_SINT = 28, RN_PIXEL_RG32_UINT = 29, RN_PIXEL_RG32_SINT = 30, RN_PIXEL_RGBA32_UINT = 31,
+    RN_PIXEL_RGBA32_SINT = 32, RN_PIXEL_R16_FLOAT = 33, RN_PIXEL_RG16_FLOAT = 34, RN_PIXEL_R32_FLOAT = 35,
+    RN_PIXEL_RG32_FLOAT = 36, RN_PIXEL_RGB10A2_UNORM = 37, RN_PIXEL_RGB10A2_UINT = 38, RN_PIXEL_RG11B10_FLOAT = 39,
+    RN_PIXEL_D32_FLOAT_S8_UINT = 40, RN_PIXEL_D24_UNORM_S8_UINT = 41, RN_PIXEL_D16_UNORM = 42
+ };
 enum rn_texture_flags : uint32_t { RN_TEXTURE_CUBE = 1, RN_TEXTURE_ATTACHMENT = 2, RN_TEXTURE_READBACK = 4 };
 struct rn_uploaded_texture_desc { uint32_t struct_size, id, width, height, mip_levels; rn_pixel_format format; uint32_t array_layers, flags; };
 struct rn_texture_upload_desc {
@@ -95,40 +116,8 @@ struct rn_mesh_update { uint64_t id; const void* vertices; uint32_t vertex_count
 struct rn_instance { int32_t origin[3]; float visibility; };
 // UINT32_MAX requests all groups; explicit masks intersect native conservative face culling.
 struct rn_visible_item { uint64_t mesh; uint32_t element_mask, sort_key, first_instance, instance_count; };
-struct rn_gui_vertex { float position[3], uv[2]; uint32_t color; };
-enum rn_gui_pipeline : uint32_t {
-    RN_GUI_COLOR, RN_GUI_INVERT, RN_GUI_HIGHLIGHT, RN_GUI_TEXTURED, RN_GUI_PREMULTIPLIED,
-    RN_GUI_OPAQUE, RN_GUI_NAUSEA, RN_GUI_VIGNETTE, RN_GUI_CROSSHAIR, RN_GUI_LOGO, RN_GUI_TEXT, RN_GUI_TEXT_GRAYSCALE,
-    RN_GUI_SCENE // Zero vertices; texture identifies the ordered RN_SCENE_GUI draw.
-};
-// Sampler bits: repeat S/T = 1/2, linear min/mag/mip = 4/8/16. Scissor is in logical GUI units.
-// mip_count=0 selects all remaining levels. LOD is relative to the sampling view.
 struct rn_texture_sampling { uint32_t base_mip, mip_count; float max_lod; uint32_t max_anisotropy; };
-struct rn_gui_draw { rn_gui_pipeline pipeline; uint32_t texture, sampler_bits, first_vertex, vertex_count; int32_t scissor[4]; uint32_t reserved; rn_texture_sampling sampling; };
-enum rn_scene_phase : uint32_t {
-    RN_SCENE_SKY, RN_SCENE_SOLID, RN_SCENE_TRANSLUCENT, RN_SCENE_AFTER_TERRAIN,
-    RN_SCENE_SEE_THROUGH, RN_SCENE_ALWAYS_ON_TOP, RN_SCENE_HAND, RN_SCENE_PANORAMA,
-    RN_SCENE_OIT_BOUNDS, RN_SCENE_OIT_TRANSMITTANCE, RN_SCENE_OIT_ACCUMULATE,
-    RN_SCENE_WATER_MASK,
-    RN_SCENE_CLOUD_BOUNDS, RN_SCENE_CLOUD_TRANSMITTANCE, RN_SCENE_CLOUD_ACCUMULATE,
-    RN_SCENE_OFFSCREEN, RN_SCENE_OUTLINE, RN_SCENE_GUI,
-    RN_SCENE_PHASE_COUNT
-};
-// Blob bytes are borrowed through synchronous Prepare only. UINT32_MAX denotes no geometry stream.
-struct rn_scene_blob { const void* bytes; uint64_t size; };
-// kind 0: constant blob; kind 1: uploaded texture; kind 2: graph texture (1 depth bounds, 2/3 coefficients); kind 3: persistent R8_SINT texel buffer.
-struct rn_scene_binding { uint32_t kind, binding, resource, sampler_bits; uint64_t offset, size; rn_texture_sampling sampling; };
-// A cleared temporary color/depth tile is rendered, then copied into a persistent sampling texture.
-struct rn_scene_target { uint32_t texture,x,y,width,height,first_draw,draw_count,reserved; };
-// Built-in chain IDs: blur=1, creeper=2, outline=3, invert=4, spider=5. Phase 0 world, 1 GUI.
-struct rn_scene_effect { uint32_t chain,phase,globals_blob,reserved; };
-struct rn_scene_draw {
-    uint32_t pipeline, phase, vertices, indices, vertex_count, index_count, index_stride;
-    uint32_t first_binding, binding_count, instance_count, instances, reserved;
-    uint64_t vertex_offset, index_offset, instance_offset;
-    int32_t scissor[4];
-};
-struct rn_render_frame_desc {
+struct rn_terrain_view_desc {
     uint32_t struct_size, flags;
     uint64_t epoch, output_sequence;
     const rn_index_update* indices;
@@ -141,20 +130,7 @@ struct rn_render_frame_desc {
     float projection[16], view[16];
     int32_t camera_block[3];
     float camera_fraction[3], fog_color[4], fog_distances[4];
-    const rn_gui_vertex* gui_vertices;
-    const rn_gui_draw* gui_draws;
-    uint32_t gui_vertex_count, gui_draw_count;
-    float gui_width, gui_height, clear_color[4];
-    const rn_scene_blob* scene_blobs;
-    const rn_scene_binding* scene_bindings;
-    const rn_scene_draw* scene_draws;
-    uint32_t scene_blob_count, scene_binding_count, scene_draw_count, scene_reserved;
-    const rn_scene_target* scene_targets;
-    uint32_t scene_target_count, scene_target_reserved;
-    const rn_scene_effect* scene_effects;
-    uint32_t scene_effect_count, gui_blur_split;
-    // Both zero uses the swapchain extent; nonzero renders offscreen without acquiring/presenting.
-    uint32_t render_width,render_height;
+
 };
 
 extern "C" {
@@ -197,21 +173,52 @@ RAYNIUM_API rn_status rn_query_device_info(rn_runtime*, rn_device_info*, uint32_
 RAYNIUM_API rn_status rn_create_swapchain(rn_renderer*, const rn_swapchain_desc*, rn_swapchain**) noexcept;
 RAYNIUM_API rn_status rn_resize_swapchain(rn_swapchain*, const rn_swapchain_desc*) noexcept;
 RAYNIUM_API rn_status rn_destroy_swapchain(rn_swapchain*) noexcept;
-// OK consumes residency updates even when presentation was skipped. Failure leaves result unchanged;
-// close the renderer after failure. No acquired frame remains outstanding on any returned status.
-RAYNIUM_API rn_status rn_present_frame(rn_renderer*, rn_swapchain*, const rn_render_frame_desc*, rn_present_result*) noexcept;
-struct rn_scene_buffer_desc { uint32_t struct_size, id; uint64_t size; };
-struct rn_scene_buffer_upload_desc { uint32_t struct_size, id; uint64_t offset, size; const void* bytes; };
-// Scene buffer IDs increase in [1,0x7ffffffe]; geometry references encode 0x80000000|id.
-// Upload copies bytes before returning. In-flight owners survive registry removal.
-RAYNIUM_API rn_status rn_create_scene_buffer(rn_renderer*, const rn_scene_buffer_desc*) noexcept;
-RAYNIUM_API rn_status rn_upload_scene_buffer(rn_renderer*, const rn_scene_buffer_upload_desc*) noexcept;
-RAYNIUM_API rn_status rn_destroy_scene_buffer(rn_renderer*, uint32_t id) noexcept;
+// All command and upload bytes are borrowed until this call returns. Records are eight-byte aligned.
+enum rn_buffer_usage : uint32_t {
+    RN_BUFFER_MAP_READ=1, RN_BUFFER_MAP_WRITE=2, RN_BUFFER_CLIENT_STORAGE=4, RN_BUFFER_COPY_DST=8,
+    RN_BUFFER_COPY_SRC=16, RN_BUFFER_VERTEX=32, RN_BUFFER_INDEX=64, RN_BUFFER_UNIFORM=128, RN_BUFFER_TEXEL=256, RN_BUFFER_INDIRECT=512
+};
+struct rn_buffer_desc { uint32_t struct_size,usage; uint64_t size; const void* initial; };
+struct rn_buffer_result { uint32_t id,reserved; void* mapped; };
+struct rn_mapped_range { uint32_t id,reserved; uint64_t offset,length; };
+struct rn_pipeline_desc {
+    uint32_t struct_size,word_count;
+    const char* program;
+    const uint32_t* words;
+    const void* shader_pack;
+    uint64_t shader_pack_size;
+};
+RAYNIUM_API rn_status rn_register_pipeline(rn_renderer*,const rn_pipeline_desc*,uint32_t*) noexcept;
+RAYNIUM_API rn_status rn_destroy_pipeline(rn_renderer*,uint32_t) noexcept;
+RAYNIUM_API rn_status rn_create_buffer(rn_renderer*,const rn_buffer_desc*,rn_buffer_result*) noexcept;
+RAYNIUM_API rn_status rn_destroy_buffer(rn_renderer*,uint32_t id) noexcept;
+struct rn_batch_desc {
+    uint32_t struct_size, flags;
+    rn_swapchain* surface;
+    const void* commands;
+    uint64_t command_bytes;
+    const void* uploads;
+    uint64_t upload_bytes;
+    const rn_mapped_range* dirty_ranges;
+    uint32_t dirty_count,reserved;
+    const rn_terrain_view_desc* views;
+    uint32_t view_count,view_reserved;
+};
+enum rn_batch_flags : uint32_t { RN_BATCH_MEASURE=1 };
+struct rn_submit_result {
+    uint64_t sequence; rn_present_outcome outcome; uint32_t flags;
+    uint64_t gpu_sequence,gpu_ns,wait_ns,prepare_ns,rdg_ns,present_ns;
+    rn_frame_metrics metrics;
+};
+RAYNIUM_API rn_status rn_submit_frame(rn_renderer*, const rn_batch_desc*, rn_submit_result*) noexcept;
+struct rn_query_sample { uint64_t sequence,ticks; }; // Zero sequence denotes an unavailable slot.
+RAYNIUM_API rn_status rn_create_query_pool(rn_renderer*,uint32_t count,uint32_t* id) noexcept;
+RAYNIUM_API rn_status rn_destroy_query_pool(rn_renderer*,uint32_t id) noexcept;
+RAYNIUM_API rn_status rn_sync_query_pool(rn_renderer*,uint32_t id,uint32_t first,uint32_t count,rn_query_sample*,rn_wait_result*) noexcept;
 // Uploaded IDs >=16 are never reused during this renderer's lifetime. Upload copies bytes during the call.
 RAYNIUM_API rn_status rn_create_texture(rn_renderer*, const rn_uploaded_texture_desc*) noexcept;
 RAYNIUM_API rn_status rn_upload_texture(rn_renderer*, const rn_texture_upload_desc*) noexcept;
 RAYNIUM_API rn_status rn_destroy_texture(rn_renderer*, uint32_t id) noexcept;
+RAYNIUM_API rn_status rn_wait_submit(rn_renderer*, uint64_t sequence, int64_t timeout_ns, rn_wait_result* result) noexcept;
 RAYNIUM_API rn_status rn_poll_capture(rn_renderer*, uint64_t sequence, rn_capture_info*, void* pixels, uint64_t capacity) noexcept;
-// Copies the request and retains its source owner immediately; pending uploads execute before readback.
-RAYNIUM_API rn_status rn_request_capture(rn_renderer*,const rn_capture_request*) noexcept;
 }

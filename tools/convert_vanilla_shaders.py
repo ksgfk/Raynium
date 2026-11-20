@@ -60,13 +60,22 @@ def raw_block(name, body, register):
     return f'[[vk::binding({register}, 0)]] cbuffer {name} : register(b{register}, space0) {{ uint4 Raw_{name}[{count}]; }};\n' + '\n'.join(definitions), count*16
 
 
-def resource_declaration(declaration, kind, index):
+def resource_declaration(declaration, kind, index, texel_formats):
     vk_binding = index*2 + (1 if kind == 's' else 0)
     result = f'[[vk::binding({vk_binding}, 1)]] ' + declaration
     if declaration.startswith('Buffer<'):
-        if not declaration.startswith('Buffer<int4> CloudFaces '):
-            raise ValueError('Unmapped vanilla texel buffer format: '+declaration)
-        result = '#ifdef __spirv__\n[[vk::image_format("r8i")]]\n#endif\n' + result
+        typed = re.match(r'Buffer<(int|uint|float)[1-4]?> (\w+) ', declaration)
+        fmt = texel_formats.get(typed[2]) if typed else None
+        detail = re.fullmatch(r'(R|RG|RGBA)(8|16|32)_(SINT|UINT|FLOAT|SNORM|UNORM)', fmt or '')
+        if not detail:
+            raise ValueError('Unsupported texel buffer format for '+declaration)
+        channels, bits, encoding = detail.groups()
+        scalar, suffix = {'SINT': ('int', 'i'), 'UINT': ('uint', 'ui'), 'FLOAT': ('float', 'f'),
+                          'SNORM': ('float', '_snorm'), 'UNORM': ('float', '')}[encoding]
+        if scalar != typed[1] or (encoding == 'FLOAT' and bits == '8') or (encoding.endswith('NORM') and bits == '32'):
+            raise ValueError(f'Texel buffer declaration {declaration} is incompatible with {fmt}')
+        image_format = channels.lower() + bits + suffix
+        result = f'#ifdef __spirv__\n[[vk::image_format("{image_format}")]]\n#endif\n' + result
     return result
 
 
@@ -91,39 +100,28 @@ def link_varyings(vertex, pixel):
     return vertex
 
 
-def convert(entry, root, destination, glslang, cross):
+def program_key(sources, identity):
+    stages = [hashlib.sha256(sources[stage].encode('utf-8')).hexdigest() for stage in ('VERTEX', 'FRAGMENT')]
+    defines = {**dict.fromkeys(identity['defineFlags'], ''), **identity['defineValues']}
+    fields = stages + [field for pair in sorted(defines.items()) for field in pair]
+    return 'p_' + hashlib.sha256(chr(0).join(fields).encode('utf-8')).hexdigest()
+
+
+def convert(entry, root, destination, glslang, cross, expanded=None):
     identity = entry['identity']
-    key = {name: identity[name] for name in ('shaders', 'defineValues', 'defineFlags')}
-    key['defineFlags'] = sorted(key['defineFlags'])
-    name = 'v_' + hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:24]
-    directory = destination / name
-    directory.mkdir(parents=True, exist_ok=True)
     sources = {}
     for stage, suffix in [('VERTEX', 'vsh'), ('FRAGMENT', 'fsh')]:
         shader = identity['shaders'][stage]
+        if expanded is not None:
+            sources[stage] = expanded[stage]
+            continue
         if not shader.startswith('minecraft:') or '..' in Path(shader.split(':', 1)[1]).parts:
             raise ValueError(f'Non-vanilla shader: {shader}')
         sources[stage] = expand(root / (shader.split(':', 1)[1] + '.' + suffix), root)
-    if identity['shaders']['FRAGMENT'].startswith('minecraft:post/'):
-        # Vanilla renders upside down and flips at presentation/readback. Keep post math in
-        # that coordinate system while sampling native's upright render targets.
-        vertex=sources['VERTEX']
-        if vertex.count('texCoord = uv;')!=1:
-            raise ValueError('Unknown built-in post coordinate source')
-        fragment=re.sub(r'\btexture\s*\(', 'rayniumPostTexture(', sources['FRAGMENT'])
-        if identity['shaders']['FRAGMENT'] in ('minecraft:post/box_blur','minecraft:post/entity_outline_box_blur'):
-            helper='vec4 rayniumPostTexture(sampler2D source, vec2 uv) { return texture(source, vec2(uv.x, 1.0 - uv.y)); }\n'
-        else:
-            helper='''vec4 rayniumPostTexture(sampler2D source, vec2 uv) {
-    ivec2 size = textureSize(source, 0);
-    ivec2 pixel = clamp(ivec2(floor(uv * vec2(size))), ivec2(0), size - 1);
-    return texelFetch(source, ivec2(pixel.x, size.y - 1 - pixel.y), 0);
-}
-'''
-        sources['FRAGMENT']=re.sub(r'(?=void\s+main\s*\()',lambda _:helper,fragment,count=1)
-    if identity['shaders']['FRAGMENT']=='minecraft:core/rendertype_water_mask':
-        # Both vanilla variants disable every color write; native uses a depth-only attachment layout.
-        sources['FRAGMENT']='#version 450\nvoid main() {}\n'
+    source_key = program_key(sources, identity)
+    name = source_key[:58]
+    directory = destination / name
+    directory.mkdir(parents=True, exist_ok=True)
     if identity['shaders']['VERTEX'] == 'minecraft:core/debug_point':
         # One vertex stream element per instance; six generated corners preserve pixel-sized points.
         sources['VERTEX'] = sources['VERTEX'].replace('gl_PointSize = LineWidth;', '''
@@ -135,6 +133,8 @@ def convert(entry, root, destination, glslang, cross):
     block_ids = {value: index for index, value in enumerate(blocks)}
     texture_ids = {value: index for index, value in enumerate(textures)}
     globals_, stages, wrappers, constant_sizes = {}, [], [], {}
+    texel_formats = {u['name']: u['gpuFormat'] for u in identity.get('uniforms', []) if u['type'] == 'TEXEL_BUFFER'}
+    inputs, resources, push_size = {}, {}, 0
     for stage, suffix, namespace in [('VERTEX', 'vert', 'VertexStage'), ('FRAGMENT', 'frag', 'PixelStage')]:
         source = sources[stage]
         defines = '#define RENDERPEARL_DEPTH_IS_ZERO_TO_ONE\n'
@@ -148,13 +148,52 @@ def convert(entry, root, destination, glslang, cross):
         path = directory / ('source.'+suffix)
         path.write_text(source, encoding='utf-8')
         spirv = directory / (suffix+'.spv')
-        run([glslang, '-V', '--target-env', 'vulkan1.2', '-S', suffix, '-o', spirv, path])
+        args = [glslang, '-V', '--target-env', 'vulkan1.2', '-S', suffix]
+        run([*args, '-o', spirv, path])
+        optimized = directory / (suffix + '-active.spv')
+        run([*args, '-Os', '-o', optimized, path])
+        reflection = json.loads(run([cross, optimized, '--reflect']))
+        if stage == 'VERTEX':
+            inputs = {v['name']: {'location': v['location'], 'type': v['type']} for v in json.loads(run([cross, spirv, '--reflect'])).get('inputs', [])}
+        for uniform in reflection.get('ubos', []):
+            resources[uniform['name']] = {'group': 0, 'binding': uniform['binding'], 'type': 'ubo'}
+        for uniform in reflection.get('textures', []):
+            resources[uniform['name']] = {'group': 1, 'binding': 2 * uniform['binding'], 'type': uniform['type']}
+            if uniform['type'].endswith('samplerBuffer'):
+                resources[uniform['name']]['texelFormat'] = texel_formats[uniform['name']]
+        for uniform in reflection.get('push_constants', []):
+            members = reflection['types'][uniform['type']]['members']
+            for member in members:
+                match = re.fullmatch(r'(?:float|int|uint|[iu]?vec([234])|mat([234]))', member['type'])
+                if not match or 'array' in member:
+                    raise ValueError('Unsupported push constant member ' + repr(member))
+                size = int(match[2]) * member['matrix_stride'] if match[2] else 4 * int(match[1] or 1)
+                push_size = max(push_size, member['offset'] + size)
         hlsl = run([cross, spirv, '--hlsl', '--shader-model', '60', '--rename-entry-point', 'main', 'GeneratedMain', suffix])
         # SPIRV-Cross converts DirectX pixel-position W into GLSL reciprocal W.
         # DXC's SPIR-V target already supplies reciprocal W unless explicitly overridden.
         hlsl = hlsl.replace('gl_FragCoord.w = 1.0 / gl_FragCoord.w;',
             '#ifndef __spirv__\n    gl_FragCoord.w = 1.0 / gl_FragCoord.w;\n#endif')
         hlsl = re.sub(r'\b_\d+_([A-Za-z]\w*)', r'\1', hlsl)
+        if stage == 'VERTEX':
+            for builtin, field in [('gl_VertexIndex', 'RnFirstVertex'), ('gl_InstanceIndex', 'RnFirstInstance')]:
+                assign = f'{builtin} = int(stage_input.{builtin});'
+                if assign in hlsl:
+                    globals_['RnDrawBases'] = '#ifndef __spirv__\ncbuffer RnDrawBases : register(b0, space3) { int RnFirstVertex; uint RnFirstInstance; };\n#endif'
+                    hlsl = hlsl.replace(assign, assign + f'\n#ifndef __spirv__\n    {builtin} += int({field});\n#endif')
+        def push_block(match):
+            block_name = match[1]
+            declaration, padded = raw_block(block_name, match[2], 0)
+            body = declaration.split('\n', 1)[1]
+            payload = f'struct RnPushData {{ uint4 raw[{padded//16}]; }};'
+            location = '#ifdef __spirv__\n[[vk::push_constant]]\n#endif\nConstantBuffer<RnPushData> RnPush : register(b0, space2);'
+            body = body.replace('Raw_' + block_name + '[', 'RnPush.raw[')
+            value = payload + '\n' + location + '\n' + body
+            if 'RnPush' in globals_ and globals_['RnPush'] != value:
+                raise ValueError('Incompatible push constant declarations across shader stages')
+            globals_['RnPush'] = value
+            return ''
+        hlsl = re.sub(r'cbuffer (\w+)\s*\{(.*?)\};', push_block, hlsl, flags=re.S)
         def block(match):
             declaration, size = raw_block(match[1], match[3], int(match[2]))
             if match[1] in globals_ and globals_[match[1]] != declaration:
@@ -164,7 +203,7 @@ def convert(entry, root, destination, glslang, cross):
         hlsl = re.sub(r'cbuffer (\w+) : register\(b(\d+), space0\)\s*\{(.*?)\};', block, hlsl, flags=re.S)
         def resource(match):
             declaration, kind, index = match[0], match[1], int(match[2])
-            declaration = resource_declaration(declaration, kind, index)
+            declaration = resource_declaration(declaration, kind, index, texel_formats)
             globals_[match[0]] = declaration
             return ''
         hlsl = re.sub(r'^(?:Texture\w*<[^>]+>|Buffer<[^>]+>|SamplerState) \w+ : register\(([ts])(\d+), space1\);', resource, hlsl, flags=re.M)
@@ -177,20 +216,26 @@ def convert(entry, root, destination, glslang, cross):
         call = f'{namespace}::GeneratedMain(' + ('input' if parameters else '') + ')'
         shader, entrypoint = ('vertex', 'VSMain') if stage == 'VERTEX' else ('pixel', 'PSMain')
         if stage == 'VERTEX':
-            wrappers.append(f'[shader("vertex")] {result} VSMain({parameters}) {{ auto output = {call}; output.gl_Position.y *= SceneClipY; return output; }}')
+            clip = "\n#ifndef __spirv__\noutput.gl_Position.y = -output.gl_Position.y;\n#endif\n"
+            wrappers.append(f'[shader("vertex")] {result} VSMain({parameters}) {{ auto output = {call}; {clip}return output; }}')
         else:
             wrappers.append(f'[shader("{shader}")] {result} {entrypoint}({parameters}) {{ ' + ('return ' if result != 'void' else '') + call+'; }')
+    # DXC's SPIR-V reflection can keep a cbuffer referenced only by a dead expression.
+    # Preserve the declarations used by that expression without creating an unbound descriptor.
+    for block_name in constant_sizes.keys() - resources.keys():
+        _, definitions = globals_[block_name].split('\n', 1)
+        registers = constant_sizes[block_name] // 16
+        zero = ', '.join(['(uint4)0'] * registers)
+        globals_[block_name] = f'static const uint4 Raw_{block_name}[{registers}] = {{ {zero} }};\n' + definitions
     stages[0] = link_varyings(stages[0], stages[1])
-    backend = '[[vk::binding(31, 0)]] cbuffer SceneBackend : register(b31, space0) { float4 SceneBackendValues; };\n#define SceneClipY SceneBackendValues.x\n'
-    source = backend+'\n'.join(globals_.values())+'\n'+'\n'.join(stages)
+    source = '\n'.join(globals_.values())+'\n'+'\n'.join(stages)
     source += '\n'+'\n'.join(wrappers)+'\n'
     path = destination / (name+'.hlsl'); path.write_text(source, encoding='utf-8')
-    active_textures = set(re.findall(r'Texture\w*<[^>]+> (\w+) : register', source))
-    active_texels = set(re.findall(r'Buffer<[^>]+> (\w+) : register', source))
-    return {'program': name, 'constants': {key: {'binding': block_ids[key], 'size': size} for key, size in constant_sizes.items()},
-        'textures': {key: {'texture': value*2, 'sampler': value*2+1} for key, value in texture_ids.items() if key in active_textures},
-        'texels': {key: value*2 for key,value in texture_ids.items() if key in active_texels}}
-
+    for resource in resources.values():
+        if resource['group'] == 1:
+            sampler = resource['binding'] // 2
+            resource['sampler'] = resource['binding'] + 1 if f'register(s{sampler}, space1)' in source else -1
+    return {'program': name, 'key': source_key, 'inputs': inputs, 'resources': resources, 'pushBytes': push_size}
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

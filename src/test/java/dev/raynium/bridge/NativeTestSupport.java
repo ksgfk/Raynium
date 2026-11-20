@@ -26,8 +26,16 @@ final class NativeTestSupport implements AutoCloseable {
     static NativeRenderer.Frame solidFrame(long sequence) {
         var frame=new NativeRenderer.Frame(); frame.outputSequence=sequence;
         frame.fogColor=new float[]{.25f,.5f,.75f,1};
-        frame.flags=Boolean.getBoolean("raynium.terrain.profile")?NativeRenderer.PROFILE:0;
+
         return frame;
+    }
+    static int blit(NativeRenderer renderer,NativeSwapchain chain) {
+        try(var texture=renderer.createTexture(16,16,1,1,NativeTexture.Format.RGBA8,NativeTexture.ATTACHMENT|NativeTexture.READBACK);
+            var tape=new dev.raynium.client.renderpearl.CommandTape(renderer)) {
+            tape.clearColor(new dev.raynium.client.renderpearl.CommandTape.Region(texture,0,0,0,0,16,16),1,0,0,1);
+            tape.blitToSurface(texture,0,chain);
+            return tape.submit().outcome();
+        }
     }
     private final Arena arena = Arena.ofConfined();
     private final List<MemorySegment> runtimes = new ArrayList<>();

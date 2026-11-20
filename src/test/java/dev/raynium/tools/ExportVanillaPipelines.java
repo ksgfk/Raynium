@@ -1,7 +1,7 @@
 package dev.raynium.tools;
 
 import com.google.gson.GsonBuilder;
-import dev.raynium.client.takeover.scene.VanillaPipelineCatalog;
+import dev.raynium.client.renderpearl.VanillaPipelineCatalog;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;

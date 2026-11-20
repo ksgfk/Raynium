@@ -75,47 +75,16 @@ std::string_view ShaderProgram::Entry(ShaderStage stage) const {
 }
 bool ValidateOutputShader(const ShaderArtifactView& artifact) {
     const auto texture=artifact.FindBinding("SceneColor");
+    const auto parameters=artifact.FindBinding("OutputParameters");
     if(artifact.Entries().size()!=2 || !artifact.FindStageBytecode(ShaderStage::Vertex) || !artifact.FindStageBytecode(ShaderStage::Pixel) ||
        !artifact.VertexInputs().empty() || !artifact.RootConstants().empty() || !artifact.Samplers().empty() ||
-       !artifact.SerializedRootSignature().empty() || artifact.Bindings().size()!=1 || !texture ||
+       !artifact.SerializedRootSignature().empty() || artifact.Bindings().size()!=2 || !texture || !parameters ||
+       DecodeBindingKind(parameters->Record.Type)!=radray::gpu::BindingKind::CBuffer || parameters->Record.Group ||
+       parameters->Record.Binding!=1 || parameters->Record.StageMask!=2 || parameters->Record.Count!=1 ||
+       parameters->Record.TypeIndex>=artifact.Types().size() || artifact.Types()[parameters->Record.TypeIndex].Size!=16 ||
        DecodeBindingKind(texture->Record.Type)!=radray::gpu::BindingKind::Texture || texture->Record.Group || texture->Record.Binding ||
        texture->Record.Count!=1 || texture->Record.StageMask!=2 || texture->Record.Placement!=uint32_t(ShaderBindingPlacement::Table)) {
         RADRAY_ERR_LOG("Output shader interface is incompatible"); return false;
-    }
-    return true;
-}
-bool ValidateGuiShader(const ShaderArtifactView& artifact,std::string_view program) {
-
-    const bool textured=program!="gui_color",text=program=="gui_text",vk=artifact.Envelope().Target==uint8_t(ShaderTarget::SPIRV);
-    if(std::find(GuiPrograms.begin(),GuiPrograms.end(),program)==GuiPrograms.end() || artifact.Entries().size()!=2 ||
-       !artifact.FindStageBytecode(ShaderStage::Vertex) || !artifact.FindStageBytecode(ShaderStage::Pixel)) { RADRAY_ERR_LOG("{}: GUI shader requires known vertex/pixel program",program); return false; }
-    if(!artifact.RootConstants().empty() || !artifact.Samplers().empty() || !artifact.SerializedRootSignature().empty() ||
-       artifact.Bindings().size()!=(textured?3u:1u)) { RADRAY_ERR_LOG("{}: GUI shader binding policy is incompatible",program); return false; }
-    const auto binding=[&](const char* name,radray::gpu::BindingKind kind,uint32_t group,uint32_t dx,uint32_t slot,uint32_t stages) {
-        auto found=artifact.FindBinding(name);
-        return found && DecodeBindingKind(found->Record.Type)==kind && found->Record.Group==group && found->Record.Binding==(vk?slot:dx) &&
-            found->Record.Count==1 && found->Record.StageMask==stages && found->Record.Placement==uint32_t(ShaderBindingPlacement::Table);
-    };
-    if(!binding("GuiFrame",radray::gpu::BindingKind::CBuffer,0,0,0,text?3u:1u) ||
-       (textured && (!binding("GuiTexture",radray::gpu::BindingKind::Texture,1,0,0,2) || !binding("GuiSampler",radray::gpu::BindingKind::Sampler,1,0,1,2))))
-        { RADRAY_ERR_LOG("{}: GUI shader resource binding is incompatible",program); return false; }
-    auto frame=artifact.FindBinding("GuiFrame"); auto types=artifact.Types();
-    if(frame->Record.TypeIndex>=types.size() || types[frame->Record.TypeIndex].Size!=16) { RADRAY_ERR_LOG("{}: GUI constant size is incompatible",program); return false; }
-    const auto member=std::find_if(types.begin(),types.end(),[&](const auto& type) {
-        return type.ParentIndex==frame->Record.TypeIndex && artifact.GetName(type.Name)=="GuiViewport";
-    });
-    if(member==types.end() || member->Offset!=0 || member->Size!=16 || member->ScalarKind!=1 || member->RowCount!=1 || member->ColumnCount!=4)
-        { RADRAY_ERR_LOG("{}: GUI constant layout is incompatible",program); return false; }
-    if(artifact.VertexInputs().size()!=(textured?3u:2u)) { RADRAY_ERR_LOG("{}: GUI vertex input count is incompatible",program); return false; }
-    struct Input { const char* name; uint32_t location,count; };
-    const Input inputs[]{{"POSITION",0,3},{"COLOR",textured?2u:1u,4},{"TEXCOORD",1,2}};
-    for(size_t i=0;i<(textured?3u:2u);++i) {
-        const auto& expected=inputs[i];
-        auto input=std::find_if(artifact.VertexInputs().begin(),artifact.VertexInputs().end(),[&](const auto& value) {
-            return artifact.GetName(value.Semantic)==expected.name && value.SemanticIndex==0;
-        });
-        if(input==artifact.VertexInputs().end() || (vk && input->Location!=expected.location) || input->ComponentType!=1 || input->ComponentCount!=expected.count)
-            { RADRAY_ERR_LOG("{}: GUI vertex input layout is incompatible",program); return false; }
     }
     return true;
 }

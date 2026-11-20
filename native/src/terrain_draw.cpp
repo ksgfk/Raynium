@@ -296,7 +296,7 @@ bool WriteLineIndices(std::span<radray::byte> destination,uint32_t vertexCount) 
     }
     return true;
 }
-TerrainEye ComputeTerrainEye(const rn_render_frame_desc& frame) noexcept {
+TerrainEye ComputeTerrainEye(const rn_terrain_view_desc& frame) noexcept {
     const Eigen::Matrix4f matrix=Eigen::Map<const Eigen::Matrix4f>(frame.projection)*Eigen::Map<const Eigen::Matrix4f>(frame.view);
     if(!matrix.allFinite()) return {};
     const Eigen::FullPivLU<Eigen::Matrix4f> inverse(matrix);
@@ -306,7 +306,7 @@ TerrainEye ComputeTerrainEye(const rn_render_frame_desc& frame) noexcept {
     const auto eye=(point/point.w()).eval();
     return {{{eye.x(),eye.y(),eye.z()}},true};
 }
-uint32_t TerrainVisibleMask(const TerrainMeshLayout& layout,const TerrainEye& eye,const rn_render_frame_desc& frame,
+uint32_t TerrainVisibleMask(const TerrainMeshLayout& layout,const TerrainEye& eye,const rn_terrain_view_desc& frame,
     std::span<const rn_instance> instances) noexcept {
     const uint32_t full=(1u<<layout.ranges.size())-1;
     if(layout.layer==RN_MATERIAL_TRANSLUCENT || !layout.finiteBounds || !eye.valid) return full;

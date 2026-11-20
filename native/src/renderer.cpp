@@ -1,4 +1,5 @@
 #include <raynium/renderer.h>
+#include <raynium/surface_submission.h>
 #include <radray/types.h>
 #include <raynium/exception.h>
 #include <radray/profiler.h>
@@ -28,8 +29,8 @@ bool Renderer::Create(radray::DeviceContext& device,std::span<const radray::byte
     auto indices=radray::IndexBufferPool::Create(device.GetDevice(),{.PageIndexCapacity=(32u<<20)/sizeof(uint32_t),
         .DebugNamePrefix="TerrainIndices"}).Release();
     if(!vertices || !indices) return false;
-    radray::unique_ptr<SolidFramePipeline> pipeline;
-    if(!SolidFramePipeline::Create(device,shaders,indirect,pipeline)) return false;
+    radray::unique_ptr<ModularFramePipeline> pipeline;
+    if(!ModularFramePipeline::Create(device,shaders,indirect,pipeline)) return false;
     auto* borrowed=pipeline.get();
     auto scheduler=radray::FrameScheduler::Create(device,std::move(pipeline),2).Release();
     if(!scheduler) return false;
@@ -43,68 +44,105 @@ Renderer::~Renderer() noexcept try {
 }
 void Renderer::Finish() {
     RADRAY_PROFILE_SCOPE_N("Raynium.Renderer.Finish");
-    _pipeline->Finish();
+    _pipeline->Finish(_device.GetDevice());
     _scheduler->WaitIdle();
 }
-bool Renderer::Present(Swapchain& target,const rn_render_frame_desc& frame,rn_present_result& result) {
+bool Renderer::WaitSubmit(uint64_t sequence,int64_t timeoutNs,rn_wait_result& result) {
+    if(_poisoned) {
+        result={};
+        if(_device.GetDevice().IsDeviceLost()) result.flags=RN_SUBMIT_FLAG_DEVICE_LOST;
+        return false;
+    }
+    bool success=_pipeline->WaitSubmit(_device.GetDevice(),sequence,timeoutNs,result);
+    if(result.flags&RN_SUBMIT_FLAG_DEVICE_LOST) _poisoned=true;
+    return success;
+}
+bool Renderer::CreateQueryPool(uint32_t count,uint32_t& id) {
+    return !IsTerminal() && _device.GetDevice().GetCapabilities().Features.TimestampQueries &&
+        _device.GetQueue().GetTimestampValidBits() && _queries.Create(count,id);
+}
+bool Renderer::SyncQueries(uint32_t id,uint32_t first,std::span<rn_query_sample> samples,rn_wait_result& result) {
+    auto pool=_queries.Find(id);
+    if(!pool || first>pool->slots.size() || samples.size()>pool->slots.size()-first) return false;
+    if(!WaitSubmit(0,0,result)) return false;
+    for(size_t i=0;i<samples.size();++i) {
+        const auto& slot=pool->slots[first+i];
+        samples[i]={slot.available?slot.sequence:0,slot.ticks};
+    }
+    return true;
+}
+bool Renderer::SubmitFrame(const rn_batch_desc& batch,Swapchain* target,rn_submit_result& result) {
     using namespace radray::gpu;
-    auto markFrame=radray::MakeScopeGuard([]() noexcept { RADRAY_PROFILE_FRAME(); });
-    RADRAY_PROFILE_SCOPE_N("Raynium.Present");
-    if((frame.flags&RN_FRAME_WIREFRAME) && !SupportsWireframe()) { RADRAY_ERR_LOG("Terrain wireframe is unavailable on this device"); return false; }
-    if(!target.Validate(frame.output_sequence)) return false;
-    const bool measure=(frame.flags&RN_FRAME_MEASURE)!=0;
-    const auto now=[&]() -> uint64_t { return measure?uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()):0; };
+    auto& device=_device.GetDevice();
+    const auto fail=[&] {
+        _poisoned=true;
+        if(device.IsDeviceLost()) result.flags|=RN_SUBMIT_FLAG_DEVICE_LOST;
+        return false;
+    };
+    if(_poisoned || device.IsDeviceLost()) return fail();
+    const bool measure=batch.flags&RN_BATCH_MEASURE;
+    const auto now=[measure]()->uint64_t {
+        return measure?uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()):0;
+    };
     const auto start=now();
     auto& slot=_scheduler->BeginFrame();
-    _pipeline->BeginMeasurements(slot,measure);
     const auto waited=now();
-    auto clearScene=radray::MakeScopeGuard([&]() noexcept { _pipeline->ClearSceneInput(slot); });
-    TerrainFrame prepared;
-    auto uploads=_pipeline->GetUploads(slot);
-    if(!_terrain.PrepareFrame(_uploaded,frame,_pipeline->Resources(),uploads,prepared)) return false;
-    prepared.textures=&_uploaded;
-    const auto outputDesc=target.Chain().GetDesc();
-    const bool offscreen=frame.render_width || frame.render_height;
-    const auto limit=_device.GetDevice().GetCapabilities().Limits.MaxTexture2DDimension;
-    if(((frame.flags&RN_FRAME_WORLD_ONLY) && !offscreen) || (offscreen && (!frame.render_width || !frame.render_height || frame.render_width>limit || frame.render_height>limit))) {
-        RADRAY_ERR_LOG("Invalid offscreen render extent: {}x{}",frame.render_width,frame.render_height); return false;
+    if(device.IsDeviceLost()) return fail();
+    _pipeline->MeasureBatch(slot,measure,target!=nullptr);
+    auto& tape=*slot.Emplace<CommandTape>();
+    if(!tape.PrepareViews(batch,_terrain,_uploaded,_pipeline->Resources(),slot,_pipeline->UsesIndirect()) ||
+       !tape.Decode(batch,_uploaded,_queries,_buffers,_pipelines,device.GetCapabilities().Limits.MaxColorAttachments) || !_pipeline->PrepareTape(slot,tape) ||
+       !_buffers.Flush({batch.dirty_ranges,batch.dirty_count})) {
+        RADRAY_ERR_LOG("Invalid command tape or readback reservation");
+        return fail();
     }
-    prepared.width=offscreen?frame.render_width:outputDesc.Width; prepared.height=offscreen?frame.render_height:outputDesc.Height;
-    auto cancelCaptures=radray::MakeScopeGuard([&]() noexcept { _pipeline->CancelUnsubmittedCaptures(); });
-    if(!_pipeline->PrepareCapture(slot,frame,prepared.width,prepared.height)) return false;
-    if(!_pipeline->PrepareGui(slot,_uploaded,frame,prepared.width,prepared.height)) return false;
-    if(!_pipeline->PrepareScene(slot,_uploaded,frame)) return false;
-    const auto preparedAt=now();
+    TerrainFrame frame{};
+    frame.textures=&_uploaded;
+    const auto backend=device.GetBackend();
     SwapChainAcquireResult acquired{.Status=SwapChainStatus::RetryLater};
-    if(!offscreen && target.IsPresentable()) {
-        acquired=target.Chain().AcquireNext(100);
-        if(acquired.Status==SwapChainStatus::RetryLater) {
-            target.TimedOut();
-            RADRAY_DEBUG_LOG("Raynium swapchain acquire retry count={}",target.Timeouts());
+    if(target) {
+        if(!target->Validate()) return fail();
+        result.outcome=RN_PRESENT_SKIPPED;
+        if(target->IsPresentable()) {
+            acquired=target->Chain().AcquireNext(100);
+            if(device.IsDeviceLost() && !acquired.Frame) return fail();
+            auto outcome=ResolveSurfaceOutcome(backend,acquired.Status,acquired.NativeStatusCode);
+            if(!outcome) return fail();
+            if(!acquired.Frame) {
+                if(acquired.Status==SwapChainStatus::Success) RADRAY_ABORT("Successful surface acquisition has no frame");
+                result.outcome=*outcome;
+                if(acquired.Status==SwapChainStatus::RetryLater) target->TimedOut();
+            }
+        }
+        if(acquired.Frame) {
+            frame.color=acquired.Frame->GetBackBuffer();
+            frame.waitToDraw=acquired.Frame->GetWaitToDraw();
+            frame.readyToPresent=acquired.Frame->GetReadyToPresent();
         }
     }
-    if(acquired.Status==SwapChainStatus::Error) { RADRAY_ERR_LOG("Swapchain acquisition failed; close the renderer"); return false; }
-    if(acquired.Frame) {
-        prepared.color=acquired.Frame->GetBackBuffer();
-        prepared.waitToDraw=acquired.Frame->GetWaitToDraw(); prepared.readyToPresent=acquired.Frame->GetReadyToPresent();
-    } else if(acquired.Status==SwapChainStatus::Success) RADRAY_ABORT("Successful swapchain acquisition has no frame");
-    _pipeline->SetInput(prepared);
+    if(measure) { tape.Measure(result.metrics); _terrain.MeasureGeometry(result.metrics); }
+    const auto prepared=now();
+    _pipeline->SetTape(frame,tape,_buffers);
     auto clear=radray::MakeScopeGuard([&]() noexcept { _pipeline->ClearInput(); });
-    const auto rdgStart=now();
-    _scheduler->RunFrame();
-    cancelCaptures.Dismiss();
-    const auto rdgEnd=now();
-    auto outcome=acquired.Status==SwapChainStatus::RequireRecreate?RN_PRESENT_RECREATE:RN_PRESENT_SKIPPED;
-    if(acquired.Frame) {
-        const auto presented=target.Chain().Present(std::move(*acquired.Frame));
-        if(presented.Status==SwapChainStatus::Error) { RADRAY_ERR_LOG("Swapchain presentation failed; close the renderer"); return false; }
-        outcome=presented.Status==SwapChainStatus::Success?RN_PRESENTED:
-            presented.Status==SwapChainStatus::RequireRecreate?RN_PRESENT_RECREATE:RN_PRESENT_SKIPPED;
+    if(!_scheduler->RunFrame()) {
+        CheckFailedQueueSubmission(device.IsDeviceLost());
+        if(acquired.Frame) target->Chain().DiscardAcquiredFrame(std::move(*acquired.Frame));
+        return fail();
     }
-    target.Commit(frame.output_sequence);
-    result={sizeof(result),outcome,target.Timeouts(),measure?_pipeline->GpuSequence():0,measure?_pipeline->GpuNanoseconds():0,
-        waited-start,preparedAt-waited,rdgEnd-rdgStart,now()-rdgEnd,_pipeline->Measurements(slot)};
-    if(measure) _terrain.MeasureGeometry(result.metrics);
+    const auto submitted=now();
+    result.sequence=_pipeline->SubmittedSequence();
+    if(acquired.Frame) {
+        const auto present=target->Chain().Present(std::move(*acquired.Frame));
+        if(device.IsDeviceLost()) return fail();
+        auto outcome=ResolveSurfaceOutcome(backend,present.Status,present.NativeStatusCode,acquired.NativeStatusCode);
+        if(!outcome) return fail();
+        result.outcome=*outcome;
+    }
+    if(measure) {
+        result.gpu_sequence=_pipeline->GpuSequence(); result.gpu_ns=_pipeline->GpuNanoseconds();
+        result.wait_ns=waited-start; result.prepare_ns=prepared-waited;
+        result.rdg_ns=submitted-prepared; result.present_ns=now()-submitted;
+    }
     return true;
 }
 }

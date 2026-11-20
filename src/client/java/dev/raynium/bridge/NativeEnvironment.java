@@ -54,10 +54,12 @@ public final class NativeEnvironment implements AutoCloseable {
         logger.info("Raynium native environment initialized: backend={} driver validation={}", backend.propertyValue(), validation);
     }
 
-    public NativeRuntime createRuntime() {
+    public NativeRuntime createRuntime() { return createRuntime(library.bindings()); }
+
+    NativeRuntime createRuntime(NativeBindings bindings) {
         checkOpen();
         if (runtime != null) throw new IllegalStateException("Native environment already has a runtime");
-        runtime = new NativeRuntime(this, library.bindings(), logger);
+        runtime = new NativeRuntime(this, bindings, logger);
         return runtime;
     }
 

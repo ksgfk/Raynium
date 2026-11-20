@@ -9,122 +9,28 @@ Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 1
 
 ## 当前 C ABI
 
-| 导出 | 契约 |
-| --- | --- |
-| `rn_get_abi_version` / `rn_query_abi` | 版本 18；240 字节身份结构，查询失败不改 info |
-| `rn_init_env` / `rn_destroy_env` | DLL 单例环境；重复初始化、有活跃 runtime 时拒绝；环境不创建设备 |
-| `rn_create_runtime` / `rn_destroy_runtime` | 唯一设备会话；销毁前先关闭 renderer；不接收宿主 GPU 身份 |
-| `rn_create_renderer` / `rn_destroy_renderer` | 唯一 renderer，持有驻留地形、上传纹理与帧调度；有交换链时拒绝关闭 |
-| `rn_query_device_info` | 当前 RHI 设备详情及能力；无需外部共享扩展，失败不改输出 |
-| `rn_create_swapchain` / `rn_resize_swapchain` / `rn_destroy_swapchain` | 每 renderer 一个 BGRA8 HWND 交换链；重建与销毁先回收槽再等待呈现队列 |
-| `rn_present_frame` | 一次同步传递网格、透明索引、移除、可见项、实例、相机及 GUI；OK 表示增量已消费 |
-| `rn_create_texture` / `rn_upload_texture` / `rn_destroy_texture` | 编号 >=16 的 2D、数组及立方体纹理；同步复制源字节，帧内提交 GPU 拷贝 |
-| `rn_create_scene_buffer` / `rn_upload_scene_buffer` / `rn_destroy_scene_buffer` | 持久场景顶点/索引缓冲；同步复制上传字节，删除注册表身份不提前释放在途 owner |
-| `rn_request_capture` | 同步复制请求并保活纹理或上一帧来源；指定本帧输出、世界阶段或纹理 mip/数组层 |
-| `rn_poll_capture` | 按 output_sequence 查询完成状态或复制紧密排列的 RGBA8 像素；成功复制后消费编号 |
+`rn_get_abi_version` 在解析其余导出前校验版本。`rn_query_abi` 核对 build ID、指针宽度和编译配置。入口签名以 `bridge.h` 为准，FFM 按固定宽度和 8 字节对齐构建命令记录。设备与资源句柄只在所属 renderer 和所属线程使用。
 
-状态仅为 `RN_STATUS_OK=0` / `RN_STATUS_FAILED=1`。C ABI 不接收错误缓冲区，native 在发现失败的位置记录日志；Java 只报告操作名与状态码。
-`rn_query_abi(info, capacity)` 和 `rn_query_device_info(runtime, info, capacity)` 中的容量仅指信息结构的字节容量。
-创建失败清空有效输出句柄槽；信息查询和 present 结果失败时不改输出。`rn_destroy_runtime` 为 void，NULL 无操作；错误 owner、错误线程或仍有 renderer 时记录 fatal 日志并 abort。
-所有生命周期和渲染调用在环境初始化线程串行执行；父 owner 拒绝在子 owner 存活时关闭。
-准备失败可能已应用部分增量，不回滚；调用方关闭 renderer。进入 RadRay 帧回调后的不可恢复失败不转换为可重试错误。异常保护和终止边界见[Native runtime](native-runtime.md#失败处理)。
-隐藏、最小化、零客户区、获取超时仍执行上传；OK 的 PRESENTED/SKIPPED/RECREATE 都可提交 Java 驻留事务。
+## 提交布局
 
-## ABI 18 布局
-
-指针按 8 字节对齐，固定宽度枚举按 uint32 传递；无旧 ABI 兼容层。Java 与 native 均显式核对版本及布局。
-
-| 结构 | 字节数及关键布局 |
-| --- | --- |
-| `rn_abi_info` | 240；身份 flags 的 bit 1/2 为静态 CRT/mimalloc |
-| `rn_env_desc` | 12；size/backend/flags，backend=1 D3D12、2 Vulkan；flags=1 driver validation |
-| `rn_runtime_desc` | 8；size/reserved，reserved 必须为 0 |
-| `rn_renderer_desc` | 24；size/flags、偏移 8 的 shader pack 指针、偏移 16 的 uint64 长度；flags=0 auto、1 direct、2 indirect |
-| `rn_swapchain_desc` | 24；size/width/height/present_mode，偏移 16 的 HWND；mode=0 Immediate、1 FIFO |
-| `rn_present_result` | 160；size/outcome、偏移 8 的累计 acquire_timeouts；偏移 16 起为六个 uint64：已完成 GPU 帧序号、GPU 纳秒、当前槽等待/准备/RDG 执行/呈现纳秒；偏移 64 为 `rn_frame_metrics`；outcome=0 Presented、1 Skipped、2 Recreate |
-| `rn_frame_metrics` | 96；十二个 uint64，依次为地形/纹理/场景/GUI 上传有效字节、地形记录数/调用数、场景/GUI 调用数、几何及后处理绑定调用数、地形顶点/索引池容量及已分配字节；仅 MEASURE 帧填充 |
-| `rn_capture_request` | 32；size/source、偏移 8 的 uint64 id、偏移 16/20/24/28 的 texture/mip/layer/reserved |
-| `rn_capture_info` | 32；size/ready/width/height、偏移 16 的 uint64 byte_size、偏移 24/28 的 row_pitch/reserved |
-| `rn_device_info` | 488；flags 偏移 36，bit 0 表示已创建 renderer 的可选地形线框管线可用；名称/厂商/驱动字符串偏移 40/296/360；驱动版本格式由后端决定 |
-| `rn_uploaded_texture_desc` | 32；size/id/width/height/mip_levels/format，偏移 24/28 为 array_layers/flags；format=0 RGBA8、1 R8、2 RGBA16F、3 RGBA32F、4 D32F；flags=1 cube、2 attachment、4 readback |
-| `rn_texture_upload_desc` | 56；像素指针偏移 32、uint64 byte_size 偏移 40、array_layer/reserved 偏移 48/52；row_pitch=0 为紧密行；不支持 CPU 深度上传 |
-| `rn_mesh_update` | 24；ID/vertices 指针、偏移 16 的 vertex_count、偏移 20 的 layer |
-| `rn_index_update` | 24；透明 mesh ID/uint32 索引指针/count/reserved |
-| `rn_instance` | 16；int3 origin/float visibility |
-| `rn_visible_item` | 24；mesh ID、element_mask/sort_key/first_instance/instance_count，偏移 0/8/12/16/20 |
-| `rn_gui_vertex` | 24；float3 position/float2 UV/RGBA8 color |
-| `rn_gui_draw` | 56；pipeline/texture/sampler_bits/first_vertex/vertex_count、偏移 20 的 int4 scissor、偏移 36 的 reserved、偏移 40 的 sampling |
-| `rn_texture_sampling` | 16；base_mip/mip_count、float max_lod、max_anisotropy；mip_count=0 为剩余全部 mip |
-| `rn_scene_blob` | 16；bytes 指针、uint64 size |
-| `rn_scene_buffer_desc` | 16；size/id、偏移 8 的 uint64 容量 |
-| `rn_scene_buffer_upload_desc` | 32；size/id、偏移 8/16 的 uint64 offset/size、偏移 24 的 bytes 指针 |
-| `rn_scene_binding` | 48；kind/binding/resource/sampler_bits，uint64 offset/size；偏移 32 为 sampling；kind=0 常量 blob，1 上传纹理 |
-| `rn_scene_target` | 32；texture/x/y/width/height/first_draw/draw_count/reserved，定义连续离屏绘制及缓存写入区域 |
-| `rn_scene_effect` | 16；chain/phase/globals_blob/reserved；内置 blur/creeper/invert/spider，world=0、GUI=1 |
-| `rn_scene_draw` | 88；管线/阶段、顶点/索引 blob、计数/索引宽度、绑定范围/实例计数/实例 blob/reserved、三个 uint64 字节偏移、int4 物理 scissor |
-| `rn_render_frame_desc` | 408；见下表 |
-
-| frame 字段组 | 字节偏移 |
-| --- | --- |
-| struct_size / flags / epoch / output_sequence | 0 / 4 / 8 / 16 |
-| indices / meshes / removed_meshes / visible / instances 指针 | 24 / 32 / 40 / 48 / 56 |
-| 上述五个数组的 count | 64 / 68 / 72 / 76 / 80 |
-| terrain_albedo_texture / terrain_light_texture / terrain_anisotropy | 84 / 88 / 92 |
-| projection[16] / view[16] | 96 / 160 |
-| camera_block[3] / camera_fraction[3] | 224 / 236 |
-| fog_color[4] / fog_distances[4] | 248 / 264 |
-| gui_vertices / gui_draws 指针 | 280 / 288 |
-| gui_vertex_count / gui_draw_count | 296 / 300 |
-| gui_width / gui_height / clear_color[4] | 304 / 308 / 312 |
-| scene_blobs / scene_bindings / scene_draws 指针 | 328 / 336 / 344 |
-| scene_blob_count / scene_binding_count / scene_draw_count / scene_reserved | 352 / 356 / 360 / 364 |
-| scene_targets / scene_target_count / scene_target_reserved | 368 / 376 / 380 |
-| scene_effects / scene_effect_count / gui_blur_split | 384 / 392 / 396 |
-| render_width / render_height | 400 / 404 |
-
-IDs 非零且属于 epoch；epoch 非零且不可倒退。顶点固定 28 字节，完整 quad、最多 1,048,576 顶点。
-layer=0/1/2 为 SOLID/CUTOUT/TRANSLUCENT。前两层使用 Native 共享 Quad 索引，透明索引按 mesh ID 更新并随 mesh 删除。
-数组指针只借用到同步调用返回；字节已复制到 staging，native 保存的帧标量清除全部借用数组指针。
-每帧 mesh/index 更新最多 65,536 项，可见项及实例最多 1,048,576 项；透明索引最多 16,777,216 个 uint32。
-Java 检查透明索引值；native 检查描述、层、数量及范围，不逐值扫描索引。调用方保证同类 ID 不重复、更新/删除不相交。
-
-可见项直接引用 mesh；instance_count 非零且范围完整。element_mask=UINT32_MAX 请求全部紧凑面组，显式非零掩码不得含越界位。
-掩码与 Native 保守朝向剔除求交，多实例使用各实例可见组的并集；计算结果为零正常跳过。
-全局地形纹理只在有可见地形时解析；新帧引用已销毁编号失败，在途资源仍由 owner 保活。
-
-frame flags 的 1/2/4/8 为 RGSS/profile/improved transparency/Y 反射，16 请求截图，32 在截图时选择此前最后提交的主颜色目标。
-64 选择仅世界内容输出，须同时指定离屏尺寸。render_width/render_height 同时为零沿用窗口尺寸；均非零则使用独立尺寸并跳过交换链获取和呈现。
-128 选择原版地形线框覆盖；仅普通 solid/cutout/translucent 使用线框，OIT 透明地形保留原版 OIT 管线行为。不支持线框的设备拒绝该标志。
-256 开启低开销帧测量，仅写整帧 GPU 时间戳并返回已完成样本和当前 CPU 阶段时间；不启用 Tracy 或逐阶段计时。未开启时结果测量字段为零。
-32 必须与 16 同时设置；上一帧来源在当前帧清屏前复制，尺寸属于来源目标，resize 不改变已有来源。
-最多保留 4,096 份待处理及未消费读回；空像素指针仅查询，非空指针需提供完整容量。未完成返回 ready=0；完成像素为顶行在前的 RGBA8，无 GPU 行距填充。
-独立读回 source=0/1/2/3 分别为最终帧、请求时最后提交的输出、第一人称之后且轮廓/后处理/GUI 之前、指定纹理子资源。source=4 使用原版 Tracy blit 对最终帧线性缩放：保留宽高比，最大 320×180，两边向下取 4 的倍数（最小 4）。纹理源要求 RGBA8 和 CopySource；请求后删除编号不释放已持有的 owner。读回编号必须非零且不能与未消费请求重复。
-GUI 管线编号 0–11 及采样器位值保持现有 shader 契约；12 为有序场景标记，vertex_count 必须为零，texture 指定 phase=17 的 scene draw 下标，标记引用按 scene draw 顺序递增。
-GUI 顶点和绘制范围须为完整 quad，裁剪使用逻辑尺寸；clearColor 为 null 时沿用雾色 RGB、alpha=0。
-场景记录按阶段保留输入顺序，管线编号对应完整原版身份目录。空几何流使用 UINT32_MAX；顶点、索引与实例字段的高位为 1 时，低 31 位是持久缓冲编号，否则是 blob 下标。缓冲编号在同 renderer 内单调递增，范围为 1–0x7ffffffe，容量为 1 字节至 1 GiB；空上传不产生节点。常量使用独立 blob 范围并满足设备偏移对齐。
-普通场景阶段接受 RGBA8 目标；水体遮罩为无颜色附件的深度阶段。OIT 深度范围、透射和累积阶段分别匹配 RGBA32F、双 RGBA16F 和 RGBA16F，附件格式不匹配或未知管线显式失败。
-GUI 与 kind 1 场景纹理携带 mip 视图范围、LOD 和各向异性；采样器缓存使用完整参数身份。位 1/2 为重复寻址，4/8/16 为线性 min/mag/mip，32 强制零 LOD。LOD 相对视图；遵循原版 Vulkan 的最小 0.25 LOD 范围。
-绑定 kind 2 标识图内 OIT 纹理，资源编号 1/2/3 分别对应裁剪后的深度范围和两组系数，仅允许在对应 OIT 阶段使用。无索引 quad、展开线条和三角扇各自共享每帧前缀索引，直接写入最终上传区间；线条使用原版双端点索引顺序，点图元使用实例角点展开。
-绑定 kind 3 为持久 R8_SINT texel buffer，包含完整字节范围；云面使用该绑定，SPIR-V 的图像格式与缓冲视图一致。云 OIT 使用独立深度及三个专用阶段。
-离屏目标限定单层单 mip RGBA8 附件纹理，绘制范围有序且不重叠，不能同时采样当前输出。临时 tile 清屏后绘制，再复制至目标区域；空范围清空 tile。目标表至多 65,536 项，所有更新显式保留，即使没有主窗口输出也执行。
-纹理编号 0–15 保留；单层单 mip 颜色附件在首次导入时清零，之后只在实际提交后发布状态。普通上传纹理的所需区域和 mip 仍由调用方初始化。
+| 结构 | Windows x64 大小 | 内容 |
+| --- | ---: | --- |
+| `rn_abi_info` / `rn_device_info` | 240 / 592 B | 构建身份与真实设备的限制、特性、时间戳标定。Java 对超出有符号范围的无符号容量做饱和转换。 |
+| `rn_terrain_view_desc` | 280 B | epoch、网格变更、可见项、实例、相机、变换和雾。批次中可以有多个视图。 |
+| `rn_batch_desc` | 80 B | 命令、上传字节、脏映射区间、视图数组、可选的当前批 surface 和测量开关。输入指针借用至调用返回。 |
+| `rn_submit_result` | 160 B | 提交序号、呈现结果、终态标志；开启测量时附 CPU/GPU 时间、上传和绘制计数。 |
+| `rn_wait_result` / `rn_query_sample` | 16 / 16 B | 分别保存完成序号及丢失标志、采样的提交序号及设备 ticks。 |
+| `rn_mapped_range` / `rn_capture_info` | 24 / 32 B | 待刷新缓冲区间、颜色截图的尺寸与紧凑行距。 |
 
 ## Java 包装与所有权
 
-`NativeRenderer` 通过 `NativeFrameBuffer` 持有 408 字节描述及可扩容的堆外数组/上传暂存，不分配诊断缓冲。
-`NativeSceneFrame` 复用 blob、绑定及绘制表；复制常量的存储增长后才解析最终指针，原版几何可直接借用堆外片段。所有借用至同步 present 返回为止，native 在成功及失败返回路径清除源字节指针。
-容量增长先创建新 confined arena，再释放旧 arena；空数组显式写 NULL/0。`presentPrepared` 使用直接写入的帧缓冲，`present` 负责列表编排。
-Java 上传预算与 FFM 实际暂存容量相互独立。FFM 使用 ADDRESS 表示指针，JAVA_LONG 表示 ID/序号，JAVA_INT 表示 uint32/枚举。
-设备查询、创建与帧调用缓存 MethodHandle；不使用 critical downcall、upcall、GC/Cleaner 或跨语言异步队列。
-`MemorySegment` 边界检查不验证 C++ 裸指针真实容量；native owner 只能由同一 DLL 的 destroy 释放。
+创建纹理、缓冲、查询池与管线时获得 renderer 局部句柄。Java 录制批次持有已引用的对象，允许先录制、再关闭、最后提交。native 保存帧槽使用中的对象。Java 先按非零序号发布 Fence 状态、保活和驻留变更，再处理呈现结果。准备失败且序号为零时结束未提交批次。
 
-关闭顺序为 swapchain → renderer → runtime → environment → library；纹理编号和在途资源由 renderer 管理。
-交换链借用 HWND，必须早于宿主窗口关闭。失败清理保留仍存活的 owner，不在 GPU 尚未完成时卸载 DLL。
-游戏 JVM 使用 `--enable-native-access=ALL-UNNAMED`；Gradle daemon 的选项不能代替游戏 JVM 配置。
+`rn_wait_submit` 返回真实完成值，支持轮询、限时和无限等待。可读映射与回调按已完成的序号对外发布。设备丢失时等待和提交共用终态处理，释放已获取表面的前端状态。
 
 ## 构建身份与 payload
 
-`native/CMakeLists.txt` 用独立 binary 目录将锁定 RadRay 作为源码子工程引入，DLL 链接上游 `RadRay::runtime` 静态库，另静态链接 `RadRay::shader` decoder；依赖传递到 render/core，只导出 bridge 的二十一个 C 入口。
+`native/CMakeLists.txt` 用独立 binary 目录将锁定 RadRay 作为源码子工程引入，DLL 链接上游 `RadRay::runtime` 静态库，另静态链接 `RadRay::shader` decoder；依赖传递到 render/core，导出清单由 tools/native.py 校验。
 Windows x86_64 的 Debug 固定 `/MTd`，Release 固定 `/MT`，bridge、RadRay 和所有链接的依赖必须匹配对应配置的 CRT。
 Debug 使用 Raynium 显式准备的独立依赖前缀，Release 使用 RadRay 的 `windows-x64-msvc-staticcrt` 三元组。默认受管源码的版本由锁文件约束，本地覆盖和 dirty 源码可用于开发；分发要求锁定版本的干净源码。
 CMake 拒绝不匹配的 CRT/依赖配置，bridge 编译期拒绝动态 CRT并断言 Debug/Release 的 STL iterator 等级分别为 2/0。
@@ -137,9 +43,9 @@ Native 运行库、工具和测试直接使用锁定 RadRay 的 `radray/types.h`
 没有对应导出的 `std::span`、`std::string_view`、`std::pair`、`std::tuple` 等类型及标准算法继续使用标准库。
 配置阶段不恢复依赖，发布要求锁定提交的干净 Release 源码。当前未实现 RadRay 安装包消费模式。
 
-stage 使用 `dumpbin /exports` 核对二十一个 ABI 18 入口，再用 `/dependents` 拒绝动态 CRT 和未分类的私有 DLL，收集上游许可证，并先验证完整快照再发布 `current.json`。
+stage 使用 `dumpbin /exports` 核对构建脚本列出的 ABI 入口，再用 `/dependents` 拒绝动态 CRT 和未分类的私有 DLL，收集上游许可证，并先验证完整快照再发布 `current.json`。
 schema 1 manifest 包含平台、ABI/布局、构建配置、CRT、工具链、build ID、RadRay commit/dirty、DLL/许可证大小与 SHA-256、系统依赖分类。
-ABI 18 的身份 flags 中 bit 1（static CRT）和 bit 2（mimalloc）均为 1。loader 只接受 Debug/MTd 或 Release/MT 的单 DLL 清单，拒绝错配和 MD 的 schema 2 payload。
+ABI 19 的身份 flags 中 bit 1（static CRT）和 bit 2（mimalloc）均为 1。loader 只接受 Debug/MTd 或 Release/MT 的单 DLL 清单，拒绝错配和 MD 的 schema 2 payload。
 build ID 来自 native/RadRay（含 `modules/runtime/`）源码及配置/工具链指纹；DLL SHA-256 标识实际二进制，manifest SHA-256 标识内容快照，三者用途不同。
 哈希用于一致性检查，不等于来源认证。
 
@@ -166,9 +72,8 @@ loader 的选择顺序为：显式开发目录 `-Draynium.native.dir=...`，否�
 2. 将实际 payload 发布到游戏目录下 `.raynium/natives/windows-x86_64/<content-hash>/`。
 3. 检查已有完整副本，或写入独立 staging 目录，校验后再发布；多进程使用文件锁协调解包。
 4. 客户端初始化入口检查游戏 JVM native access 权限，将规范化的绝对路径转换为 Windows 扩展路径（含 UNC），使用 `SymbolLookup.libraryLookup(String, Arena)` 加载 bridge；保留长路径前缀，避免 Path 重解析后触发 Windows 路径长度限制。
-5. 先调用版本入口核对 ABI 18，再用 `rn_query_abi` 检查布局与构建身份。
-6. Fabric 入口调用 `rn_init_env` 创建环境；首次设备信息查询通过 `rn_create_runtime` 创建 RHI 设备/Direct 队列，窗口 surface 创建时建立 renderer 与交换链。
-   缺少 payload 或早期准备失败使 Fabric 初始化失败；帧准备失败关闭 renderer 并向上传播。
+5. 先调用版本入口核对 ABI 19，再用 `rn_query_abi` 检查布局与构建身份。
+6. 游戏后端执行 loadLibrary 时创建环境。createDevice 创建 runtime 与 renderer，createSurface 将交换链关联到 SDL 窗口。
 
 所有内容路径落在 loader 自己的根目录内，只接受固定 DLL 文件名并验证大小和哈希。已有损坏缓存直接报错，不覆盖、不删除；暂未实现旧缓存自动清理。
 

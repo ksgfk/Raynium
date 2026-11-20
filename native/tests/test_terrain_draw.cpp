@@ -288,7 +288,7 @@ TEST(TerrainMeshAnalysis, ReordersSevenGroupsWithoutChangingVertexBytesOrWithinG
     radray::vector<radray::byte> expected;
     for(uint32_t g=0;g<7;g++) { auto first=Quad(g); expected.insert(expected.end(),first.begin(),first.end()); if(g==0) expected.insert(expected.end(),q.begin(),q.end()); }
     EXPECT_EQ(bytes,expected);
-    rn_render_frame_desc frame{}; rn_instance instance{};
+    rn_terrain_view_desc frame{}; rn_instance instance{};
     frame.camera_fraction[0]=frame.camera_fraction[1]=frame.camera_fraction[2]=-2;
     EXPECT_EQ(TerrainVisibleMask(layout,{{},true},frame,{&instance,1}),0b1101010u);
     frame.camera_fraction[0]=3; frame.camera_fraction[1]=frame.camera_fraction[2]=2;
@@ -298,7 +298,7 @@ TEST(TerrainMeshAnalysis, OutlyingBoundsSparseGroupsAndEveryInstanceRemainConser
     auto source=Quad(0,32); TerrainMeshLayout layout; radray::vector<radray::byte> bytes;
     ASSERT_TRUE(AnalyzeAndWrite(source,RN_MATERIAL_CUTOUT,layout,bytes));
     EXPECT_EQ(layout.minimum[0],32); EXPECT_EQ(layout.maximum[0],32);
-    rn_render_frame_desc frame{}; const rn_instance instances[]{{{-31,0,0},1},{{-33,0,0},1}};
+    rn_terrain_view_desc frame{}; const rn_instance instances[]{{{-31,0,0},1},{{-33,0,0},1}};
     EXPECT_EQ(TerrainVisibleMask(layout,{{},true},frame,{instances,1}),0u);
     EXPECT_EQ(TerrainVisibleMask(layout,{{},true},frame,instances),1u);
     frame.camera_block[0]=INT32_MAX; rn_instance far{{INT32_MAX-32,0,0},1};
@@ -320,7 +320,7 @@ TEST(TerrainMeshAnalysis, NonplanarInconsistentDegenerateAndNonfiniteQuadsStayGe
     source=Quad(6); ASSERT_TRUE(AnalyzeAndWrite(source,RN_MATERIAL_OPAQUE,layout,bytes)); EXPECT_EQ(layout.groupBits[6],1);
     source=Quad(0); value=std::numeric_limits<float>::quiet_NaN(); std::memcpy(source.data(),&value,4);
     ASSERT_TRUE(AnalyzeAndWrite(source,RN_MATERIAL_OPAQUE,layout,bytes)); EXPECT_FALSE(layout.finiteBounds);
-    rn_render_frame_desc frame{}; rn_instance instance{};
+    rn_terrain_view_desc frame{}; rn_instance instance{};
     EXPECT_EQ(TerrainVisibleMask(layout,{{},true},frame,{&instance,1}),1u);
     EXPECT_TRUE(AnalyzeAndWrite({},RN_MATERIAL_OPAQUE,layout,bytes)); EXPECT_TRUE(layout.ranges.empty());
     EXPECT_FALSE(AnalyzeAndWrite(std::span{source}.first(111),RN_MATERIAL_OPAQUE,layout,bytes));
@@ -367,7 +367,7 @@ TEST(TerrainMeshAnalysis, SingleGroupNeedsNoRetainedWireframePermutation) {
     EXPECT_TRUE(WriteWireframeIndices({},layout,0));
 }
 TEST(TerrainMeshAnalysis, InverseProjectionEyeIncludesTranslationAndRejectsInvalidMatrices) {
-    rn_render_frame_desc frame{};
+    rn_terrain_view_desc frame{};
     for(uint32_t i=0;i<4;i++) frame.projection[i*5]=frame.view[i*5]=1;
     EXPECT_FALSE(ComputeTerrainEye(frame).valid);
     frame.projection[10]=frame.projection[15]=0; frame.projection[11]=-1; frame.projection[14]=1; frame.projection[12]=-2;

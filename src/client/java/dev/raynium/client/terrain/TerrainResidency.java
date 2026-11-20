@@ -93,10 +93,12 @@ final class TerrainResidency {
             }
         }
     }
-    void commit() {
+    void commit() { stageCommit().run(); }
+    Runnable stageCommit() {
+        var uploaded=new ObjectArrayList<MeshPayload>();
         for(int entry:staged) {
             var p=capture.payloads[entry]; p.uploadedEpoch=epoch; residentBySection.put(p.sectionKey,p); residentCount++;
-            for(var layer:p.layers) if(layer!=null) layer.vertices=null;
+            for(var layer:p.layers) if(layer!=null) uploaded.add(layer);
         }
         for(var update:indexUploads) update.section.uploadedIndices=update.snapshot;
         for(var p:evicting) {
@@ -107,6 +109,7 @@ final class TerrainResidency {
         if(!evicting.isEmpty()) {
             for(int i=pendingRemovals.size()-1;i>=0;i--) if(pendingRemovals.get(i).uploadedEpoch!=epoch) pendingRemovals.remove(i);
         }
+        return ()->{ for(var layer:uploaded) layer.vertices=null; };
     }
     int residentCount() { return residentCount; }
 }

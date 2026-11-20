@@ -87,23 +87,17 @@ Release 如只准备当前 core/render/runtime 所需集合及测试库，可向
 `--only fmt,magic_enum,eigen,sigslot,stdexec,spdlog,xxHash,yyjson,pugixml,mimalloc,Vulkan-Headers,volk,VulkanMemoryAllocator,DirectX-Headers,D3D12MemoryAllocator,googletest`。
 stage 所需许可证来自这些第三方源码目录，需保留源码。
 
-修改 `native/shaders/` 中的 HLSL 或共享 include 后显式准备锁定 DXC 并生成 shader pack：
+重编内置着色器时，先导出当前 MC 的管线，在仓库构建目录生成 HLSL 和反射目录，再生成双后端包。将示例中的 shader 路径换成对应客户端资源目录。
 
 ```powershell
+.\gradlew.bat exportVanillaPipelines
 python external/RadRay/tools/fetch_sdks.py restore --only radray_dxc
+python tools/convert_vanilla_shaders.py --catalog build/vanilla/pipelines.json --shaders <assets/minecraft/shaders> --glslang glslangValidator --spirv-cross spirv-cross --output build/vanilla/immediate
 python tools/compile_shader_pack.py
 python tools/shader_pack.py src/client/resources/assets/raynium/shaderpacks/default.rnsp
 ```
 
-生成器在 `build/shader-tools/Release/` 编译离线工具，输出并提交 `src/client/resources/assets/raynium/shaderpacks/default.rnsp`。
-默认编译八个地形、三个 GUI 及一个输出程序；`--program` 可显式指定完整程序集合，生成结果仍需满足全部必需条目；`--output` 指定输出，`--radray-source` 指定同一依赖工作树。
-`--clean` 重新配置并全量重编离线工具。原生 DLL 不包含编译器；格式、反射校验和来源规则见[Shader pack](../architecture/shader-pack.md)。
-`verifyShaderPack` 随 `processClientResources` 检查包和十二程序双后端条目；`testShaderPackTools` 随 `check` 运行容器拒绝测试。
-
-`.\gradlew.bat exportVanillaPipelines` 导出当前 MC 管线到 `build/vanilla/pipelines.json`，包含字段别名、OIT 变体和完整状态身份。
-离线转换工具 `python tools/convert_vanilla_shaders.py --help` 列出所需路径：目录清单、原版 `assets/minecraft/shaders`、glslang、SPIRV-Cross 和输出目录。
-工具生成构建产物及 `interfaces.json`，失败项保留诊断并返回非零。随后运行 `python tools/generate_scene_catalog.py --help` 对应的目录生成命令，更新 native 栅格描述与 Java 接口资源。
-默认 shader pack 包含转换程序；重编默认包前必须准备 `build/vanilla/shaders`，也可用 `compile_shader_pack.py --vanilla-shaders` 指定仓库内的转换目录。缺失或包含失败项时拒绝生成不完整的默认包。普通构建只使用已提交二进制。
+默认生成内置 .rnsp 和两份运行时 JSON。仓库随附生成结果。普通构建通过 verifyShaderPack 验证必需双后端程序，check 运行容器测试。用 `python tools/compile_shader_pack.py --install-tools build/shader-sdk` 另行准备资源包着色器编译工具，给游戏 JVM 设置 `-Draynium.shaderToolsDir=<工具目录>`。该工具目录需要 Python 可执行文件在 PATH 上。资产来源与失败处理见[Shader pack](../architecture/shader-pack.md)。
 
 MSVC 升级后，清理对应配置的 `build/native/` CMake 输出及旧 stage，再用依赖脚本的 `--clean` 重编相应静态库。
 删除前解析并核对目标在构建输出目录内；不删除源码、下载 SDK 或游戏数据。
@@ -135,19 +129,17 @@ CMake 子进程使用隐藏控制台，使本地化 MSVC `/showIncludes` 与 Nin
 
 `rhiBackend` 默认 `d3d12`，支持 `d3d12|vulkan`，传递给游戏 JVM 的 `raynium.rhi.backend`。
 正式启动器用 `-Draynium.rhi.backend=vulkan` 选择 Vulkan；不自动切换后端。
-客户端始终使用无原版 GPU 设备的接管路径，不需要选择 MC 图形后端。必须有 native payload；
-启动、纹理、GUI 和地形职责见[Minecraft 接入](../architecture/minecraft-integration.md)。
-`-PquickPlayWorld=<目录名>` 追加快速进世界参数。接管统计默认每 5 秒输出，可用 JVM 属性 `raynium.takeover.statsSeconds=0` 关闭。
-benchmark 活跃时自动启用 GPU timestamp。独立运行可显式给游戏 JVM 设置 `raynium.terrain.profile=true`，不提供对应 Gradle 属性转发。
+Raynium 后端通过游戏的 RenderPearl 入口创建窗口与设备。原版参考客户端沿用 Vulkan。使用 `-PquickPlayWorld=<目录名>` 可直接进入指定存档。benchmark 活跃时自动按批记录 GPU 时间。[Minecraft 接入](../architecture/minecraft-integration.md)
+
 `-PterrainSubmission=auto|direct|indirect` 对应 `raynium.terrain.submission`，在 renderer 创建时生效。
 Debug RHI/driver validation 会增加 CPU 开销，性能对比应记录配置且固定视点、RT 尺寸和场景。
 
 Debug 默认启用 RadRay RHI 检查。`rhiValidation=true`（JVM 属性 `raynium.rhi.validation`）
-显式启用 native 驱动诊断，默认 false。客户端初始化入口通过 `rn_init_env` 准备所选后端的环境，
-D3D12 在此创建 factory 并启用调试层，早于窗口创建；首次设备信息查询复用环境创建 runtime。
+显式启用 native 驱动诊断，默认 false。图形后端加载时通过 `rn_init_env` 准备环境，
+D3D12 在此创建 factory 并启用调试层，早于窗口创建；createDevice 复用环境创建 runtime。
 也可通过独立 `nativeTest -PrhiValidation=true` 验证。
 启动日志中的 `Raynium native manifest=` 与 `Raynium native library loaded:` 记录内容缓存和 ABI/build ID、RadRay 身份、dirty、配置、CRT 与工具链。
-Debug CRT 为 MTd，Release 为 MT；静态分配器随 bridge 加载与卸载。当前要求 ABI 18 和二十一个导出。
+Debug CRT 为 MTd，Release 为 MT；静态分配器随 bridge 加载与卸载。当前要求 ABI 19，导出清单见 `tools/native.py`。
 `Raynium runtime created` 表示设备与队列完成。GUI 和世界的实际显示须通过窗口观察；F2 使用原版文件写入保存 native 主颜色目标，全景入口通过独立尺寸离屏帧输出，纹理导出使用按子资源请求读回。
 
 ## 自动跑图与性能采样
@@ -166,9 +158,9 @@ python tools/benchmark.py --config tools/benchmark.example.json --profiler --tra
 `tools/validation/create_benchmark_scenes.py --world <存档> --options <选项文件> --output <构建目录>` 生成实体密集、粒子与透明密集、GUI/画中画的三种 renderer 配置，正式输入使用 1920×1080、32 区块、60 秒预热和 240 秒路线。`--smoke` 将预热与路线缩短到 2/8 秒，仅用于检查驱动和场景，不能作为性能验收结果。
 
 产物位于 outputDir 的独立时间目录，包含配置、构建/游戏日志、client-result.json、summary.json、frames.csv 与 gpu.csv；native 运行另保存 payload 清单，诊断按开关保存 session.tracy/session.jfr。脚本检查路线完成和资源关闭；诊断额外检查采集器退出和文件保存。
-`frames.csv` 的 native 计数包含向图声明的有效上传字节（不含 staging 对齐）、地形记录及调用、场景/GUI 调用、几何与后处理的 PSO/参数/顶点/索引绑定次数，以及几何池保留和已分配字节。已分配区间包含等待双槽退役的部分；容量不表示整个进程的显存用量。场景调用包含深度和内置后处理，绑定计数不包含最终输出及 OIT 全屏合成。调用计数在准备阶段产生，Record 不修改计数。原版对应列使用 -1 表示未采集；字节和计数的分位数保持原单位，不转换为毫秒。
+`frames.csv` 的 native 指标按本世界帧的实际批次汇总，包括上传字节、驻留几何记录与绘制、即时绘制和绑定数。即时绘制含 GUI 和后处理；独立的旧 GUI 计数列保留为零。原版缺少的 native 指标为 -1。`javaPrepareNs` 计量提交前封存瞬态内存的时间，`nativeCallNs` 计量 Java 进入命令带提交到该方法返回的时间。`renderWallNs` 涵盖整帧渲染。几何池容量和 Windows 进程显存分别采样。
 客户端以固定容量的原始数组记录测量区间，结束后写文件及计算最近秩 p50/p95/p99。clientFrameInterval 包括两次帧入口之间的客户端工作，renderWall 是 renderFrame 的 CPU 侧墙钟时间；它包含等待，不等于线程忙碌时间。Windows 线程 CPU 计数粒度较粗，只报告总量并保留原始列。native 另返回槽等待、资源准备、RDG RunFrame 和呈现时间；RDG RunFrame 包含建图、准备、录制及提交，不与参考 renderer 的不同职责阶段直接等同。
-GPU 样本均在完成后读取：native 使用整帧两个时间戳，参考使用原版 TimerQuery 并保留实际样本数量，不重复其滑动平均值。进程内存由 Windows 进程计数器轮询，summary 保存峰值工作集、提交量和采样私有内存；GPU Process Memory 计数器按客户端 PID 汇总适配器的专用、共享和提交量采样峰值，同时保存有效样本数；不可用时记录原因，不用零代替。它们是操作系统进程计数，与 native 几何池预留/已分配容量分别报告。客户端保存区间分配量及 GC 次数/时间。普通游戏帧不开启这些测量。
+GPU 样本均在完成后读取：native 按批测量并在上屏边界汇总，参考使用原版 TimerQuery 并保留实际样本数量，不重复其滑动平均值。进程内存由 Windows 进程计数器轮询，summary 保存峰值工作集、提交量和采样私有内存；GPU Process Memory 计数器按客户端 PID 汇总适配器的专用、共享和提交量采样峰值，同时保存有效样本数；不可用时记录原因，不用零代替。它们是操作系统进程计数，与 native 几何池预留/已分配容量分别报告。客户端保存区间分配量及 GC 次数/时间。普通游戏帧不开启这些测量。
 
 ## Tracy 与整段客户端采样
 
@@ -195,7 +187,7 @@ tracy-capture.exe -a 127.0.0.1 -o C:/captures/session.tracy
 ```
 
 Release 默认关闭 RadRay RHI wrapper 检查；rhiValidation=false 关闭 native 驱动诊断。
-ABI 参数检查及资源寿命保护仍然执行。benchmark 活跃时开启整帧测量；只有 profilerEnabled 诊断运行或游戏 JVM 设置 `raynium.terrain.profile=true` 才开启分阶段统计及 Tracy GPU plot。
+ABI 参数检查及资源寿命保护始终执行。benchmark 记录每批 GPU 时间，在窗口输出边界归并。
 该数值覆盖 native 命令的 timestamp 区间，在回收槽时发布，不是 MC 全帧 GPU 耗时，也不是发布时那一帧的即时耗时。
 
 `Raynium.Present` 覆盖窗口帧的槽回收、驻留/GUI 准备、Acquire、RDG 提交和 Present。
@@ -212,7 +204,7 @@ Tracy frame mark 在一次 native Render/Present 调用结束时发出；间隔�
 客户端是 on-demand，因此 native 库加载前、采集器连接前的工作不在 Tracy 中；它也不提供 Java 调用栈。
 
 `-PjfrFile=<路径>` 在游戏 JVM 启动时启用 `profile` JFR，正常退出时保存，磁盘缓冲上限 1 GiB；超出上限会淘汰较早数据。
-JFR 包含 JVM 执行采样、GC 等事件；`dev.raynium.TerrainFrame` 按原始序号记录 Java 准备和 presentPrepared/FFM 包络。FFM 包络包含 native Present，不能再次与 native 时间相加。`dev.raynium.ClientFrame` 记录每次正常返回的 `Minecraft.renderFrame` 耗时及是否加载世界。
+JFR 包含 JVM 执行采样、GC 等事件；`dev.raynium.TerrainFrame` 按实际提交序号汇总批内各视图的采集、驻留准备及 rn_submit_frame 的 FFM 时长。FFM 包络包含 native Present，不能再次与 native 时间相加。`dev.raynium.ClientFrame` 记录每次正常返回的 `Minecraft.renderFrame` 耗时及是否加载世界。
 未启用 JFR 事件时不创建逐帧 event。异常退出的未完成帧不会提交该 event；强制结束进程也不保证完成最终文件保存。
 完整游戏的 Java 与 native 分析分别读取 JFR 和 Tracy，不能将采样次数直接当作精确函数耗时。
 
@@ -252,27 +244,19 @@ Raynium 自身无需动态 VC++ CRT 或额外 mimalloc DLL；系统与显卡驱�
 .\gradlew.bat nativeTest --tests "*.NativeRuntimeTest"
 ```
 
-| 测试类 | 内容 | 任务 |
-| --- | --- | --- |
-| `TerrainSubmissionTest` / `NativeRuntimeBackendTest` | 提交模式及后端解析 | `test` |
-| `BenchmarkRouteTest` / `CpuLightmapTest` | 路线插值、边界和 CPU 光照图规则 | `test` |
-| `NativeManifestTest` / `NativeBindingsTest` / `BuiltinShaderPackTest` | ABI 18、旧 DLL 在解析新导出前拒绝、单 DLL 清单、资源来源及拒绝路径 | `test` |
-| `TerrainCaptureTest` / `TerrainResidencyTest` | 引用释放、预算、整 section 回退、提交后释放、新 epoch 需要新 payload、透明索引版本 | `test` |
-| `NativeFrameBufferTest` / `NativeGuiFrameBufferTest` | ABI 18 布局、数组复位、扩容/对齐、实例与 GUI 编排 | `test` |
-| `VanillaPipelineCatalogTest` / `TakeoverGuiTest` | 同名不同宏、OIT 清单、稳定身份和未知管线拒绝 | `test` |
-| `TextureClearTest` | 单通道、RGBA、半精度及浮点颜色清色布局 | `test` |
-| `NativeAbiTest` | 参数、reserved 拒绝、状态码、输出保护及空句柄销毁 | `nativeTest` |
-| `NativeRuntimeTest` / `NativeShaderPackTest` | 双后端设备生命周期、线程/owner、超过 Windows MAX_PATH 的含空格及中文缓存路径加载、shader pack 及提交策略拒绝 | `nativeTest` |
-| `NativeSwapchainTest` | 双后端呈现、尺寸/模式、隐藏/最小化/零客户区及失败后关闭重建 | `nativeTest` |
-| `NativeTextureTest` | direct/indirect、RGBA8/R8/mip/padding 区域上传、共享索引扩容、透明排序、OIT/普通透明、十二种 GUI 提交、双槽资源退役、透明顶点连续替换并保留索引、在途材质纹理删除和替换、退役后准备失败关闭、连续局部上传、上传后删除目标、跨页增长、epoch 与销毁编号拒绝 | `nativeTest` |
-| `NativeTextureTest` 的纹理扩展用例 | 数组层、立方体、浮点颜色、深度附件创建和上传后删除 | `nativeTest` |
-| `NativeCaptureTest` | 双后端颜色通道、上下方向、非对齐行距、隐藏帧、上一帧来源、resize 来源尺寸、读回编号消费、未读结果及准备失败后关闭、世界/GUI 采集时点、请求后删除纹理的 mip/层读回、六个离屏帧与正常窗口输出切换、显式 Tracy 缩略图的尺寸、方向和跨槽 resize | `nativeTest` |
-| `NativePipelineCatalogTest` | 枚举转换后的原版变体并跨双槽提交，覆盖程序接口、PSO、绑定及附件；原版 bounds cull 由 native OIT 路径替代，不通过普通场景 pass 提交；零几何布局检查不代替视觉验收 | `nativeTest` |
-| `NativeSceneTest` | 原版转换程序、非零几何和常量偏移、双槽重复绘制、立方体采样与背面剔除、像素尺寸点展开、无地形动态 OIT、独立水体遮罩、优化掉的常量/加法混合透射率纹理组及局部纹理更新、第一人称/覆盖层深度合成、完整 mip view/LOD/各向异性及在途删除、GUI 特殊场景交错顺序、R8_SINT 云面与云 OIT、透视反向深度下云与动态 OIT 的交叉遮挡、透视距离下信标雾颜色、atlas 局部缓存、内置后处理/GUI 模糊分界及实体轮廓像素断言 | `nativeTest` |
-| `SceneUniformsTest` | 堆上暂存矩阵的列主序、偏移及边界 | `test` |
-| `SceneGeometryTest` | 持久 quad 与三角扇的原版索引顺序和非法顶点数 | `test` |
+| 测试入口 | 核对内容 |
+| --- | --- |
+| `test` | 管线身份、驻留预算与采用、渲染参数编排、后端选择、路线、清单与着色器包。 |
+| `NativeAbiTest`、`NativeRuntimeTest`、`NativeShaderPackTest` | ABI 拒绝路径、设备与线程所有权、双后端包和退出顺序。 |
+| `NativeCommandTapeTest` | 离屏与上屏提交隔离、顺序复制、映射刷新、深度行距、时间戳、首次部分访问与保活。 |
+| `NativeRenderPearlTest` | 从游戏前端编译管线并绘制，验证线程交接、Push Constant、实际颜色和材质。 |
+| `NativeTextureTest`、`NativeCaptureTest`、`NativeSwapchainTest` | 子资源、捕获格式及缓冲容量、尺寸变更与窗口状态。 |
+| `NativeWireframeTest` | direct/indirect 实际像素、面掩码、双槽退役及跨页几何。 |
+| `vulkanSurfaceTest` | 真实 Vulkan 设备上的 WSI 恢复、设备丢失后的表面释放与交换链销毁、两批在途时的紧邻字节与查询槽发布。 |
 
 `test` 排除 `native` 标签，随标准 `check/build` 运行，不加载 DLL、不构建 native；FFM 缓冲测试使用 JVM native access。`nativeTest` 是标准 Gradle `Test` 任务，只包含 `native` 标签；它复用 `testClasses`，依赖 `nativeStage`，在构建/stage 完成后启动测试 JVM。依赖仍须显式准备，执行需要 Windows x64 和 D3D12/Vulkan 驱动；缺少设备或 DLL 时明确失败，不跳过。
+
+`nativeTest` 也会执行 `vulkanSurfaceTest`。该任务在独立测试 JVM 中启用测试专用 Vulkan 层，把指定错误送入原生提交路径。测试层使用受管依赖中的 Vulkan-Headers 构建，产物位于 `build/native/vulkan-surface-test/`。阶段快照与分发 JAR 均只收录 `rayniumruntime.dll`。
 
 专用参数及帧上传/录制单元测试是可选 CMake 目标。已准备匹配 CRT 的 GTest 后，在 x64 开发终端执行：
 
@@ -282,7 +266,7 @@ cmake --build build/native/windows-x64-msvc-mtd/Debug --target test_raynium_terr
 ctest --test-dir build/native/windows-x64-msvc-mtd/Debug --output-on-failure
 ```
 
-该目标覆盖七组重排/紧凑掩码、实际 AABB、非有限值、投影/视点、多实例并集，以及稳定排序、完整 VB/IB/绑定身份、状态回收、独立参数展开、合并边界、计数溢出与模式选择。帧上传/录制用例覆盖最终区间索引生成、非零切片偏移、常量绑定复用、direct/indirect 拆分与 GUI 空绘制；场景 probe 验证顶点、实例和 16 位索引的完整切片地址。probe 检查录制没有映射、Flush、设备访问或参数写入，不需要 GPU。
+该目标覆盖网格分组及剔除、稳定排序、VB/IB 切片、direct/indirect 参数拆分、上传和帧录制。fixture 持有观测数据，可在无 GPU 条件下运行。
 
 通用 runtime 测试位于 RadRay 的 `modules/runtime/tests/`，由 `test_radray_runtime` / GTest 注册，
 直接链接 `RadRay::runtime`，不包含 MC bridge。在已准备依赖并完成 configure 的 RadRay checkout 执行：

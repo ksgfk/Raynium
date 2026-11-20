@@ -102,38 +102,5 @@ TEST(TerrainFrameRecord, DirectAndIndirectConsumePreparedListsWithoutResourceMut
     EXPECT_EQ(lists.arguments.size(),6u); EXPECT_EQ(lists.batches[0].first,1u);
     ExpectReadOnly(buffer,*probe);
 }
-TEST(TerrainFrameRecord, GuiUsesSliceBasesAndSkipsEmptyDrawsWithoutResourceMutation) {
-    BufferProbe buffer; GuiFrameSlot frame; auto parameters=radray::make_unique<ParametersProbe>(); auto* probe=parameters.get();
-    frame.passParameters[0]=probe;
-    frame.draws.push_back({.desc={.pipeline=RN_GUI_COLOR,.first_vertex=4,.vertex_count=8},.scissor={0,0,640,360}});
-    frame.draws.push_back({.desc={.pipeline=RN_GUI_COLOR,.vertex_count=4},.scissor={0,0,0,360}});
-    const radray::array<GraphicsPipelineState*,12> pipelines{};
-    EncoderProbe encoder; ASSERT_TRUE(RecordGuiDraws(frame,pipelines,{&buffer,4096,288},{&buffer,8192,72},encoder));
-    ASSERT_EQ(encoder.direct.size(),1u); EXPECT_EQ(encoder.direct[0].IndexCount,12u); EXPECT_EQ(encoder.direct[0].FirstIndex,6u);
-    EXPECT_EQ(encoder.vertices[0].View.Offset,4096u); EXPECT_EQ(encoder.indices[0].Offset,8192u);
-    ExpectReadOnly(buffer,*probe);
-    EncoderProbe empty; ASSERT_TRUE(RecordGuiDraws(frame,pipelines,{},{},empty)); EXPECT_TRUE(empty.direct.empty()); EXPECT_TRUE(empty.vertices.empty());
-}
-TEST(SceneFrameRecord, UsesAllSliceOffsetsAndKeepsResourcesReadOnly) {
-    BufferProbe buffer; ScenePipeline pipeline; SceneDraw draw;
-    auto parameters=radray::make_unique<ParametersProbe>(); auto* probe=parameters.get();
-    draw.pipeline=&pipeline;
-    draw.desc.index_count=6; draw.desc.index_stride=2; draw.desc.instance_count=3;
-    draw.vertices={&buffer,768,144}; draw.indices={&buffer,2048,12}; draw.instances={&buffer,4096,48};
-    const radray::array<SceneFrameSlot::PhaseDraw,1> draws{{{&draw,{},{probe,nullptr}}}};
-    EncoderProbe encoder; ASSERT_TRUE(RecordSceneDraws(draws,encoder));
-    ASSERT_EQ(encoder.direct.size(),1u); EXPECT_EQ(encoder.direct[0].IndexCount,6u); EXPECT_EQ(encoder.direct[0].InstanceCount,3u);
-    ASSERT_EQ(encoder.vertices.size(),2u); EXPECT_EQ(encoder.vertices[0].View.Offset,768u); EXPECT_EQ(encoder.vertices[0].View.Size,144u);
-    EXPECT_EQ(encoder.vertices[1].View.Offset,4096u); EXPECT_EQ(encoder.vertices[1].View.Size,48u);
-    EXPECT_EQ(encoder.indices[0].Offset,2048u); EXPECT_EQ(encoder.indices[0].Stride,2u);
-    ExpectReadOnly(buffer,*probe);
-}
-TEST(SceneFrameRecord, PostAndDepthEncodeOnlyPreparedScreenDraws) {
-    BufferProbe buffer; ScenePipeline pipeline; SceneDraw draw; draw.pipeline=&pipeline;
-    auto parameters=radray::make_unique<ParametersProbe>(); auto* probe=parameters.get();
-    EncoderProbe encoder; ASSERT_TRUE(RecordSceneScreen(draw,{probe,nullptr},128,64,encoder));
-    EXPECT_EQ(encoder.parameterBinds,1u); EXPECT_TRUE(encoder.vertices.empty()); EXPECT_TRUE(encoder.indices.empty());
-    ExpectReadOnly(buffer,*probe);
-}
 }
 }

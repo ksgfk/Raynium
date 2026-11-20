@@ -5,7 +5,6 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from convert_vanilla_shaders import expand, raw_block, resource_declaration, link_varyings
-from generate_post_catalog import pack_constants
 
 
 class VanillaShaderLayoutTest(unittest.TestCase):
@@ -27,19 +26,17 @@ class VanillaShaderLayoutTest(unittest.TestCase):
         self.assertIn('stage_output.uv = uv;', result)
         self.assertNotIn('TEXCOORD', link_varyings(vertex, 'void main() {}'))
 
-    def test_post_constants_preserve_std140_padding_between_color_vectors(self):
-        values=pack_constants([{'type':'vec3','value':[.1,.2,.3]}, {'type':'vec3','value':[.4,.5,.6]}, {'type':'float','value':7}])
-        self.assertEqual([.1,.2,.3,0,.4,.5,.6,7],values[:8])
-        blur=pack_constants([{'type':'vec2','value':[1,0]}, {'type':'float','value':2}])
-        self.assertEqual([1,0,2,0],blur[:4])
-        with self.assertRaises(ValueError): pack_constants([{'type':'mat4','value':[0]*16}])
     def test_cloud_texels_preserve_the_byte_format_and_reject_unknown_buffers(self):
-        source=resource_declaration('Buffer<int4> CloudFaces : register(t5, space1);','t',5)
+        source=resource_declaration('Buffer<int4> CloudFaces : register(t5, space1);','t',5,{'CloudFaces':'R8_SINT'})
         self.assertIn('vk::image_format("r8i")',source)
         self.assertIn('vk::binding(10, 1)',source)
         self.assertIn('#ifdef __spirv__',source)
         with self.assertRaises(ValueError):
-            resource_declaration('Buffer<int4> Unknown : register(t0, space1);','t',0)
+            resource_declaration('Buffer<int4> Unknown : register(t0, space1);','t',0,{})
+        self.assertIn('"rg32ui"', resource_declaration('Buffer<uint4> Faces : register(t0, space1);','t',0,{'Faces':'RG32_UINT'}))
+        with self.assertRaises(ValueError):
+            resource_declaration('Buffer<float4> Faces : register(t0, space1);','t',0,{'Faces':'RG32_UINT'})
+
     def test_std140_vec3_and_trailing_scalar_share_the_original_register(self):
         source, size = raw_block('Globals', '''
             int3 CameraBlockPos : packoffset(c0);

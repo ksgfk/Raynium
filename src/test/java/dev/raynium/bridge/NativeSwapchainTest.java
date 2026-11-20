@@ -63,41 +63,35 @@ class NativeSwapchainTest {
                     assertThrows(IllegalStateException.class,renderer::close);
                     assertThrows(IllegalStateException.class,()->renderer.createSwapchain(window.hwnd,640,360,NativeSwapchain.PresentMode.FIFO));
                     var wrongThread=new AtomicReference<Throwable>();
-                    var worker=new Thread(()->{try { renderer.present(chain,NativeTestSupport.solidFrame(1)); } catch(Throwable failure) {wrongThread.set(failure);} });
+                    var worker=new Thread(()->{try { NativeTestSupport.blit(renderer,chain); } catch(Throwable failure) {wrongThread.set(failure);} });
                     worker.start(); worker.join(); assertInstanceOf(IllegalStateException.class,wrongThread.get());
-                    long sequence=0; int presented=0; long started=System.nanoTime();
+                    int presented=0; long started=System.nanoTime();
                     int attempts=0;
                     while(presented<120 && attempts++<240) {
                         window.pump();
-                        if(renderer.present(chain,NativeTestSupport.solidFrame(++sequence))==NativeSwapchain.Presentation.PRESENTED) presented++;
+                        if(NativeTestSupport.blit(renderer,chain)==0) presented++;
                     }
                     assertEquals(120,presented);
-                    System.out.printf("Swapchain backend=%s requested=IMMEDIATE attempts=%d presented=%d fps=%.1f acquireTimeouts=%d%n",
-                        backend,attempts,presented,presented*1e9/(System.nanoTime()-started),chain.acquireTimeouts());
+                    System.out.printf("Swapchain backend=%s requested=IMMEDIATE attempts=%d presented=%d fps=%.1f%n",
+                        backend,attempts,presented,presented*1e9/(System.nanoTime()-started));
                     for(var mode:NativeSwapchain.PresentMode.values()) for(int[] size:new int[][]{{640,360},{1281,721},{1920,1080}}) {
                         assertTrue(SDLVideo.SDL_SetWindowSize(window.handle,size[0],size[1])); window.pump();
                         chain.resize(size[0],size[1],mode);
-                        assertEquals(NativeSwapchain.Presentation.PRESENTED,renderer.present(chain,NativeTestSupport.solidFrame(++sequence)));
+                        assertEquals(0,NativeTestSupport.blit(renderer,chain));
                     }
                     assertTrue(SDLVideo.SDL_HideWindow(window.handle)); window.pump();
-                    assertEquals(NativeSwapchain.Presentation.SKIPPED,renderer.present(chain,NativeTestSupport.solidFrame(++sequence)));
+                    assertEquals(1,NativeTestSupport.blit(renderer,chain));
                     assertTrue(SDLVideo.SDL_ShowWindow(window.handle)); assertTrue(SDLVideo.SDL_MinimizeWindow(window.handle));
                     assertTrue(SDLVideo.SDL_SyncWindow(window.handle)); window.pump();
-                    assertEquals(NativeSwapchain.Presentation.SKIPPED,renderer.present(chain,NativeTestSupport.solidFrame(++sequence)));
+                    assertEquals(1,NativeTestSupport.blit(renderer,chain));
                     assertTrue(SDLVideo.SDL_RestoreWindow(window.handle)); assertTrue(SDLVideo.SDL_SyncWindow(window.handle)); window.pump();
-                    assertEquals(NativeSwapchain.Presentation.PRESENTED,renderer.present(chain,NativeTestSupport.solidFrame(++sequence)));
+                    assertEquals(0,NativeTestSupport.blit(renderer,chain));
                     window.zeroClientArea();
-                    assertEquals(NativeSwapchain.Presentation.SKIPPED,renderer.present(chain,NativeTestSupport.solidFrame(++sequence)));
+                    assertEquals(1,NativeTestSupport.blit(renderer,chain));
                     assertTrue(SDLVideo.SDL_SetWindowSize(window.handle,640,360));
                     assertTrue(SDLVideo.SDL_SyncWindow(window.handle)); window.pump();
                     chain.resize(640,360,NativeSwapchain.PresentMode.IMMEDIATE);
-                    assertEquals(NativeSwapchain.Presentation.PRESENTED,renderer.present(chain,NativeTestSupport.solidFrame(++sequence)));
-                    var invalid=NativeTestSupport.solidFrame(sequence+1);
-                    invalid.instances=List.of(new NativeRenderer.Instance(0,0,0,1));
-                    invalid.visible=List.of(new NativeRenderer.Visible(999,1,0,0,1));
-                    byte[] before=chain.result.toArray(java.lang.foreign.ValueLayout.JAVA_BYTE);
-                    assertThrows(IllegalStateException.class,()->renderer.present(chain,invalid));
-                    assertArrayEquals(before,chain.result.toArray(java.lang.foreign.ValueLayout.JAVA_BYTE));
+                    assertEquals(0,NativeTestSupport.blit(renderer,chain));
                 }
             }
         }

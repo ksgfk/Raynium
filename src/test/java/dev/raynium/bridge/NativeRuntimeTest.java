@@ -116,7 +116,7 @@ class NativeRuntimeTest {
             for(int i=0;i<2;i++) try(var runtime=environment.createRuntime();
                 var renderer=runtime.createRenderer(NativeTestSupport.shaders());
                 var chain=renderer.createSwapchain(window.hwnd,640,360,NativeSwapchain.PresentMode.IMMEDIATE)) {
-                assertEquals(NativeSwapchain.Presentation.PRESENTED,renderer.present(chain,NativeTestSupport.solidFrame(1)));
+                assertEquals(0,NativeTestSupport.blit(renderer,chain));
             }
         }
     }

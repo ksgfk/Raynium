@@ -19,16 +19,15 @@ public:
     static bool Create(radray::DeviceContext&,const rn_swapchain_desc&,radray::unique_ptr<Swapchain>&);
     bool Resize(const rn_swapchain_desc&);
     bool IsPresentable() const noexcept;
-    bool Validate(uint64_t sequence) const;
+    bool Validate() const;
     radray::gpu::SwapChain& Chain() const noexcept { return *_chain; }
-    void Commit(uint64_t sequence) noexcept { _submitted=sequence; }
     uint64_t Timeouts() const noexcept { return _timeouts; }
     void TimedOut() noexcept { ++_timeouts; }
 private:
     Swapchain(radray::unique_ptr<radray::gpu::SwapChain> chain,uint64_t hwnd)
         :_chain(std::move(chain)),_hwnd(hwnd) {}
     radray::unique_ptr<radray::gpu::SwapChain> _chain;
-    uint64_t _hwnd{},_submitted{},_timeouts{};
+    uint64_t _hwnd{},_timeouts{};
 };
 
 

@@ -81,7 +81,7 @@ class NativeShaderPackTest {
         try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var runtime=environment.createRuntime()) {
             for(String program:new String[]{"terrain","terrain_cutout","terrain_translucent","terrain_oit_bounds",
-                "terrain_oit_transmittance","terrain_oit_accumulate","oit_bounds_cull","oit_composite","gui_color","gui_textured","gui_text","output"}) {
+                "terrain_oit_transmittance","terrain_oit_accumulate","output"}) {
                 for(boolean missing:new boolean[]{true,false}) {
                     byte[] data=bytes(); var b=ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
                     int record=record(data,program,backend==NativeEnvironment.Backend.VULKAN?1:0);

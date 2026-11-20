@@ -29,7 +29,7 @@ public final class VisualValidation {
     private final java.util.Set<com.mojang.renderpearl.api.pipeline.RenderPipeline> selectedPipelines=
         java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
     private final java.util.Set<String> pictureInPictureTypes=new java.util.TreeSet<>();
-    private final dev.raynium.client.takeover.scene.VanillaPipelineCatalog catalog=dev.raynium.client.takeover.scene.VanillaPipelineCatalog.create();
+    private final dev.raynium.client.renderpearl.VanillaPipelineCatalog catalog=dev.raynium.client.renderpearl.VanillaPipelineCatalog.create();
     private VisualValidation(Path config) throws Exception {
         directory=config.toAbsolutePath().getParent();
         var root=JsonParser.parseString(Files.readString(config)).getAsJsonObject(); scenes=root.getAsJsonArray("scenes");

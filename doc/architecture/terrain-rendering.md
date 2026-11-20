@@ -1,11 +1,10 @@
 > - 适用: 修改三层地形采集、native 光栅、上传纹理及其生命周期
 > - 权威: 本文记录地形采集、绘制与上传协议；设备与交换链见 native-runtime，通用加载见 interop
-> - 锚点: `native/src/renderer.cpp`, `native/src/solid_pipeline.cpp`, `native/src/mesh_pass.cpp`, `native/shaders/terrain.hlsl`, `src/client/java/dev/raynium/client/terrain/*.java`, `native/include/raynium/bridge.h`
+> - 锚点: `native/src/renderer.cpp`, `native/src/terrain_feature.cpp`, `native/src/mesh_pass.cpp`, `native/shaders/terrain.hlsl`, `src/client/java/dev/raynium/client/terrain/*.java`, `native/include/raynium/bridge.h`
 
 # 区块地形渲染
 
-接管 MC 26.3 的 SOLID/CUTOUT/TRANSLUCENT，并在地形之后绘制 GUI，输出为全分辨率 BGRA8 窗口。
-透明模式跟随当前帧；普通透明与八系数小波 OIT 可切换。实体、粒子、天空、天气等能力边界见[Minecraft 接入](minecraft-integration.md)。
+原版渲染图决定区块地形的附件、阶段和绘制顺序。Raynium 保留 SOLID、CUTOUT、TRANSLUCENT 的区块几何，复用同一套模型、排序和重载输入。
 
 ## 采集与采用
 
@@ -19,6 +18,8 @@ TerrainCapture 复用扁平数组，采集 section 原点、淡入、层就绪�
 普通透明保持原版反向 section 顺序；其他层使用距离桶及状态排序。
 缩减、帧重置、失效和关闭时释放快照引用；关闭的 section 进入延迟回收队列。
 
+同批的每个视图独占一份 `NativeFrameBuffer`。`rn_submit_frame` 返回后，原生帧槽已接管本次提交所需的数据，编码器回收 Java 堆外暂存供后续视图复用。关闭编码器会释放这些暂存。
+
 ## 驻留与顶点释放
 
 Java TerrainResidency 保留 8 MiB 软预算，按整个 section 的三层及初始透明索引原子采用。
@@ -31,7 +32,7 @@ RN_STATUS_OK（含跳过呈现、需要重建）后 commit 驻留/索引/移除�
 仅交换链 resize 保留 renderer、驻留几何和纹理。
 关卡或图集几何失效沿用 MC 26.3 LevelRenderer.invalidateCompiledGeometry，由注入在新 SectionCompiler 创建前推进 epoch。
 显式 renderer 替换也触发同一重新编译流程；旧 epoch payload 被忽略，已释放的顶点不重传。
-GUI 帧也同步采集 epoch，因此退出世界后的下一帧会清空 Java 驻留并让 Native 退役旧几何。
+下次地形准备遇到新 epoch 时重建驻留状态。
 
 ## Native 分组与保守剔除
 
@@ -45,46 +46,19 @@ SOLID/CUTOUT 在准备期检查精确轴向平面及两个三角形绕序，记�
 线框使用完整请求面组交给 GPU 背面剔除；CPU 仍可跳过全部面组均不可见的网格。
 关闭线框、替换或删除网格及 epoch 切换都通过 FrameSlot 退役索引子分配，材质变化时重绑对应状态。
 
-Native 每帧一次求逆 projection × view，变换 (0,0,1,0) 得到有效视点偏移。
+Native 按视图求逆 projection × view，变换 (0,0,1,0) 得到有效视点偏移。
 不可逆、非有限或 abs(w)<=1e-8 时关闭面组剔除。相对相机坐标先做整数减法，保留大世界精度。
 按实际 AABB 及 0.001 容差计算轴向组；general 始终保留。多实例取可见组并集，再与显式请求掩码和有效元素位求交。
 计算得到零掩码正常跳过绘制；显式非法掩码失败。Native 寿命与批次规则见[Native runtime](native-runtime.md)。
 
 ## 绘制与 OIT
 
-renderer 创建时由 `raynium.terrain.submission=auto|direct|indirect` 选择专用提交模式，默认 auto。设备条件、错误和帧槽契约见 [Native runtime](native-runtime.md#提交模式与参数)。
+`TerrainAnchorMixin` 从原版 `renderLayers` 调用捕获当前三层或 OIT 阶段以及该次绑定的 atlas、lightmap、mip 范围、采样器和 OIT 视图。命令引用本批地形视图的索引。native 在当前 raster pass 声明对应缓冲与纹理访问，按原版附件与 scissor 内联录制。光栅 Pass 只按原版指定的 load/clear 操作开始一次。
 
-[Shader pack](shader-pack.md) 提供离线 DXIL/SPIR-V 程序。Group 0 绑定本帧常量，Group 1 的持久材质参数集共享图集、lightmap 与设备采样器。Group 2 绑定当前 OIT 阶段输入。
-驻留绘制模板不保存瞬态 view。Frame 与 OIT 参数集在 RDG Prepare 按内容从 FrameSlot 获取，命令重置后由槽池统一解绑，再回收图及视图；Record 只编码已准备数据。
-模式切换选择已有 pass，不重新加载包、创建材质或上传顶点。仅复用 MC 可见列表，没有额外 GPU 可见性或异步计算队列。
-
-先绘制 SOLID，再绘制 CUTOUT。二者使用反向 Z（clear=0、GreaterEqual）、背面剔除和深度写入；CUTOUT 丢弃 alpha<0.5 的片元。
-图集过滤、RGSS、各向异性、lightmap、雾与淡入按原版 terrain shader 执行。
-普通透明丢弃 alpha<0.1，RGB 使用 SrcAlpha/OneMinusSrcAlpha，alpha 使用 One/OneMinusSrcAlpha，GreaterEqual 且写深度。
-此 pass 使用 DepthFirst 和唯一顺序键，禁用元素合并；其它地形 pass 使用专用参数构建器的连续面组合并。
-
-改进透明度使用 MC 26.3 LevelRenderer、RenderPipelines 与内置 oit shader 的八系数小波规则：
-
-| 阶段 | 附件与行为 |
-| --- | --- |
-| 深度范围 | RGBA32_FLOAT，清为 (-Float.MAX_VALUE,0,0,0)，MAX 混合记录范围、最近与近不透明深度 |
-| 范围裁剪 | 复制到另一张 RGBA32_FLOAT，再按近不透明深度裁剪范围并更新深度附件 |
-| 透射率 | 两张清零 RGBA16_FLOAT，加法累积八个小波系数 |
-| 颜色累积 | 清零 RGBA16_FLOAT，根据透射率累积预乘颜色，在预乘空间施雾 |
-| 合成 | 覆盖率归一化后以预乘 alpha 混合到输出，并写最近深度 |
-
-三次透明几何阶段共用一次 StateFirst 稳定排序生成的参数数组和批次表，各自绑定管线及 OIT 参数；变换、采样及 alpha 阈值相同，前两次省略 lightmap 和颜色计算。
-无可见透明地形时跳过整条透明路径。OIT 中间附件每槽约 56 字节/像素，由 RDG 瞬态池按尺寸复用。
-世界帧设置 Y 反射标志；native 对裁剪坐标和正面绕序一起反射，保持各层的剔除语义。
+SOLID 与 CUTOUT 使用反向 Z，普通透明按原版可见顺序并使用透明索引。启用改进透明度后，原版控制范围、裁剪、透射率、颜色累积和合成的顺序与附件。专用地形程序只承担带区块几何的阶段；全屏裁剪与合成经即时绘制路径执行。绘制完地形后，下一条即时 draw 依自己的快照恢复管线和资源状态。
 
 ## 纹理、ABI 与测试
 
-TakeoverAtlas 在 CPU 拼接图集与 mip/padding，动画只上传变化区域；CPU lightmap 使用 MC 26.3 规则计算。
-ABI 18 在一次 present_frame 传递网格、透明索引、可见项、全局纹理参数、相机和 GUI。结构及指针借用见[互操作与加载](interop.md#abi-18-布局)。
+原版维护并更新图集、光照和采样器。每次准备产生独立的视图描述，上传数据随批次保活直至 `rn_submit_frame` 返回。非零提交序号触发驻留提交回调。资源重载后新 epoch 重新采集编译产物。[互操作与加载](interop.md#提交布局)
 
-benchmark 活跃时启用整帧 GPU timestamp；profilerEnabled 诊断运行或 JVM 属性 raynium.terrain.profile=true 另启用阶段计时。阶段统计每 120 样本输出，并向 Tracy 发布 GPU 毫秒样本。
-JFR TerrainFrame/ClientFrame 记录 Java 准备、FFM 包络及客户端帧；操作入口见[构建与测试](../guide/build-test.md)。
-C++ 测试覆盖网格重排、AABB、非有限值、视点/多实例剔除及排序参数；Java 测试覆盖 FFM、预算、回退和释放。
-nativeTest 覆盖双后端交换链提交、纹理上传、OIT/普通透明切换、GUI 与窗口状态；NativeCaptureTest 检查主颜色目标的像素、方向及 resize。
-NativeWireframeTest 对比原始顺序与分组后的共享边像素，覆盖 direct/indirect、显式面掩码、扩容、材质重绑、双槽退役及 epoch；CPU 测试遍历全部 128 种面掩码。
-原版游戏截图对照由[视觉验证工具](../guide/build-test.md#java-构建与运行)生成，采集完成与差异审查分别记录。
+CPU 用例覆盖网格、面组和索引排序；双后端原生测试检查 direct/indirect 线框、显式面掩码、缓存与跨页扩容。基准与视觉工具分别通过世界帧计数及实际截图检验游戏路径。[构建与测试](../guide/build-test.md)

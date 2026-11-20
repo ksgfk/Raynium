@@ -31,8 +31,8 @@ bool AnalyzeTerrainMesh(std::span<const radray::byte>,rn_material_mode,TerrainMe
 bool WriteQuadIndices(std::span<radray::byte>,uint32_t vertexCount) noexcept;
 bool WriteWireframeIndices(std::span<radray::byte>,const TerrainMeshLayout&,uint32_t mask) noexcept;
 bool WriteLineIndices(std::span<radray::byte>,uint32_t vertexCount) noexcept;
-TerrainEye ComputeTerrainEye(const rn_render_frame_desc&) noexcept;
-uint32_t TerrainVisibleMask(const TerrainMeshLayout&,const TerrainEye&,const rn_render_frame_desc&,
+TerrainEye ComputeTerrainEye(const rn_terrain_view_desc&) noexcept;
+uint32_t TerrainVisibleMask(const TerrainMeshLayout&,const TerrainEye&,const rn_terrain_view_desc&,
                             std::span<const rn_instance>) noexcept;
 struct TerrainDrawTemplate {
     radray::gpu::VertexBufferView vertices{};

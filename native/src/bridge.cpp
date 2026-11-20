@@ -46,10 +46,9 @@ static_assert(alignof(rn_runtime_desc) == 4);
 static_assert(!std::is_default_constructible_v<radray::DeviceContext>);
 static_assert(!std::is_default_constructible_v<radray::Environment>);
 static_assert(sizeof(rn_swapchain_desc)==24 && offsetof(rn_swapchain_desc,hwnd)==16);
-static_assert(sizeof(rn_frame_metrics)==96 && sizeof(rn_present_result)==160 && offsetof(rn_present_result,metrics)==64 && offsetof(rn_present_result,acquire_timeouts)==8);
+static_assert(sizeof(rn_wait_result)==16 && offsetof(rn_wait_result,flags)==8);
 static_assert(sizeof(rn_capture_info)==32 && offsetof(rn_capture_info,byte_size)==16);
-static_assert(sizeof(rn_capture_request)==32 && offsetof(rn_capture_request,id)==8);
-static_assert(sizeof(rn_device_info)==488 && offsetof(rn_device_info,name)==40 && offsetof(rn_device_info,driver)==360);
+static_assert(sizeof(rn_device_info)==592 && offsetof(rn_device_info,max_buffer_size)==488 && offsetof(rn_device_info,timestamp_period_ns)==584 && offsetof(rn_device_info,name)==40 && offsetof(rn_device_info,driver)==360);
 static_assert(sizeof(rn_uploaded_texture_desc)==32 && offsetof(rn_uploaded_texture_desc,array_layers)==24);
 static_assert(sizeof(rn_texture_upload_desc)==56 && offsetof(rn_texture_upload_desc,pixels)==32 && offsetof(rn_texture_upload_desc,byte_size)==40 && offsetof(rn_texture_upload_desc,array_layer)==48);
 static_assert(sizeof(rn_renderer_desc)==24 && offsetof(rn_renderer_desc,shader_pack)==8 && offsetof(rn_renderer_desc,shader_pack_size)==16);
@@ -59,18 +58,12 @@ static_assert(offsetof(rn_mesh_update,vertex_count)==16 && offsetof(rn_mesh_upda
 static_assert(sizeof(rn_visible_item)==24);
 static_assert(offsetof(rn_visible_item,mesh)==0 && offsetof(rn_visible_item,element_mask)==8);
 static_assert(offsetof(rn_visible_item,sort_key)==12 && offsetof(rn_visible_item,first_instance)==16 && offsetof(rn_visible_item,instance_count)==20);
-static_assert(sizeof(rn_render_frame_desc)==408);
-static_assert(sizeof(rn_scene_target)==32);
-static_assert(sizeof(rn_scene_blob)==16 && sizeof(rn_scene_binding)==48 && sizeof(rn_scene_draw)==88);
-static_assert(offsetof(rn_render_frame_desc,scene_blobs)==328 && offsetof(rn_render_frame_desc,scene_blob_count)==352);
-static_assert(sizeof(rn_gui_vertex)==24 && sizeof(rn_gui_draw)==56 && sizeof(rn_texture_sampling)==16);
-static_assert(offsetof(rn_render_frame_desc,gui_vertices)==280 && offsetof(rn_render_frame_desc,gui_draws)==288);
-static_assert(offsetof(rn_render_frame_desc,gui_vertex_count)==296 && offsetof(rn_render_frame_desc,clear_color)==312);
-static_assert(offsetof(rn_render_frame_desc,projection)==96);
-static_assert(offsetof(rn_render_frame_desc,indices)==24);
-static_assert(offsetof(rn_render_frame_desc,index_count)==64);
-static_assert(offsetof(rn_render_frame_desc,camera_block)==224);
-static_assert(offsetof(rn_render_frame_desc,fog_distances)==264);
+static_assert(sizeof(rn_terrain_view_desc)==280 && sizeof(rn_texture_sampling)==16);
+static_assert(offsetof(rn_terrain_view_desc,projection)==96);
+static_assert(offsetof(rn_terrain_view_desc,indices)==24);
+static_assert(offsetof(rn_terrain_view_desc,index_count)==64);
+static_assert(offsetof(rn_terrain_view_desc,camera_block)==224);
+static_assert(offsetof(rn_terrain_view_desc,fog_distances)==264);
 static_assert(sizeof(rn_instance)==16);
 static_assert(!std::is_default_constructible_v<raynium::Renderer>);
 
@@ -242,7 +235,7 @@ rn_status rn_query_device_info(rn_runtime* runtime,rn_device_info* info,uint32_t
         }
         rn_device_info value{};
         raynium::QueryDeviceInfo(*runtime->runtime,value);
-        if(runtime->renderer && runtime->renderer->renderer->SupportsWireframe()) value.flags|=1;
+        if(runtime->renderer && runtime->renderer->renderer->SupportsWireframe()) value.flags|=RN_DEVICE_WIREFRAME;
         *info=value; return true;
     });
 }
@@ -260,6 +253,7 @@ rn_status rn_create_swapchain(rn_renderer* renderer,const rn_swapchain_desc* des
 rn_status rn_resize_swapchain(rn_swapchain* chain,const rn_swapchain_desc* desc) noexcept {
     return Invoke("rn_resize_swapchain",[&] {
         if(!SwapchainOwner(chain)) return false;
+        if(chain->owner->renderer->IsTerminal()) return false;
         if(!desc) { RADRAY_ERR_LOG("Swapchain resize descriptor is null"); return false; }
         chain->owner->renderer->Finish();
         chain->owner->renderer->Runtime().GetQueue().Wait();
@@ -276,41 +270,12 @@ rn_status rn_destroy_swapchain(rn_swapchain* chain) noexcept {
         chain->owner->swapchain=nullptr; delete chain; return true;
     });
 }
-rn_status rn_present_frame(rn_renderer* renderer,rn_swapchain* chain,const rn_render_frame_desc* frame,rn_present_result* result) noexcept {
-    return Invoke("rn_present_frame",[&] {
-        if(!Owner(renderer)) return false;
-        if(!chain || chain!=renderer->swapchain || !frame || !result || result->struct_size!=sizeof(*result)) {
-            RADRAY_ERR_LOG("Invalid present frame, result layout or swapchain owner"); return false;
-        }
-        rn_present_result value{};
-        if(!renderer->renderer->Present(*chain->swapchain,*frame,value)) return false;
-        *result=value; return true;
-    });
-}
 rn_status rn_create_texture(rn_renderer* renderer,const rn_uploaded_texture_desc* desc) noexcept {
     return Invoke("rn_create_texture",[&] {
         if(!Owner(renderer)) return false;
         if(!desc) { RADRAY_ERR_LOG("Texture descriptor is null"); return false; }
         return renderer->renderer->CreateTexture(*desc);
     });
-}
-static_assert(sizeof(rn_scene_buffer_desc)==16 && sizeof(rn_scene_buffer_upload_desc)==32);
-rn_status rn_create_scene_buffer(rn_renderer* renderer,const rn_scene_buffer_desc* desc) noexcept {
-    return Invoke("rn_create_scene_buffer",[&] {
-        if(!Owner(renderer)) return false;
-        if(!desc) { RADRAY_ERR_LOG("Scene buffer descriptor is null"); return false; }
-        return renderer->renderer->CreateSceneBuffer(*desc);
-    });
-}
-rn_status rn_upload_scene_buffer(rn_renderer* renderer,const rn_scene_buffer_upload_desc* desc) noexcept {
-    return Invoke("rn_upload_scene_buffer",[&] {
-        if(!Owner(renderer)) return false;
-        if(!desc) { RADRAY_ERR_LOG("Scene buffer upload descriptor is null"); return false; }
-        return renderer->renderer->UploadSceneBuffer(*desc);
-    });
-}
-rn_status rn_destroy_scene_buffer(rn_renderer* renderer,uint32_t id) noexcept {
-    return Invoke("rn_destroy_scene_buffer",[&] { return Owner(renderer) && renderer->renderer->DestroySceneBuffer(id); });
 }
 rn_status rn_upload_texture(rn_renderer* renderer,const rn_texture_upload_desc* desc) noexcept {
     return Invoke("rn_upload_texture",[&] {
@@ -322,6 +287,52 @@ rn_status rn_upload_texture(rn_renderer* renderer,const rn_texture_upload_desc* 
 rn_status rn_destroy_texture(rn_renderer* renderer,uint32_t id) noexcept {
     return Invoke("rn_destroy_texture",[&] { return Owner(renderer) && renderer->renderer->DestroyTexture(id); });
 }
+rn_status rn_create_query_pool(rn_renderer* renderer,uint32_t count,uint32_t* id) noexcept {
+    return Invoke("rn_create_query_pool",[&] { return Owner(renderer) && id && renderer->renderer->CreateQueryPool(count,*id); });
+}
+rn_status rn_destroy_query_pool(rn_renderer* renderer,uint32_t id) noexcept {
+    return Invoke("rn_destroy_query_pool",[&] { return Owner(renderer) && renderer->renderer->DestroyQueryPool(id); });
+}
+rn_status rn_sync_query_pool(rn_renderer* renderer,uint32_t id,uint32_t first,uint32_t count,rn_query_sample* samples,rn_wait_result* result) noexcept {
+    return Invoke("rn_sync_query_pool",[&] {
+        if(!result) return false;
+        *result={};
+        return Owner(renderer) && (!count || samples) && renderer->renderer->SyncQueries(id,first,{samples,count},*result);
+    });
+}
+rn_status rn_register_pipeline(rn_renderer* renderer,const rn_pipeline_desc* desc,uint32_t* id) noexcept {
+    return Invoke("rn_register_pipeline",[&] { return Owner(renderer) && desc && id && renderer->renderer->RegisterPipeline(*desc,*id); });
+}
+rn_status rn_destroy_pipeline(rn_renderer* renderer,uint32_t id) noexcept {
+    return Invoke("rn_destroy_pipeline",[&] { return Owner(renderer) && renderer->renderer->DestroyPipeline(id); });
+}
+rn_status rn_create_buffer(rn_renderer* renderer,const rn_buffer_desc* desc,rn_buffer_result* result) noexcept {
+    return Invoke("rn_create_buffer",[&] {
+        if(!Owner(renderer) || !desc || !result) return false;
+        *result={};
+        return renderer->renderer->CreateBuffer(*desc,*result);
+    });
+}
+rn_status rn_destroy_buffer(rn_renderer* renderer,uint32_t id) noexcept {
+    return Invoke("rn_destroy_buffer",[&] { return Owner(renderer) && renderer->renderer->DestroyBuffer(id); });
+}
+static_assert(sizeof(rn_buffer_desc)==24 && sizeof(rn_buffer_result)==16 && sizeof(rn_mapped_range)==24);
+static_assert(sizeof(rn_batch_desc)==80 && sizeof(rn_submit_result)==160);
+rn_status rn_submit_frame(rn_renderer* renderer,const rn_batch_desc* batch,rn_submit_result* result) noexcept {
+    return Invoke("rn_submit_frame",[&] {
+        if(!result) return false;
+        *result={0,RN_PRESENT_NONE,0};
+        if(!Owner(renderer) || !batch || (batch->surface && batch->surface!=renderer->swapchain)) return false;
+        return renderer->renderer->SubmitFrame(*batch,batch->surface?batch->surface->swapchain.get():nullptr,*result);
+    });
+}
+rn_status rn_wait_submit(rn_renderer* renderer,uint64_t sequence,int64_t timeout_ns,rn_wait_result* result) noexcept {
+    return Invoke("rn_wait_submit",[&] {
+        if(!result) { RADRAY_ERR_LOG("Missing submission wait result"); return false; }
+        *result={};
+        return Owner(renderer) && renderer->renderer->WaitSubmit(sequence,timeout_ns,*result);
+    });
+}
 rn_status rn_poll_capture(rn_renderer* renderer,uint64_t sequence,rn_capture_info* info,void* pixels,uint64_t capacity) noexcept {
     return Invoke("rn_poll_capture",[&] {
         if(!Owner(renderer)) return false;
@@ -331,11 +342,5 @@ rn_status rn_poll_capture(rn_renderer* renderer,uint64_t sequence,rn_capture_inf
         rn_capture_info result{};
         if(!renderer->renderer->PollCapture(sequence,result,pixels,capacity)) return false;
         *info=result; return true;
-    });
-}
-rn_status rn_request_capture(rn_renderer* renderer,const rn_capture_request* request) noexcept {
-    return Invoke("rn_request_capture",[&] {
-        if(!Owner(renderer) || !request) { RADRAY_ERR_LOG("Invalid capture request or renderer"); return false; }
-        return renderer->renderer->RequestCapture(*request);
     });
 }

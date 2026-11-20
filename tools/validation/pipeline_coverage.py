@@ -10,29 +10,21 @@ sys.path.insert(0, str(ROOT / 'tools'))
 from shader_pack import verify_shader_pack
 
 JAVA = 'src/client/java/dev/raynium/client/'
-ROUTES = {
-    'features': ([JAVA+'takeover/scene/SceneFeatures.java', JAVA+'mixin/takeover/FeatureDispatcherSceneMixin.java'], ['native/src/scene_pass.cpp'], None),
-    'particles': ([JAVA+'takeover/scene/SceneFeatures.java'], ['native/src/scene_pass.cpp'], None),
-    'atlas': ([JAVA+'takeover/TakeoverAtlas.java'], ['native/src/texture_registry.cpp'], []),
-    'lightmap': ([JAVA+'takeover/CpuLightmap.java'], ['native/src/texture_registry.cpp'], []),
-    'terrain': ([JAVA+'terrain/TakeoverTerrain.java'], ['native/src/terrain_draw.cpp', 'native/src/mesh_pass.cpp'],
-                ['terrain','terrain_cutout','terrain_translucent','terrain_oit_bounds','terrain_oit_transmittance','terrain_oit_accumulate']),
-    'gui': ([JAVA+'takeover/TakeoverGui.java'], ['native/src/gui_pass.cpp'], ['gui_color','gui_textured','gui_text']),
-    'sky': ([JAVA+'mixin/takeover/SkySceneMixin.java'], ['native/src/scene_pass.cpp'], None),
-    'clouds': ([JAVA+'mixin/takeover/CloudSceneMixin.java'], ['native/src/scene_pass.cpp'], None),
-    'weather': ([JAVA+'mixin/takeover/WeatherSceneMixin.java'], ['native/src/scene_pass.cpp'], None),
-    'border': ([JAVA+'mixin/takeover/WorldBorderSceneMixin.java'], ['native/src/scene_pass.cpp'], None),
-    'panorama': ([JAVA+'takeover/scene/ScenePanorama.java'], ['native/src/scene_pass.cpp'], None),
-    'depth': ([], ['native/src/scene_pass.cpp', 'native/src/solid_pipeline.cpp'], None),
-    'bounds': ([], ['native/src/mesh_pass.cpp', 'native/src/solid_pipeline.cpp'], ['oit_bounds_cull']),
-    'composite': ([], ['native/src/mesh_pass.cpp', 'native/src/solid_pipeline.cpp'], ['oit_composite']),
-    'outline': ([JAVA+'takeover/scene/SceneFeatures.java'], ['native/src/scene_post.inc'], None),
-    'tracy': ([JAVA+'takeover/TakeoverTracyImages.java'], ['native/src/scene_post.inc', 'native/src/solid_pipeline.cpp'], None),
-}
+IMMEDIATE_JAVA = [JAVA+'renderpearl/RayniumRenderPassBackend.java', JAVA+'renderpearl/RayniumPrograms.java']
+IMMEDIATE_NATIVE = ['native/src/immediate_pass.cpp', 'native/src/immediate_draw.cpp']
+TERRAIN_JAVA = [JAVA+'mixin/TerrainAnchorMixin.java', JAVA+'terrain/RetainedTerrain.java']
+TERRAIN_NATIVE = ['native/src/terrain_feature.cpp', 'native/src/terrain_draw.cpp']
+TERRAIN_PROGRAMS = ['terrain','terrain_cutout','terrain_translucent','terrain_oit_bounds','terrain_oit_transmittance','terrain_oit_accumulate']
 
 
 def read(path):
     return json.loads(path.read_text(encoding='utf-8-sig'))
+
+
+def require_sources(paths):
+    for path in paths:
+        if not (ROOT / path).is_file():
+            raise ValueError('Missing implementation: ' + path)
 
 
 def references(source):
@@ -88,12 +80,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--catalog', type=Path, default=ROOT/'build/vanilla/pipelines.json')
     parser.add_argument('--minecraft-source', type=Path, required=True)
-    parser.add_argument('--shaders', type=Path, default=ROOT/'build/vanilla/shaders')
+    parser.add_argument('--shaders', type=Path, default=ROOT/'build/vanilla/immediate')
     parser.add_argument('--captures', nargs='*', type=Path, default=[])
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     catalog = read(args.catalog)
-    interfaces = {p['id']: p for p in read(ROOT/'src/client/resources/assets/raynium/scene-interfaces.json')}
+    interfaces = {p['id']: p for p in read(args.shaders/'interfaces.json')}
     packed = verify_shader_pack((ROOT/'src/client/resources/assets/raynium/shaderpacks/default.rnsp').read_bytes())
     consumers = references(args.minecraft_source)
     selections, effects = observed(args.captures)
@@ -102,29 +94,30 @@ def main():
         name = entry['names'][0].split('/')[0]
         origins = consumers.get(name, [])
         kind = route(name, origins)
-        adapters, native, override = ROUTES[kind]
+        adapters, native = (TERRAIN_JAVA, TERRAIN_NATIVE) if kind == "terrain" else (IMMEDIATE_JAVA, IMMEDIATE_NATIVE)
         interface = interfaces[entry['id']]
         if interface['names'] != entry['names']:
             raise ValueError('Catalog/interface identity mismatch: '+name)
-        programs = [interface['program']] if override is None else override
+        programs = TERRAIN_PROGRAMS if kind == 'terrain' else [interface['program']]
         for program in programs + [interface['program']]:
             for backend in (0, 1):
                 if (program.encode(), backend) not in packed:
                     raise ValueError('Missing packed backend artifact: '+program)
-        for path in adapters + native:
-            if not (ROOT/path).is_file(): raise ValueError('Missing implementation: '+path)
+        require_sources(adapters + native)
         rows.append({**entry, 'minecraftConsumers': origins, 'adapter': kind, 'javaSources': adapters, 'nativeSources': native,
-                     'execution': 'cpu-generated-upload' if kind in ('atlas','lightmap') else 'native-raster',
+                     'execution': 'native-raster',
                      'convertedProgram': interface['program'], 'executedProgramFamily': programs,
                      'selectedInCaptures': selections.get(entry['id'], []), 'visualAcceptance': 'requires-review'})
     posts = []
     for chain in read(args.shaders/'post-chains.json'):
-        posts.append({**chain, 'javaSource': JAVA+'takeover/scene/ScenePost.java', 'nativeSource': 'native/src/scene_post.inc',
+        java_source, native_source = IMMEDIATE_JAVA[0], IMMEDIATE_NATIVE[0]
+        require_sources((java_source, native_source))
+        posts.append({**chain, 'javaSource': java_source, 'nativeSource': native_source,
                       'requestedInCaptures': effects.get('minecraft:'+chain['name'], []), 'visualAcceptance': 'requires-review'})
     report = {'minecraft': '26.3', 'status': 'implementation-inventory-with-selection-evidence',
-              'notes': ['Selection proves that a pipeline was chosen, not that its pixels were reviewed.',
-                        'CPU equivalents and dedicated native terrain/GUI/composite programs do not select the converted vanilla shader.',
-                        'The same feature adapter serves world, first-person and offscreen GUI draws.'],
+              'notes': ['Selection and image review are recorded independently.',
+                        'Retained terrain binds its stage-specific program at the vanilla terrain draw.',
+                        'RenderPearl replays all other pipelines, including atlas animation, lightmaps and post effects.'],
               'pipelines': rows, 'postEffects': posts}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')

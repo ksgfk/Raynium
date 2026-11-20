@@ -154,18 +154,26 @@ endif()
 
 add_library(rayniumruntime SHARED
     src/bridge.cpp include/raynium/bridge.h include/raynium/exception.h
+    src/surface_submission.cpp include/raynium/surface_submission.h
+    src/buffer_registry.cpp include/raynium/buffer_registry.h
+    src/frame_readbacks.cpp include/raynium/frame_readbacks.h
+    src/timestamp_queries.cpp include/raynium/timestamp_queries.h
+    src/terrain_feature.cpp
+    src/immediate_draw.cpp
+    src/immediate_pipeline.cpp
+    src/immediate_pass.cpp include/raynium/immediate_pass.h
+    src/command_tape.cpp include/raynium/command_tape.h
     src/renderer.cpp include/raynium/renderer.h
     src/terrain_residency.cpp include/raynium/terrain_residency.h
     src/terrain_draw.cpp include/raynium/terrain_draw.h
-    src/solid_pipeline.cpp include/raynium/solid_pipeline.h
+    src/modular_frame_pipeline.cpp include/raynium/modular_frame_pipeline.h
     src/frame_upload.cpp include/raynium/frame_upload.h
     src/frame_record.cpp include/raynium/frame_record.h
     src/render_resources.cpp include/raynium/render_resources.h
     src/device_info.cpp
     src/texture_registry.cpp include/raynium/texture_registry.h
-    src/gui_pass.cpp include/raynium/gui_pass.h
     src/output_pass.cpp include/raynium/output_pass.h
-    src/scene_pass.cpp include/raynium/scene_pass.h src/scene_catalog.inc
+    src/render_program.cpp include/raynium/render_program.h
     src/mesh_pass.cpp include/raynium/mesh_pass.h
     src/shader_pack.cpp include/raynium/shader_pack.h)
 target_compile_features(rayniumruntime PRIVATE cxx_std_20)
@@ -188,7 +196,7 @@ if(RAYNIUM_BUILD_TESTS)
     find_package(GTest CONFIG REQUIRED)
     enable_testing()
     include(GoogleTest)
-    add_executable(test_raynium_terrain tests/test_terrain_draw.cpp tests/test_frame_record.cpp src/terrain_draw.cpp src/frame_upload.cpp src/frame_record.cpp)
+    add_executable(test_raynium_terrain tests/test_terrain_draw.cpp tests/test_frame_record.cpp tests/test_surface_submission.cpp src/surface_submission.cpp src/terrain_draw.cpp src/frame_upload.cpp src/frame_record.cpp)
     target_compile_features(test_raynium_terrain PRIVATE cxx_std_20)
     target_include_directories(test_raynium_terrain PRIVATE include)
     target_compile_options(test_raynium_terrain PRIVATE /W4 /permissive- /Zc:preprocessor /utf-8)

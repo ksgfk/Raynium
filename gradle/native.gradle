@@ -72,14 +72,40 @@ tasks.register('verifyNativePackage', Exec) {
     commandLine nativePython, nativeScript, 'verify', '--input-jar', nativeJar.get().asFile.absolutePath
 }
 
+def faultLayerDir = layout.buildDirectory.dir("native/vulkan-surface-test/${nativeConfig}").get().asFile
+def buildFaultLayer = registerNative('buildVulkanSurfaceTestLayer', 'vulkan-test-layer', nativeConfig)
+buildFaultLayer.configure {
+    inputs.files('native/tests/vulkan_surface_layer.cpp', 'native/radray.lock.json', nativeScript)
+    inputs.dir(new File(file(radraySource ?: 'external/RadRay'), 'third_party/Vulkan-Headers/include/vulkan'))
+    outputs.files(new File(faultLayerDir, 'surface_test.dll'), new File(faultLayerDir, 'surface_test.json'))
+}
+def faultTest = tasks.register('vulkanSurfaceTest', Test) {
+    group = 'verification'
+    description = 'Inject driver results beneath the staged Vulkan renderer and exercise the complete surface lifecycle'
+    dependsOn tasks.named('testClasses'), stageNative, buildFaultLayer
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform { includeTags 'vulkan-surface-fault' }
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+    systemProperty 'junit.jupiter.execution.parallel.enabled', 'false'
+    systemProperty 'raynium.rhi.validation', 'true'
+    systemProperty 'raynium.native.dir', layout.buildDirectory.dir("native/stage/windows-x86_64/${nativeConfig}").get().asFile.absolutePath
+    systemProperty 'raynium.test.surfaceLayer', new File(faultLayerDir, 'surface_test.dll').absolutePath
+    environment 'VK_ADD_LAYER_PATH', faultLayerDir.absolutePath
+    environment 'VK_INSTANCE_LAYERS', 'VK_LAYER_RAYNIUM_surface_test'
+    outputs.upToDateWhen { false }
+    outputs.cacheIf { false }
+}
 tasks.register('nativeTest', Test) {
     group = 'verification'
     description = 'Run JUnit tests against the staged DLL and real D3D12/Vulkan devices (requires GPU drivers)'
     dependsOn tasks.named('testClasses'), stageNative
+    dependsOn faultTest
     shouldRunAfter tasks.named('test')
     testClassesDirs = sourceSets.test.output.classesDirs
     classpath = sourceSets.test.runtimeClasspath
-    useJUnitPlatform { includeTags 'native' }
+    useJUnitPlatform { includeTags 'native'; excludeTags 'vulkan-surface-fault' }
     javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
     jvmArgs '--enable-native-access=ALL-UNNAMED'
     maxParallelForks = 1

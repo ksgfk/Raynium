@@ -47,11 +47,11 @@ bool ResolveMesh(TerrainMesh& mesh,TerrainState& state) {
 TerrainResidency::TerrainResidency(radray::DeviceContext& device,radray::unique_ptr<radray::VertexBufferPool> vertices,
     radray::unique_ptr<radray::IndexBufferPool> indices)
     :_device(device),_vertices(std::move(vertices)),_indices(std::move(indices)) { _state.meshes.reserve(4096); }
-bool TerrainResidency::PrepareFrame(const TextureRegistry& uploaded,const rn_render_frame_desc& f,
+bool TerrainResidency::PrepareFrame(const TextureRegistry& uploaded,const rn_terrain_view_desc& f,
     const MeshPassResources& resources,SlotUploads slot,TerrainFrame& frame) {
     RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.Prepare");
 
-    if(f.struct_size!=sizeof(f) || (f.flags&~511u) || ((f.flags&RN_FRAME_CAPTURE_PREVIOUS) && !(f.flags&RN_FRAME_CAPTURE)) || !f.epoch || f.epoch<_state.epoch ||
+    if(f.struct_size!=sizeof(f) || (f.flags&~(RN_FRAME_RGSS|RN_FRAME_IMPROVED_TRANSPARENCY|RN_FRAME_WIREFRAME)) || !f.epoch || f.epoch<_state.epoch ||
        !Array(f.indices,f.index_count,65536) || !Array(f.meshes,f.mesh_count,65536) ||
        !Array(f.removed_meshes,f.removed_mesh_count) || !Array(f.visible,f.visible_count) || !Array(f.instances,f.instance_count))
         { RADRAY_ERR_LOG("Invalid frame layout, epoch or array: sequence={} epoch={} resident_epoch={}",f.output_sequence,f.epoch,_state.epoch); return false; }
@@ -59,7 +59,6 @@ bool TerrainResidency::PrepareFrame(const TextureRegistry& uploaded,const rn_ren
     frame.parameters=f; frame.lists=&slot.lists; frame.geometry=&slot.geometry; frame.instances={f.instances,f.instance_count};
     auto& scalar=frame.parameters;
     scalar.indices=nullptr; scalar.meshes=nullptr; scalar.removed_meshes=nullptr; scalar.visible=nullptr; scalar.instances=nullptr;
-    scalar.gui_vertices=nullptr; scalar.gui_draws=nullptr;
     if(f.epoch!=state.epoch) {
         for(auto& [id,owner]:state.meshes) slot.frame.Emplace<TerrainMesh>(std::move(owner));
         if(state.quadIndices) slot.frame.Emplace<radray::IndexBufferSubAllocation>(std::move(state.quadIndices));

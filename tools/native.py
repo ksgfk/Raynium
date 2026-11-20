@@ -14,7 +14,7 @@ import zipfile
 from shader_pack import RESOURCE_PATH, verify_shader_pack
 
 
-ABI_VERSION = 18
+ABI_VERSION = 19
 
 
 def digest(path):
@@ -91,10 +91,10 @@ def checked_dependencies(dll, environment):
     actual = set(re.findall(r'\b(rn_\w+)\b', exports))
     expected = {'rn_get_abi_version', 'rn_query_abi', 'rn_init_env', 'rn_destroy_env',
                 'rn_create_runtime', 'rn_destroy_runtime', 'rn_create_renderer', 'rn_destroy_renderer',
-                'rn_query_device_info',
-                'rn_create_swapchain', 'rn_resize_swapchain', 'rn_destroy_swapchain', 'rn_present_frame',
-                'rn_create_texture', 'rn_upload_texture', 'rn_destroy_texture', 'rn_poll_capture', 'rn_request_capture',
-                'rn_create_scene_buffer', 'rn_upload_scene_buffer', 'rn_destroy_scene_buffer'}
+                'rn_register_pipeline', 'rn_destroy_pipeline', 'rn_create_buffer', 'rn_destroy_buffer', 'rn_create_query_pool', 'rn_destroy_query_pool', 'rn_sync_query_pool',
+                'rn_query_device_info', 'rn_wait_submit', 'rn_submit_frame',
+                'rn_create_swapchain', 'rn_resize_swapchain', 'rn_destroy_swapchain',
+                'rn_create_texture', 'rn_upload_texture', 'rn_destroy_texture', 'rn_poll_capture'}
     if actual != expected:
         raise RuntimeError(f'ABI {ABI_VERSION} export mismatch: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}')
     text = run(['dumpbin', '/nologo', '/dependents', str(dll)], dll.parent, environment, True).stdout
@@ -285,9 +285,23 @@ def verify_package(path):
     print(f'Package structure and hashes OK: {path.name}')
 
 
+def build_vulkan_test_layer(root, radray, config, environment):
+    output = root / 'build/native/vulkan-surface-test' / config
+    output.mkdir(parents=True, exist_ok=True)
+    headers = radray / 'third_party/Vulkan-Headers/include'
+    run(['cl', '/nologo', '/std:c++20', '/EHsc', '/MT', '/LD', '/I' + str(headers),
+         str(root / 'native/tests/vulkan_surface_layer.cpp'), '/link', '/OUT:surface_test.dll', '/EXPORT:vkNegotiateLoaderLayerInterfaceVersion'], output, environment)
+    write_json(output / 'surface_test.json', {
+        'file_format_version': '1.2.0',
+        'layer': {'name': 'VK_LAYER_RAYNIUM_surface_test', 'type': 'GLOBAL',
+                  'library_path': str(output / 'surface_test.dll'), 'api_version': '1.3.0',
+                  'implementation_version': '1', 'description': 'Raynium surface test fixture'},
+    })
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('configure', 'build', 'stage', 'package', 'verify'))
+    parser.add_argument('command', choices=('configure', 'build', 'stage', 'package', 'verify', 'vulkan-test-layer'))
     parser.add_argument('--config', choices=('Debug', 'Release'), default='Debug')
     parser.add_argument('--parallel', type=int, default=8)
     parser.add_argument('--radray-source', type=Path)
@@ -300,7 +314,9 @@ def main():
     binary = root / 'build/native' / ('windows-x64-msvc-mtd' if args.config == 'Debug' else 'windows-x64-msvc-staticcrt') / args.config
     if args.parallel < 1:
         parser.error('--parallel must be positive')
-    if args.command == 'package':
+    if args.command == 'vulkan-test-layer':
+        build_vulkan_test_layer(root, radray, args.config, msvc_environment())
+    elif args.command == 'package':
         if args.input_jar is None or args.output_jar is None:
             parser.error('package requires --input-jar and --output-jar')
         package_mod(root, args.input_jar, args.output_jar)

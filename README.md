@@ -2,8 +2,7 @@
 
 基于 Fabric 的 Minecraft 客户端模组，包含 Java FFM/C ABI 桥接与使用 RadRay RHI 的 native 设备会话。
 
-当前在 Windows 以 D3D12/Vulkan 独立设备接管地形、实体、环境、第一人称和 GUI 渲染，不创建原版 GPU 设备。
-Java 25 保留原版模型、动画、文字和节点排序，通过 FFM 与 ABI 18 提交数据；native 使用 RadRay 帧调度和 Render Graph 组织 direct/indirect 地形、动态场景、离屏 GUI、透明及后处理合成。
+Windows 后端将原版 RenderPearl 命令录入同一个批次，通过 FFM 交给 RadRay 在 D3D12 或 Vulkan 上执行。区块地形使用驻留几何，在原版光栅 Pass 的绘制点内联执行。实体、GUI、光照和后处理沿用游戏的管线及附件。
 已实现的适配、资源包支持、截图与生命周期边界见[架构地图](doc/architecture/overview.md)和[Minecraft 接入](doc/architecture/minecraft-integration.md)。
 
 ## 开发入口

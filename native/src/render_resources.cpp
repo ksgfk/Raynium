@@ -60,9 +60,9 @@ bool Swapchain::IsPresentable() const noexcept {
     const auto window=reinterpret_cast<HWND>(_hwnd); RECT bounds{};
     return IsWindowVisible(window) && !IsIconic(window) && GetClientRect(window,&bounds) && bounds.right>bounds.left && bounds.bottom>bounds.top;
 }
-bool Swapchain::Validate(uint64_t sequence) const {
-    if(!IsWindow(reinterpret_cast<HWND>(_hwnd)) || !sequence || sequence==UINT64_MAX || sequence!=_submitted+1) {
-        RADRAY_ERR_LOG("Invalid swapchain HWND or output sequence (must start at 1 and increase by one)"); return false;
+bool Swapchain::Validate() const {
+    if(!IsWindow(reinterpret_cast<HWND>(_hwnd))) {
+        RADRAY_ERR_LOG("Invalid swapchain HWND"); return false;
     }
     return true;
 }

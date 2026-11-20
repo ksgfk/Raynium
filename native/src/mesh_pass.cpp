@@ -10,7 +10,8 @@ namespace raynium {
 using namespace radray::gpu;
 namespace {
 radray::unique_ptr<GraphicsPipelineState> CreateTerrainPipeline(Device& device,const ShaderProgram& program,
-    Shader* vs,Shader* ps,PipelineLayout* layout,uint32_t i,TextureFormat format,bool flipY=false,bool wireframe=false) {
+    Shader* vs,Shader* ps,PipelineLayout* layout,uint32_t i,TextureFormat format,bool wireframe=false,
+    radray::Nullable<PipelineCache*> cache=nullptr) {
     const VertexBufferLayout layouts[]{{0,28,VertexStepMode::Vertex},{1,16,VertexStepMode::Instance}};
     const VertexAttribute attributes[]{
         {0,0,"POSITION",0,VertexFormat::FLOAT32X3,0},{0,12,"COLOR",0,VertexFormat::UNORM8X4,1},
@@ -18,31 +19,31 @@ radray::unique_ptr<GraphicsPipelineState> CreateTerrainPipeline(Device& device,c
         {1,0,"TEXCOORD",2,VertexFormat::SINT32X3,4},{1,12,"TEXCOORD",3,VertexFormat::FLOAT32,5}};
     const VertexAttribute alphaAttributes[]{attributes[0],attributes[1],attributes[2],
         {1,0,"TEXCOORD",2,VertexFormat::SINT32X3,3}};
-    const bool screen=i>=OitCull,alpha=i==OitBounds || i==OitTransmittance;
-    auto primitive=PrimitiveState::Default(); primitive.Cull=screen?CullMode::None:CullMode::Back; primitive.UnclippedDepth=false;
-    primitive.FaceClockwise=flipY?FrontFace::CCW:FrontFace::CW;
+    const bool alpha=i==OitBounds || i==OitTransmittance;
+    auto primitive=PrimitiveState::Default(); primitive.Cull=CullMode::Back; primitive.UnclippedDepth=false;
+    primitive.FaceClockwise=FrontFace::CW;
     primitive.Poly=wireframe?PolygonMode::Line:PolygonMode::Fill;
     auto depth=DepthStencilState::Default(); depth.Format=TextureFormat::D32_FLOAT;
-    depth.DepthTestEnable=true; depth.DepthWriteEnable=i<=Translucent || screen;
-    depth.DepthCompare=i==OitComposite?CompareFunction::Always:CompareFunction::GreaterEqual;
+    depth.DepthTestEnable=true; depth.DepthWriteEnable=i<=Translucent;
+    depth.DepthCompare=CompareFunction::GreaterEqual;
     radray::array<ColorTargetState,2> targets{ColorTargetState::Default(format),ColorTargetState::Default(format)};
-    if(i==Translucent || i==OitComposite) targets[0].Blend=BlendState{
-        {i==Translucent?BlendFactor::SrcAlpha:BlendFactor::One,BlendFactor::OneMinusSrcAlpha,BlendOperation::Add},
+    if(i==Translucent) targets[0].Blend=BlendState{
+        {BlendFactor::SrcAlpha,BlendFactor::OneMinusSrcAlpha,BlendOperation::Add},
         {BlendFactor::One,BlendFactor::OneMinusSrcAlpha,BlendOperation::Add}};
     if(i>=OitBounds && i<=OitAccumulate) {
         targets[0].Format=i==OitBounds?TextureFormat::RGBA32_FLOAT:TextureFormat::RGBA16_FLOAT;
         const BlendComponent add{BlendFactor::One,BlendFactor::One,i==OitBounds?BlendOperation::Max:BlendOperation::Add};
         targets[0].Blend=BlendState{add,add}; targets[1]=targets[0];
     }
-    if(i==OitCull) targets[0].Format=TextureFormat::RGBA32_FLOAT;
     VertexInputState input{};
-    if(!screen) input={layouts,alpha?std::span<const VertexAttribute>{alphaAttributes}:std::span<const VertexAttribute>{attributes}};
+    input={layouts,alpha?std::span<const VertexAttribute>{alphaAttributes}:std::span<const VertexAttribute>{attributes}};
     return device.CreateGraphicsPipelineState({.PipelineLayout=layout,.VS=ShaderEntry{vs,program.Entry(radray::shader::ShaderStage::Vertex)},
         .PS=ShaderEntry{ps,program.Entry(radray::shader::ShaderStage::Pixel)},.VertexInput=input,.Primitive=primitive,.DepthStencil=depth,
-        .MultiSample=MultiSampleState::Default(),.ColorTargets={targets.data(),i==OitTransmittance?2u:1u}}).Release();
+        .MultiSample=MultiSampleState::Default(),.ColorTargets={targets.data(),i==OitTransmittance?2u:1u},.Cache=cache}).Release();
 }
 }
-bool MeshPassResources::Create(Device& device,std::span<const radray::byte> shaders,radray::unique_ptr<MeshPassResources>& output) {
+bool MeshPassResources::Create(Device& device,std::span<const radray::byte> shaders,radray::unique_ptr<MeshPassResources>& output,
+    radray::Nullable<PipelineCache*> cache) {
     RADRAY_PROFILE_SCOPE_N("Raynium.MeshPass.Create");
     if(output) RADRAY_ABORT("Pass resources output occupied");
     auto objects=radray::make_unique<Objects>(); auto& p=*objects;
@@ -78,27 +79,19 @@ bool MeshPassResources::Create(Device& device,std::span<const radray::byte> shad
         D3D12BindingDescriptor{BindingRegisterClass::SRV,i,2},VulkanBindingDescriptor{2,i}};
     p.oitGroupLayout=device.CreateBindingGroupLayout({oitBindings}).Release();
     if(!p.oitGroupLayout || !p.passGroupLayout || !p.materialGroupLayout) { RADRAY_ERR_LOG("Cannot create SOLID shaders or bindings"); return false; }
-    for(uint32_t i=0;i<8;++i) {
+    for(uint32_t i=0;i<TerrainPrograms.size();++i) {
         auto& program=p.programs[i];
-        const bool screen=i>=OitCull;
         radray::vector<PipelineLayoutGroupDescriptor> groups;
-        if(i!=OitComposite) groups.push_back({0,p.passGroupLayout.get()});
-        if(!screen) groups.push_back({1,p.materialGroupLayout.get()});
+        groups.push_back({0,p.passGroupLayout.get()});
+        groups.push_back({1,p.materialGroupLayout.get()});
         if(i>=OitTransmittance) groups.push_back({2,p.oitGroupLayout.get()});
         program.pipelineLayout=device.CreatePipelineLayout({groups,{}}).Release();
         if(!program.pipelineLayout) { RADRAY_ERR_LOG("Cannot create terrain pipeline layout"); return false; }
-        program.pipeline=CreateTerrainPipeline(device,*program.program,program.vs.get(),program.ps.get(),program.pipelineLayout.get(),i,TextureFormat::RGBA8_UNORM);
+        program.pipeline=CreateTerrainPipeline(device,*program.program,program.vs.get(),program.ps.get(),program.pipelineLayout.get(),i,TextureFormat::RGBA8_UNORM,false,cache);
         if(!program.pipeline) { RADRAY_ERR_LOG("Cannot create terrain pipeline: {}",TerrainPrograms[i]); return false; }
-        if(!screen) {
-            program.flippedPipeline=CreateTerrainPipeline(device,*program.program,program.vs.get(),program.ps.get(),program.pipelineLayout.get(),i,TextureFormat::RGBA8_UNORM,true);
-            if(!program.flippedPipeline) { RADRAY_ERR_LOG("Cannot create reflected terrain pipeline"); return false; }
-        }
     }
     const auto& solid=p.programs[Solid];
-    for(uint32_t i=0;i<2;++i) {
-        p.wireframe[i]=CreateTerrainPipeline(device,*solid.program,solid.vs.get(),solid.ps.get(),solid.pipelineLayout.get(),Solid,TextureFormat::RGBA8_UNORM,i!=0,true);
-        if(!p.wireframe[i]) { p.wireframe={}; RADRAY_INFO_LOG("Optional terrain wireframe is unavailable on this device"); break; }
-    }
+    p.wireframe=CreateTerrainPipeline(device,*solid.program,solid.vs.get(),solid.ps.get(),solid.pipelineLayout.get(),Solid,TextureFormat::RGBA8_UNORM,true,cache);
     output=radray::unique_ptr<MeshPassResources>(new MeshPassResources(std::move(objects))); return true;
 }
 bool MeshPassResources::PrepareOutput(Device& device,TextureFormat format) {
@@ -107,14 +100,14 @@ bool MeshPassResources::PrepareOutput(Device& device,TextureFormat format) {
     }
     return true;
 }
-bool MeshPassResources::CreateMaterialBinding(Device& device,const rn_render_frame_desc& desc,const TextureRegistry& uploaded,
+bool MeshPassResources::CreateMaterialBinding(Device& device,const rn_terrain_view_desc& desc,const TextureRegistry& uploaded,
     MeshMaterialBinding& binding) const {
     RADRAY_PROFILE_SCOPE_N("Raynium.Material.CreateBinding");
     const auto resolve=[&](uint32_t id,size_t index,TextureView*& view,uint32_t& mips) {
         if(id<16) { RADRAY_ERR_LOG("Material references reserved texture ID: {}",id); return false; }
         const auto* owner=uploaded.Find(id);
         if(!owner) { RADRAY_ERR_LOG("Material references missing uploaded texture: {}",id); return false; }
-        if(owner->desc.array_layers!=1 || owner->desc.format==RN_PIXEL_DEPTH32F) { RADRAY_ERR_LOG("Terrain requires a color 2D texture: {}",id); return false; }
+        if(owner->desc.array_layers!=1 || IsDepthStencilFormat(owner->texture->GetDesc().Format)) { RADRAY_ERR_LOG("Terrain requires a color 2D texture: {}",id); return false; }
         view=owner->texture->GetDefaultView().Get(); mips=owner->desc.mip_levels; binding.textures[index]=owner->texture; return true;
     };
     TextureView* albedo{}; TextureView* light{}; uint32_t albedoMips{},lightMips{};

@@ -4,7 +4,6 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import dev.raynium.client.terrain.TerrainCapture;
-import dev.raynium.client.takeover.TakeoverRuntime;
 import dev.raynium.client.RenderMode;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -90,15 +89,17 @@ public final class BenchmarkSession {
     }
 
     public static boolean profilerEnabled() { return isActive() && active.profiler; }
-    public static void nativeFrame(dev.raynium.bridge.NativeSwapchain output,long sequence,long javaPrepare,long nativeCall) {
-        nativeFrame(); if(active==null || !active.phase.equals("measuring")) return;
-        if(active.firstOutputSequence==0) active.firstOutputSequence=sequence;
-        active.nativeTimes[0]=javaPrepare; active.nativeTimes[1]=nativeCall;
-        for(int i=0;i<4;i++) active.nativeTimes[i+2]=output.measurement(i+2);
-        for(int i=6;i<18;i++) active.nativeTimes[i]=output.measurement(i);
-        long gpuSequence=output.measurement(0);
-        if(gpuSequence>=active.firstOutputSequence && gpuSequence>active.lastGpuSequence) {
-            active.lastGpuSequence=gpuSequence; active.measurements.gpu(output.measurement(1));
+    public static void nativeBatch(dev.raynium.bridge.NativeRenderer.SubmitResult batch,long javaPrepare,long nativeCall) {
+        if(active==null || !active.measuringFrame || batch.measurements()==null) return;
+        if(active.firstOutputSequence==0) active.firstOutputSequence=batch.sequence();
+        var sample=batch.measurements();
+        active.nativeTimes[0]=Math.max(0,active.nativeTimes[0])+javaPrepare;
+        active.nativeTimes[1]=Math.max(0,active.nativeTimes[1])+nativeCall;
+        for(int i=2;i<15;++i) active.nativeTimes[i]=Math.max(0,active.nativeTimes[i])+sample[i];
+        System.arraycopy(sample,15,active.nativeTimes,15,3);
+        if(sample[0]>=active.firstOutputSequence && sample[0]>active.lastGpuSequence) {
+            active.lastGpuSequence=sample[0];
+            active.measurements.gpu(sample[1]);
         }
     }
     public static void referenceGpuSample(long nanos) { if(active!=null && active.phase.equals("measuring")) active.measurements.gpu(nanos); }
@@ -164,7 +165,7 @@ public final class BenchmarkSession {
                 var p = route.first();
                 if (client.gameMode.getPlayerMode()!=playerMode || client.player.distanceToSqr(p.x(), p.y(), p.z()) > 4
                         || client.gui.screen() != null || client.gui.overlay() != null
-                        || (!RenderMode.REFERENCE && !TakeoverRuntime.ready()) || nativeFrames == 0 || (profiler && !Files.exists(directory.resolve("capture.ready")))) return;
+                        || (!RenderMode.REFERENCE && !TerrainCapture.active()) || nativeFrames == 0 || (profiler && !Files.exists(directory.resolve("capture.ready")))) return;
                 result.addProperty("dimension", client.level.dimension().toString());
                 result.addProperty("windowWidth", client.getWindow().getWidth());
                 result.addProperty("windowHeight", client.getWindow().getHeight());
@@ -180,7 +181,7 @@ public final class BenchmarkSession {
             } else {
                 if (client.player == null || client.level == null || client.gameMode.getPlayerMode()!=playerMode
                         || (screen.equals("none") && client.gui.screen() != null) || client.gui.overlay() != null || (screen.equals("none") && client.isPaused())
-                        || client.getWindow().isIconified() || (!RenderMode.REFERENCE && (!TakeoverRuntime.ready() || !TerrainCapture.active())))
+                        || client.getWindow().isIconified() || (!RenderMode.REFERENCE && !TerrainCapture.active()))
                     throw new IllegalStateException("World, spectator, window or native renderer became unavailable");
                 if (phase.equals("warmup") && secondsSince(phaseStarted) >= warmupSeconds) {
                     phase = "measuring";

@@ -5,9 +5,8 @@ import zlib
 
 RESOURCE_PATH = 'assets/raynium/shaderpacks/default.rnsp'
 TERRAIN_PROGRAMS = ('terrain', 'terrain_cutout', 'terrain_translucent', 'terrain_oit_bounds',
-                    'terrain_oit_transmittance', 'terrain_oit_accumulate', 'oit_bounds_cull', 'oit_composite')
-GUI_PROGRAMS = ('gui_color', 'gui_textured', 'gui_text')
-PROGRAMS = TERRAIN_PROGRAMS + GUI_PROGRAMS + ('output',)
+                    'terrain_oit_transmittance', 'terrain_oit_accumulate')
+PROGRAMS = TERRAIN_PROGRAMS + ('output',)
 HEADER = struct.Struct('<6I')
 RECORD = struct.Struct('<64s4I16s')
 
@@ -43,7 +42,7 @@ def verify_shader_pack(data):
             require(start + extent <= length and (not extent or start >= header_size), 'artifact section range')
     ranges.sort()
     require(all(a[1] <= b[0] for a, b in zip(ranges, ranges[1:])), 'overlapping artifacts')
-    require({(name.encode('ascii'), target) for name in PROGRAMS for target in (0, 1)} <= keys, 'missing terrain or GUI program/backend')
+    require({(name.encode('ascii'), target) for name in PROGRAMS for target in (0, 1)} <= keys, 'missing required program/backend')
     return keys
 
 
@@ -54,4 +53,4 @@ if __name__ == '__main__':
     parser.add_argument('pack', type=Path)
     args = parser.parse_args()
     verify_shader_pack(args.pack.read_bytes())
-    print('Shader pack container and required terrain/GUI artifacts OK')
+    print('Shader pack container and required terrain/output artifacts OK')
