@@ -7,7 +7,7 @@
 #else
 #define RAYNIUM_API __declspec(dllimport)
 #endif
-#define RN_ABI_VERSION 19u
+#define RN_ABI_VERSION 22u
 
 enum rn_submit_flags : uint32_t { RN_SUBMIT_FLAG_DEVICE_LOST = 1u };
 struct rn_wait_result { uint64_t completed_sequence; uint32_t flags, reserved; };
@@ -55,7 +55,13 @@ struct rn_env_desc {
 struct rn_runtime_desc { uint32_t struct_size, reserved; };
 
 
-enum rn_frame_flags : uint32_t { RN_FRAME_RGSS=1, RN_FRAME_IMPROVED_TRANSPARENCY=4, RN_FRAME_WIREFRAME=128 };
+enum rn_frame_flags : uint32_t {
+    RN_FRAME_RGSS = 1,
+    RN_FRAME_IMPROVED_TRANSPARENCY = 4,
+    RN_FRAME_WIREFRAME = 128,
+    RN_FRAME_REUSE_VISIBLE = 256,
+    RN_FRAME_REUSE_INSTANCES = 512
+};
 // Zero selects auto. Forced direct and indirect are mutually exclusive.
 enum rn_renderer_flags : uint32_t { RN_RENDERER_DIRECT = 1, RN_RENDERER_INDIRECT = 2 };
 // Pack bytes are borrowed only during rn_create_renderer; no pointer is retained.
@@ -111,8 +117,21 @@ struct rn_texture_upload_desc {
 };
 // IDs are nonzero and scoped to the frame epoch. Input pointers are borrowed for one call.
 enum rn_material_mode : uint32_t { RN_MATERIAL_OPAQUE = 0, RN_MATERIAL_CUTOUT = 1, RN_MATERIAL_TRANSLUCENT = 2 };
+enum rn_terrain_mesh_layout_flags : uint32_t {
+    RN_TERRAIN_LAYOUT_FINITE_BOUNDS = 1u,
+    RN_TERRAIN_LAYOUT_WIREFRAME_GROUPS = 2u
+};
+struct rn_terrain_mesh_layout {
+    uint32_t group_quad_counts[7];
+    uint32_t flags;
+    float minimum[3];
+    float maximum[3];
+    const uint8_t* original_quad_groups;
+    uint32_t original_quad_groups_bytes;
+    uint32_t reserved;
+};
 struct rn_index_update { uint64_t mesh_id; const uint32_t* indices; uint32_t count, reserved; };
-struct rn_mesh_update { uint64_t id; const void* vertices; uint32_t vertex_count; rn_material_mode layer; };
+struct rn_mesh_update { uint64_t id; const void* vertices; uint32_t vertex_count; rn_material_mode layer; const rn_terrain_mesh_layout* layout; };
 struct rn_instance { int32_t origin[3]; float visibility; };
 // UINT32_MAX requests all groups; explicit masks intersect native conservative face culling.
 struct rn_visible_item { uint64_t mesh; uint32_t element_mask, sort_key, first_instance, instance_count; };
@@ -199,6 +218,8 @@ struct rn_batch_desc {
     uint64_t command_bytes;
     const void* uploads;
     uint64_t upload_bytes;
+    const void* instance_uploads;
+    uint64_t instance_upload_bytes;
     const rn_mapped_range* dirty_ranges;
     uint32_t dirty_count,reserved;
     const rn_terrain_view_desc* views;
@@ -219,6 +240,9 @@ RAYNIUM_API rn_status rn_sync_query_pool(rn_renderer*,uint32_t id,uint32_t first
 RAYNIUM_API rn_status rn_create_texture(rn_renderer*, const rn_uploaded_texture_desc*) noexcept;
 RAYNIUM_API rn_status rn_upload_texture(rn_renderer*, const rn_texture_upload_desc*) noexcept;
 RAYNIUM_API rn_status rn_destroy_texture(rn_renderer*, uint32_t id) noexcept;
+// User mesh IDs start at 16. Vertex bytes are copied during the call (24 B/vertex, quad-indexed).
+RAYNIUM_API rn_status rn_upsert_model_mesh(rn_renderer*, int32_t mesh_id, const void* vertex_data, uint32_t vertex_bytes, uint32_t vertex_count, uint32_t index_count, uint32_t* out_page_id) noexcept;
+RAYNIUM_API rn_status rn_remove_model_mesh(rn_renderer*, int32_t mesh_id) noexcept;
 RAYNIUM_API rn_status rn_wait_submit(rn_renderer*, uint64_t sequence, int64_t timeout_ns, rn_wait_result* result) noexcept;
 RAYNIUM_API rn_status rn_poll_capture(rn_renderer*, uint64_t sequence, rn_capture_info*, void* pixels, uint64_t capacity) noexcept;
 }

@@ -19,6 +19,7 @@ public final class NativeBuffer implements GpuBuffer {
     private final HashSet<Mapping> views=new HashSet<>();
     private boolean closed,released;
     private int references;
+    private long lastRetainedTapeId;
 
     static NativeBuffer create(NativeRenderer owner,MemorySegment renderer,int usage,long size,ByteBuffer initial,Supplier<CommandTape> batch) {
         if(size<=0 || (usage&~1023)!=0 || (usage&~USAGE_HINT_CLIENT_STORAGE)==0 || (initial!=null && initial.remaining()!=size))
@@ -57,6 +58,8 @@ public final class NativeBuffer implements GpuBuffer {
         if((usage&requiredUsage)!=requiredUsage) throw new IllegalArgumentException("Missing buffer usage");
         if(offset<0 || offset>size || length<=0 || length>size-offset) throw new IllegalArgumentException("Invalid buffer range");
     }
+    public long lastRetainedTapeId() { return lastRetainedTapeId; }
+    public void setLastRetainedTapeId(long tapeId) { lastRetainedTapeId=tapeId; }
     public void retainRecording() { ++references; }
     public void releaseRecording() {
         if(references<=0) throw new IllegalStateException("Unbalanced buffer reference");

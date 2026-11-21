@@ -124,7 +124,7 @@ Minecraft.renderFrame
 
 前端 shader 流程涉及 GLSL、SPIR-V、反射与绑定处理；pipeline 构建包含 executor 工作和后续 `finishCompile`。
 
-MC 的 uniform 类别含 combined image sampler。Raynium 没有自定义 RenderPearl backend。
+MC 的 uniform 类别含 combined image sampler。Raynium 的 RenderPearl 后端实现见[Minecraft 接入](minecraft-integration.md)。
 
 ## 纹理、主目标与最终输出
 

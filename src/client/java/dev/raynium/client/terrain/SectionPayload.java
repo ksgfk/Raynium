@@ -5,7 +5,8 @@ public final class SectionPayload {
     public final long epoch;
     public final MeshPayload[] layers;
     public final long vertexBytes;
-    public long uploadedEpoch,stagedFrame,lastActiveFrame,sectionKey;
+    public long uploadedEpoch,stagedFrame,lastActiveFrame,sectionKey,dirtyIndexFrame;
+    int capturedSlot=-1;
     MeshPayload.IndexSnapshot uploadedIndices;
     public SectionPayload(long epoch,MeshPayload... layers) {
         this.epoch=epoch;
@@ -17,5 +18,18 @@ public final class SectionPayload {
         }
         vertexBytes=bytes;
     }
-    long uploadBytes(MeshPayload.IndexSnapshot indices) { return vertexBytes+(indices==null?0:indices.values().length*4L); }
+    long uploadBytes(MeshPayload.IndexSnapshot indices) { return vertexBytes+(indices==null?0:indices.byteSize()); }
+    boolean hasVertices() {
+        if(vertexBytes<=0) return false;
+        for(var layer:layers) if(layer!=null && !layer.hasVertices()) return false;
+        return true;
+    }
+    void releaseBuffers() {
+        for(var layer:layers) {
+            if(layer==null) continue;
+            layer.releaseVertices();
+            var idx=layer.indices;
+            if(idx!=null) idx.releaseBuffer();
+        }
+    }
 }

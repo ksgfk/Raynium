@@ -115,17 +115,35 @@ bool ImmediateDraw::Prepare(radray::RDGPrepareContext& ctx,TextureFormat depth) 
     _pso=_pipeline->Resolve(device,depth);
     if(!_pso) return false;
     const auto& program=*_pipeline->program;
-    radray::array<radray::vector<radray::TransientParameterBinding>,2> groups;
+    radray::array<radray::InlineVector<radray::TransientParameterBinding,16>,2> groups;
     for(auto& r:_resources) {
         const auto& b=r.binding;
         if(b.kind==5) {
-            auto* view=GetSamplingView(device,*r.texture,b.sampling);
-            if(!view) return false;
-            groups[1].push_back({b.slot,0,view});
-            if(std::find(program.samplers.begin(),program.samplers.end(),b.slot+1)!=program.samplers.end()) {
+            if(program.RequiresBinding(1,b.slot)) {
+                auto* view=GetSamplingView(device,*r.texture,b.sampling);
+                if(!view) return false;
+                groups[1].push_back({b.slot,0,view});
+            }
+            if(program.HasSampler(b.slot+1)) {
                 auto* sampler=GetTextureSampler(device,b.format,b.sampling);
                 if(!sampler) return false;
                 groups[1].push_back({b.slot+1,0,sampler});
+            }
+            continue;
+        }
+        if(b.kind==3) {
+            if(program.RequiresBinding(0,b.slot)) {
+                auto slice=ctx.ResolveBuffer(r.bufferHandle);
+                slice.Offset+=b.offset; slice.Size=b.size;
+                groups[0].push_back(FrameConstantBinding(b.slot,slice));
+            }
+            continue;
+        }
+        if(b.kind==4) {
+            if(program.RequiresBinding(1,b.slot)) {
+                auto slice=ctx.ResolveBuffer(r.bufferHandle);
+                slice.Offset+=b.offset; slice.Size=b.size;
+                groups[1].push_back({b.slot,0,ShaderTexelBufferBinding{slice.Buffer.Get(),{slice.Offset,slice.Size},ToTextureFormat(rn_pixel_format(b.format))}});
             }
             continue;
         }
@@ -137,8 +155,6 @@ bool ImmediateDraw::Prepare(radray::RDGPrepareContext& ctx,TextureFormat depth) 
             if(slice.Offset>UINT32_MAX) return false;
             _indices={slice.Buffer.Get(),uint32_t(slice.Offset),b.format}; break;
         case 2: _indirect=slice; break;
-        case 3: groups[0].push_back(FrameConstantBinding(b.slot,slice)); break;
-        case 4: groups[1].push_back({b.slot,0,ShaderTexelBufferBinding{slice.Buffer.Get(),{slice.Offset,slice.Size},ToTextureFormat(rn_pixel_format(b.format))}}); break;
         }
     }
     if(_drawBases.IsValid()) {
@@ -157,25 +173,20 @@ bool ImmediateDraw::Prepare(radray::RDGPrepareContext& ctx,TextureFormat depth) 
     if(((_kind==1 || _kind==3 || _kind==4) && !_indices.Target) || ((_kind==2 || _kind==3) && !_indirect.Buffer)) return false;
     for(uint32_t i=0;i<2;++i) if(program.groups[i]) {
         auto& group=groups[i];
-        // DXC may remove resources after GLSL reflection (e.g. an unused sampler).
-        std::erase_if(group,[&](const auto& b) {
-            const auto& used=program.required[i];
-            return std::find(used.begin(),used.end(),b.BindingId)==used.end() &&
-                (i!=1 || std::find(program.samplers.begin(),program.samplers.end(),b.BindingId)==program.samplers.end());
-        });
-        _sets[i]=slot.AcquireParameterSet(program.groups[i],group).Get();
+        EnsureOrderedBindings(group);
+        _sets[i]=slot.AcquireParameterSet(program.groups[i],{group.data(),group.size()}).Get();
         if(!_sets[i]) return false;
     }
     return true;
 }
-bool ImmediateDraw::Record(GraphicsCommandEncoder& enc) const noexcept {
-    enc.BindGraphicsPipelineState(_pso);
-    enc.SetScissor(_scissor);
-    enc.SetStencilReference(0);
-    for(uint32_t i=0;i<2;++i) if(_sets[i]) enc.BindShaderParameterSet(i,_sets[i]);
+bool ImmediateDraw::Record(GraphicsCommandEncoder& enc,ImmediatePassStateCache& cache) const noexcept {
+    cache.BindPipeline(enc,_pso);
+    cache.SetScissor(enc,_scissor);
+    cache.SetStencil(enc,0);
+    for(uint32_t i=0;i<2;++i) if(_sets[i]) cache.BindParameterSet(enc,i,_sets[i]);
     if(!_push.empty() && !enc.SetPushConstants(0,0,{_push.data(),_push.size()})) return false;
     if(!_vertices.empty()) enc.BindVertexBuffers({_vertices.data(),_vertices.size()});
-    if(_indices.Target) enc.BindIndexBuffer(_indices);
+    if(_indices.Target) cache.BindIndexBuffer(enc,_indices);
     if(!_drawBaseSets.empty()) {
         if(_kind==2 || _kind==3) {
             for(uint32_t i=0;i<_count;++i) {

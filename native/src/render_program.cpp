@@ -66,8 +66,15 @@ RasterProgram* RenderProgramLibrary::GetProgram(Device& device,std::string_view 
             bindings[binding.Group].push_back({logical,*kind,1,Stages(binding.StageMask),
                 D3D12BindingDescriptor{cb?BindingRegisterClass::CBV:texture || texel?BindingRegisterClass::SRV:BindingRegisterClass::Sampler,
                     cb?logical:logical/2,binding.Group},VulkanBindingDescriptor{binding.Group,logical}});
-            if(cb || texture || texel) program->required[binding.Group].push_back(logical);
-            else program->samplers.push_back(logical);
+            if(cb || texture || texel) {
+                program->required[binding.Group].push_back(logical);
+                if(logical<64u) program->requiredMask[binding.Group]|=uint64_t{1}<<logical;
+                else program->hasHighBindings=true;
+            } else {
+                program->samplers.push_back(logical);
+                if(logical<64u) program->samplerMask|=uint64_t{1}<<logical;
+                else program->hasHighBindings=true;
+            }
         }
         radray::vector<PipelineLayoutGroupDescriptor> groups;
         for(uint32_t group=0;group<2;++group) if(!bindings[group].empty()) {

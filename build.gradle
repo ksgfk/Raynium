@@ -43,6 +43,11 @@ loom {
                 programArg '--tracy'
             }
             vmArg '--enable-native-access=ALL-UNNAMED'
+            if (providers.gradleProperty('benchmarkConfig').isPresent()) {
+                property 'org.lwjgl.util.NoChecks', 'true'
+                property 'org.lwjgl.util.NoFunctionChecks', 'true'
+                vmArg '-da'
+            }
             if (providers.gradleProperty('jfrFile').isPresent()) {
                 vmArg '-XX:StartFlightRecording=name=Raynium,settings=profile,disk=true,dumponexit=true,maxsize=1g,filename=' +
                     file(providers.gradleProperty('jfrFile').get()).absolutePath

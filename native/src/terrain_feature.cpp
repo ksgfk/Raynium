@@ -1,4 +1,6 @@
 #include <raynium/terrain_feature.h>
+#include <radray/inline_vector.h>
+#include <radray/profiler.h>
 #include <algorithm>
 #include <cstring>
 
@@ -11,7 +13,7 @@ void TerrainView::Import(radray::RDGBuilder& graph,GpuBackend backend) {
         graph.UploadBuffer(h,upload.offset,std::move(upload.source)); graph.MarkOutput(h);
     }
     uploads.clear();
-    if(lists.batches.empty()) return;
+    if(!draws || !draws->hasAnyDraws) return;
     struct Source { const rn_terrain_view_desc* parameters; GpuBackend backend; };
     constants=graph.CreateBuffer({.MaxSize=256,.Usage=BufferUse::CBuffer},radray::RDGUploadSource::Generated(256,Source{&frame.parameters,backend},
         +[](const Source& source,radray::RDGUploadWriteContext& ctx) noexcept {
@@ -24,11 +26,23 @@ void TerrainView::Import(radray::RDGBuilder& graph,GpuBackend backend) {
             std::copy_n(p.fog_color,4,data.fog); std::copy_n(p.fog_distances,4,data.distances);
             std::memset(ctx.Bytes.data(),0,ctx.Bytes.size()); std::memcpy(ctx.Bytes.data(),&data,sizeof(data)); return true;
         }));
-    auto bytes=std::as_bytes(frame.instances);
-    instances=graph.CreateBuffer({.MaxSize=bytes.size(),.Usage=BufferUse::Vertex},radray::RDGUploadSource::BorrowedBytes(bytes));
+    const auto import=[&](const radray::IntrusivePtr<radray::GpuBuffer>& buffer,bool upload,
+                          std::span<const radray::byte> bytes,BufferUses usage) {
+        if(!buffer) return graph.CreateBuffer({.MaxSize=bytes.size(),.Usage=usage},radray::RDGUploadSource::BorrowedBytes(bytes));
+        auto handle=graph.ImportPersistentOwned(buffer);
+        if(upload) {
+            graph.UploadBuffer(handle,0,radray::RDGUploadSource::BorrowedBytes(bytes));
+            graph.MarkOutput(handle);
+        }
+        return handle;
+    };
+    instances=import(frame.persistentInstances,frame.uploadInstances,std::as_bytes(frame.instances),BufferUse::Vertex);
     if(useIndirect) {
-        auto args=std::as_bytes(std::span{lists.arguments});
-        indirect=graph.CreateBuffer({.MaxSize=args.size(),.Usage=BufferUse::Indirect},radray::RDGUploadSource::BorrowedBytes(args));
+        for(uint32_t layer=0;layer<3;++layer) {
+            const auto& args=draws->layers[layer].prepared.IndexedArguments;
+            if(!args.empty()) indirectByLayer[layer]=import(frame.persistentIndirect[layer],frame.uploadIndirect[layer],
+                std::as_bytes(std::span(args)),BufferUse::Indirect);
+        }
     }
 }
 
@@ -55,34 +69,34 @@ bool TerrainFeature::Decode(std::span<const radray::byte> bytes,std::span<Terrai
     }
     return true;
 }
-void TerrainFeature::Import(radray::RDGBuilder& graph,FrameTextureImports& imports) {
-    const auto layer=std::min(stage,uint32_t(Translucent));
-    const auto& list=view->lists.layers[layer];
-    record={&view->lists,layer,view->indirectLimit,view->useIndirect};
-    radray::unordered_set<radray::GpuBuffer*> vb,ib;
+
+void TerrainFeature::Import(radray::RDGBuilder&,FrameTextureImports& imports) {
     for(auto& m:materials) m.handle=imports.Import(m.image);
-    for(const auto& batch:std::span{view->lists.batches}.subspan(list.firstBatch,list.batchCount)) {
-        if(vb.insert(batch.vertexPage).second) vertexPages.push_back(graph.ImportPersistentBorrowed(*batch.vertexPage));
-        if(ib.insert(batch.indexPage).second) indexPages.push_back(graph.ImportPersistentBorrowed(*batch.indexPage));
-    }
     for(uint32_t i=0;i<3;++i) if(sources[i]) reads[i]=imports.Import(sources[i]);
 }
+
 void TerrainFeature::Declare(radray::RDGRasterPassBuilder& pass) const {
-    if(!view->lists.layers[record.layer].recordCount) return;
+    const uint32_t layer=std::min(stage,uint32_t(Translucent));
+    if(!view->draws->layers[layer].recordCount) return;
     pass.ReadBuffer(view->constants,BufferState::CBuffer).ReadBuffer(view->instances,BufferState::Vertex);
-    if(view->useIndirect) pass.ReadBuffer(view->indirect,BufferState::Indirect);
-    for(auto h:vertexPages) pass.ReadBuffer(h,BufferState::Vertex);
-    for(auto h:indexPages) pass.ReadBuffer(h,BufferState::Index);
+    if(view->useIndirect) pass.ReadBuffer(view->indirectByLayer[layer],BufferState::Indirect);
     for(const auto& m:materials) pass.ReadTexture(m.handle);
     for(auto h:reads) if(h.IsValid()) pass.ReadTexture(h);
 }
+
 bool TerrainFeature::Prepare(radray::RDGPrepareContext& ctx) {
-    if(!view->lists.layers[record.layer].recordCount) return true;
+    const uint32_t layer=std::min(stage,uint32_t(Translucent));
+    const auto& layerData=view->draws->layers[layer];
+    if(!layerData.recordCount) return true;
+    const bool isOitStage=stage>=OitBounds;
+    if(layer==Translucent && isOitStage!=view->draws->oit) return false;
     auto& slot=ctx.GetSlot();
-    pipeline=view->mesh->Pipeline(stage,(view->frame.parameters.flags&RN_FRAME_WIREFRAME)!=0);
-    if(!pipeline) return false;
-    record.instances=ctx.ResolveBuffer(view->instances);
-    if(view->useIndirect) record.indirect=ctx.ResolveBuffer(view->indirect);
+    instanceSlice=ctx.ResolveBuffer(view->instances);
+    instanceSlice.Size=view->frame.instances.size_bytes();
+    if(view->useIndirect) {
+        const auto base=ctx.ResolveBuffer(view->indirectByLayer[layer]);
+        indirectSlice={base.Buffer,base.Offset,layerData.indirectSize};
+    }
     auto binding=FrameConstantBinding(0,ctx.ResolveBuffer(view->constants));
     constants=slot.AcquireParameterSet(view->mesh->PassGroupLayout(),{&binding,1}).Get();
     if(!constants) return false;
@@ -95,8 +109,8 @@ bool TerrainFeature::Prepare(radray::RDGPrepareContext& ctx) {
         materialBindings[i]={1+i,0,srv};
         materialBindings[i+2]={3+i,0,sampler};
     }
-    record.material=slot.AcquireParameterSet(view->mesh->MaterialGroupLayout(),materialBindings).Get();
-    if(!record.material) return false;
+    material=slot.AcquireParameterSet(view->mesh->MaterialGroupLayout(),materialBindings).Get();
+    if(!material) return false;
     if(sources[0]) {
         radray::array<radray::TransientParameterBinding,4> bindings;
         for(uint32_t i=0;i<4;++i) {
@@ -108,14 +122,25 @@ bool TerrainFeature::Prepare(radray::RDGPrepareContext& ctx) {
         oit=slot.AcquireParameterSet(view->mesh->OitGroupLayout(),bindings).Get();
         if(!oit) return false;
     }
+    active=true;
     return true;
 }
+
 bool TerrainFeature::Record(GraphicsCommandEncoder& enc) const {
-    if(!pipeline) return true;
+    if(!active) return true;
+    RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.Record");
     enc.SetScissor(scissor);
-    enc.BindGraphicsPipelineState(pipeline);
-    enc.BindShaderParameterSet(0,constants);
-    if(oit) enc.BindShaderParameterSet(2,oit);
-    return RecordTerrainDraws(record,enc);
+    radray::InlineVector<radray::MeshShaderParameterBinding,3> passSets;
+    passSets.push_back({0,constants});
+    passSets.push_back({1,material});
+    if(oit) passSets.push_back({2,oit});
+    radray::MeshPassSubmitArgs submitArgs{};
+    submitArgs.ParameterSets={passSets.data(),passSets.size()};
+    submitArgs.InstanceStream=VertexBufferBinding{1,FrameVertexView(instanceSlice)};
+    const uint32_t layer=std::min(stage,uint32_t(Translucent));
+    const auto& layerData=view->draws->layers[layer];
+    const auto& reps=stage>=OitBounds?view->draws->oitIndirectReps[stage-OitBounds]:layerData.indirectReps;
+    if(!view->useIndirect) return SubmitPreparedTerrainDirectDraws(enc,reps,layerData.prepared,submitArgs);
+    return radray::SubmitMeshPassIndirectDraws(enc,reps,layerData.prepared,indirectSlice,{},*view->capabilities,submitArgs);
 }
 }

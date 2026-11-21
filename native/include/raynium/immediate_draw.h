@@ -1,5 +1,6 @@
 #pragma once
 #include <raynium/buffer_registry.h>
+#include <raynium/frame_upload.h>
 #include <raynium/immediate_pipeline.h>
 #include <radray/inline_vector.h>
 
@@ -12,7 +13,7 @@ public:
     void Declare(radray::RDGRasterPassBuilder&) const;
     bool Prepare(radray::RDGPrepareContext&,radray::gpu::TextureFormat depth);
     size_t BindingCount() const { return _resources.size()+1; }
-    bool Record(radray::gpu::GraphicsCommandEncoder&) const noexcept;
+    bool Record(radray::gpu::GraphicsCommandEncoder&,ImmediatePassStateCache&) const noexcept;
 private:
     struct Binding {
         uint32_t kind,slot,id,format;

@@ -27,6 +27,8 @@
     "VisualValidationTitleAccess",
     "SectionCompilerMixin",
     "RenderSectionIndicesMixin",
+    "RenderSectionStateMixin",
+    "SectionOcclusionGraphMixin",
     "SectionResultsMixin",
     "CompiledSectionMeshMixin",
     "RayniumBackendMixin",
@@ -34,7 +36,18 @@
     "LevelTerrainHookMixin",
     "TerrainAnchorMixin",
     "SectionUploadMixin",
-    "UberBufferDrainMixin"
+    "UberBufferDrainMixin",
+    "LevelWorldFeatureScopeMixin",
+    "ModelManagerReloadMixin",
+    "ModelPartCompileMixin",
+    "PoseStackPoseMixin",
+    "RenderTypeGroupMixin",
+    "RenderTypeFeatureRendererMixin",
+    "ModelFeatureRendererMixin",
+    "ShadowFeatureRendererMixin",
+    "QuadParticleRenderStateMixin",
+    "QuadParticleStorageMixin",
+    "QuadParticleFeatureMixin"
   ],
   "injectors": {
     "defaultRequire": 1

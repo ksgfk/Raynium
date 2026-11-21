@@ -2,7 +2,6 @@
 #include <radray/types.h>
 #include <raynium/exception.h>
 #include <raynium/frame_upload.h>
-#include <raynium/frame_record.h>
 #include <radray/profiler.h>
 #include <radray/logger.h>
 #include <algorithm>

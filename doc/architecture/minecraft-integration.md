@@ -1,6 +1,6 @@
-> - 适用: 修改后端选择、窗口与表面生命周期、地形切点和验证入口
+> - 适用: 修改后端选择、窗口与表面生命周期、地形切点、世界快轨切点与验证入口
 > - 权威: 本文记录 MC 26.3 与 Raynium 的接入点
-> - 锚点: `src/client/resources/raynium.client.mixins.json`, `src/client/java/dev/raynium/client/mixin/RayniumBackendMixin.java`, `src/client/java/dev/raynium/client/renderpearl/RayniumGpuBackend.java`, `src/client/java/dev/raynium/client/renderpearl/RayniumGpuSurfaceBackend.java`
+> - 锚点: `src/client/resources/raynium.client.mixins.json`, `src/client/java/dev/raynium/client/mixin/RayniumBackendMixin.java`, `src/client/java/dev/raynium/client/renderpearl/RayniumGpuBackend.java`, `src/client/java/dev/raynium/client/renderpearl/RayniumGpuSurfaceBackend.java`, `src/client/java/dev/raynium/client/world/*.java`
 
 # Minecraft 接入
 
@@ -16,8 +16,16 @@ MC 的实体、天空、GUI、画中画、光照图、动画图集与后处理�
 
 `acquireNextTexture` 的前端获取状态可以跨多个离屏提交。只有记录上屏 blit 的批次携带 surface。可恢复的交换链结果由表面保存，后续 configure 重建。终态通过共用路径释放前端获取状态。截图和图集导出使用 MC 自身的纹理复制、只读映射与 Fence 路径。
 
-## 地形与帧事件
+## 地形、世界快轨与帧事件
 
-编译、索引采用和区块移除切点维护驻留数据。地形准备为每个视图保存相机、可见项与上传输入。原版 `renderLayers` 切点在当前打开的 Pass 插入地形命令，记录实际图集、lightmap 和 OIT 输入。随后游戏可继续在同一组附件绘制即时几何。[区块地形渲染](terrain-rendering.md)
+编译、索引采用和区块移除切点维护驻留数据；`SectionUploadMixin` 与 `UberBufferDrainMixin` 拦截原版地形 98 MiB `StagingBuffer` 写入与冗余排出，`LevelTerrainHookMixin` 在 `LevelRenderer.prepareChunkRenders[Indirect]` 入口完成视图准备并短路原版扫描。原版 `renderLayers` 切点在当前打开的 Pass 插入地形命令，记录实际图集、lightmap 和 OIT 输入。随后游戏可继续在同一组附件绘制即时几何。[区块地形渲染](terrain-rendering.md)
+
+主世界实例化在 Raynium 后端按原版提交组录制。
+
+- `LevelWorldFeatureScopeMixin` 将 `WorldModelCaptureScope` 严格限定在 `LevelRenderer` 主世界 `featureFrame` 区间内（GUI/画中画/手持物沿用即时路径）。
+- `ModelPartCompileMixin` 在同一世代第二次访问 `ModelPart` 时缓存 24 B/顶点局部几何；`ModelManagerReloadMixin` 在模型重载时清理并退役旧常驻网格。GC 队列返回空闲句柄，允许重排的组按准备后的材质值查桶，并按顶点页聚集网格 run。
+- `ModelFeatureRendererMixin`、`RenderTypeGroupMixin` 与 `RenderTypeFeatureRendererMixin` 在满足纯刚体模型提交条件且目标管线存在内置伴生实例化变体时，将 `ModelPart` 提交编码为 80 B/实例流并按原版组顺序发出 Opcode 16；遇到覆写 `renderToBuffer`/`compile`、贴花/轮廓/自定义消费者或资源包着色器覆盖时无缝保序回退原版 `StagedVertexBuffer`。
+- `QuadParticleRenderStateMixin` 与 `QuadParticleFeatureMixin` 为匹配内置粒子实例化变体的四边形粒子组跳过 CPU 顶点展开，写入 56 B/粒子四元数实例流并经 Opcode 16 合批绘制；OIT 阶段复用单次上传，非默认状态或着色器覆盖自动回退原版路径。
+- `ShadowFeatureRendererMixin` 在原版 `buildGroup` 切点采集阴影片，保留 `RenderType.prepare()` 产生的视图偏移变换、裁剪和纹理。每片使用 56 B 实例，四角共享单位几何。组执行时选择当前透明阶段，着色器覆盖或缺少所需变体时沿用原版组构建。
 
 `MinecraftBenchmarkMixin` 在世界帧开始时推进采集与基准状态。测试模式可冻结时间、相机与动画并采集实际选用的管线。管线身份、视觉证据与离线产物通过覆盖率脚本关联。[Minecraft 渲染流程](minecraft-rendering.md)

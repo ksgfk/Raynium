@@ -159,6 +159,8 @@ add_library(rayniumruntime SHARED
     src/frame_readbacks.cpp include/raynium/frame_readbacks.h
     src/timestamp_queries.cpp include/raynium/timestamp_queries.h
     src/terrain_feature.cpp
+    src/static_geometry_registry.cpp include/raynium/static_geometry_registry.h
+    src/world_features.cpp include/raynium/world_features.h
     src/immediate_draw.cpp
     src/immediate_pipeline.cpp
     src/immediate_pass.cpp include/raynium/immediate_pass.h
@@ -168,7 +170,6 @@ add_library(rayniumruntime SHARED
     src/terrain_draw.cpp include/raynium/terrain_draw.h
     src/modular_frame_pipeline.cpp include/raynium/modular_frame_pipeline.h
     src/frame_upload.cpp include/raynium/frame_upload.h
-    src/frame_record.cpp include/raynium/frame_record.h
     src/render_resources.cpp include/raynium/render_resources.h
     src/device_info.cpp
     src/texture_registry.cpp include/raynium/texture_registry.h
@@ -196,9 +197,9 @@ if(RAYNIUM_BUILD_TESTS)
     find_package(GTest CONFIG REQUIRED)
     enable_testing()
     include(GoogleTest)
-    add_executable(test_raynium_terrain tests/test_terrain_draw.cpp tests/test_frame_record.cpp tests/test_surface_submission.cpp src/surface_submission.cpp src/terrain_draw.cpp src/frame_upload.cpp src/frame_record.cpp)
+    add_executable(test_raynium_terrain tests/test_terrain_draw.cpp tests/test_surface_submission.cpp src/surface_submission.cpp src/terrain_draw.cpp src/frame_upload.cpp src/terrain_residency.cpp src/static_geometry_registry.cpp src/world_features.cpp src/buffer_registry.cpp src/immediate_pipeline.cpp src/render_program.cpp src/shader_pack.cpp src/texture_registry.cpp src/render_resources.cpp)
     target_compile_features(test_raynium_terrain PRIVATE cxx_std_20)
-    target_include_directories(test_raynium_terrain PRIVATE include)
+    target_include_directories(test_raynium_terrain PRIVATE include "${RADRAY_SOURCE_DIR}/modules/runtime/tests")
     target_compile_options(test_raynium_terrain PRIVATE /W4 /permissive- /Zc:preprocessor /utf-8)
     target_link_libraries(test_raynium_terrain PRIVATE RadRay::runtime RadRay::shader GTest::gtest)
     gtest_discover_tests(test_raynium_terrain)

@@ -18,9 +18,11 @@ import org.lwjgl.util.shaderc.ShadercIncludeResult;
 final class RayniumPrograms {
     record Input(int location,String type) {}
     record Resource(int group,int binding,String type,int sampler,String texelFormat) {}
-    record Program(String program,Map<String,Input> inputs,Map<String,Resource> resources,int pushBytes) {}
+    record InstancedProgram(String mode,String program,Map<String,Input> inputs,Map<String,Resource> resources,int pushBytes) {}
+    record Program(String program,Map<String,Input> inputs,Map<String,Resource> resources,int pushBytes,InstancedProgram instanced) {}
     record Route(int group,int binding,int sampler,UniformType type,GpuFormat format,boolean cube) {}
-    record Preparation(String name,int[] words,List<Route> routes,List<String> uniforms,byte[] pack) {}
+    record InstancedPreparation(String mode,String name,int[] words,List<Route> routes,List<String> uniforms) {}
+    record Preparation(String name,int[] words,List<Route> routes,List<String> uniforms,byte[] pack,InstancedPreparation instanced) {}
     private static final Pattern INCLUDE=Pattern.compile("(?m)^\\s*#include\\s+<([^>]+)>\\s*$");
     private final Map<String,Program> programs;
 
@@ -111,24 +113,7 @@ final class RayniumPrograms {
         var declared=BindGroupLayout.flattenUniforms(pipeline.getBindGroupLayouts());
         var routes=new ArrayList<Route>();
         var names=new ArrayList<String>();
-        for(var entry:new TreeMap<>(program.resources()).entrySet()) {
-            var r=entry.getValue();
-            var uniform=declared.stream().filter(u->u.name().equals(entry.getKey())).findFirst().orElseThrow(
-                ()->new IllegalArgumentException("Missing shader resource "+entry.getKey()));
-            var type=switch(r.type().replaceFirst("^[iu]sampler","sampler")) {
-                case "ubo" -> UniformType.UNIFORM_BUFFER;
-                case "sampler2D","samplerCube","sampler2DRect" -> UniformType.COMBINED_IMAGE_SAMPLER;
-                case "samplerBuffer" -> UniformType.TEXEL_BUFFER;
-                default -> throw new IllegalArgumentException("Unsupported shader resource type "+r.type());
-            };
-            if(uniform.type()!=type) throw new IllegalArgumentException("Resource type mismatch for "+entry.getKey());
-            if(type==UniformType.TEXEL_BUFFER) {
-                NativeTexture.Format.from(Objects.requireNonNull(uniform.gpuFormat()));
-                if(!uniform.gpuFormat().name().equals(r.texelFormat())) throw new IllegalArgumentException("Texel buffer format mismatch for "+uniform.name());
-            }
-            names.add(uniform.name());
-            routes.add(new Route(r.group(),r.binding(),type==UniformType.COMBINED_IMAGE_SAMPLER?r.sampler():-1,type,uniform.gpuFormat(),r.type().endsWith("Cube")));
-        }
+        resolveResources(declared,program.resources(),routes,names);
         var bindings=new ArrayList<Integer>(); var attributes=new ArrayList<Integer>();
         var used=new HashSet<String>();
         var formats=pipeline.getVertexFormatBindings();
@@ -146,6 +131,95 @@ final class RayniumPrograms {
             }
         }
         if(used.size()!=program.inputs().size()) throw new IllegalArgumentException("Missing active vertex input");
+        int[] words=encodeStateWords(pipeline,bindings,attributes);
+        InstancedPreparation instanced=null;
+        if(pack==null && program.instanced()!=null && pipeline.getPrimitiveTopology()==PrimitiveTopology.QUADS) {
+            instanced=prepareInstanced(pipeline,declared,program.instanced());
+        }
+        return new Preparation(program.program(),words,List.copyOf(routes),List.copyOf(names),pack,instanced);
+    }
+
+    private static void resolveResources(List<BindGroupLayout.UniformDescription> declared,Map<String,Resource> resources,
+            List<Route> routes,List<String> names) {
+        for(var entry:new TreeMap<>(resources).entrySet()) {
+            var r=entry.getValue();
+            var uniform=declared.stream().filter(u->u.name().equals(entry.getKey())).findFirst().orElseThrow(
+                ()->new IllegalArgumentException("Missing shader resource "+entry.getKey()));
+            var type=switch(r.type().replaceFirst("^[iu]sampler","sampler")) {
+                case "ubo" -> UniformType.UNIFORM_BUFFER;
+                case "sampler2D","samplerCube","sampler2DRect" -> UniformType.COMBINED_IMAGE_SAMPLER;
+                case "samplerBuffer" -> UniformType.TEXEL_BUFFER;
+                default -> throw new IllegalArgumentException("Unsupported shader resource type "+r.type());
+            };
+            if(uniform.type()!=type) throw new IllegalArgumentException("Resource type mismatch for "+entry.getKey());
+            if(type==UniformType.TEXEL_BUFFER) {
+                NativeTexture.Format.from(Objects.requireNonNull(uniform.gpuFormat()));
+                if(!uniform.gpuFormat().name().equals(r.texelFormat())) throw new IllegalArgumentException("Texel buffer format mismatch for "+uniform.name());
+            }
+            names.add(uniform.name());
+            routes.add(new Route(r.group(),r.binding(),type==UniformType.COMBINED_IMAGE_SAMPLER?r.sampler():-1,type,uniform.gpuFormat(),r.type().endsWith("Cube")));
+        }
+    }
+
+    private record InstancedAttr(int slot,String name,int offset,GpuFormat format) {}
+    private static final List<InstancedAttr> ENTITY_INSTANCED_ATTRS=List.of(
+        new InstancedAttr(0,"LocalPos",0,GpuFormat.RGB32_FLOAT),
+        new InstancedAttr(0,"UV0",12,GpuFormat.RG32_FLOAT),
+        new InstancedAttr(0,"LocalNormal",20,GpuFormat.RGBA8_SNORM),
+        new InstancedAttr(1,"InstRow0",0,GpuFormat.RGBA32_FLOAT),
+        new InstancedAttr(1,"InstRow1",16,GpuFormat.RGBA32_FLOAT),
+        new InstancedAttr(1,"InstRow2",32,GpuFormat.RGBA32_FLOAT),
+        new InstancedAttr(1,"InstColor",48,GpuFormat.RGBA8_UNORM),
+        new InstancedAttr(1,"InstUV1",52,GpuFormat.RG16_SINT),
+        new InstancedAttr(1,"InstUV2",56,GpuFormat.RG16_SINT),
+        new InstancedAttr(1,"InstNormalX",60,GpuFormat.RGBA8_SNORM),
+        new InstancedAttr(1,"InstNormalY",64,GpuFormat.RGBA8_SNORM),
+        new InstancedAttr(1,"InstNormalZ",68,GpuFormat.RGBA8_SNORM)
+    );
+    private static final List<InstancedAttr> PARTICLE_INSTANCED_ATTRS=List.of(
+        new InstancedAttr(0,"CornerPos",0,GpuFormat.RG32_FLOAT),
+        new InstancedAttr(0,"CornerUvMask",12,GpuFormat.RG32_FLOAT),
+        new InstancedAttr(1,"InstPosScale",0,GpuFormat.RGBA32_FLOAT),
+        new InstancedAttr(1,"InstRot",16,GpuFormat.RGBA32_FLOAT),
+        new InstancedAttr(1,"InstUvRect",32,GpuFormat.RGBA32_FLOAT),
+        new InstancedAttr(1,"InstColor",48,GpuFormat.RGBA8_UNORM),
+        new InstancedAttr(1,"InstUV2",52,GpuFormat.RG16_SINT)
+    );
+
+    private static final List<InstancedAttr> SHADOW_INSTANCED_ATTRS=List.of(
+        new InstancedAttr(0,"LocalPos",0,GpuFormat.RGB32_FLOAT),
+        new InstancedAttr(1,"InstOriginU0",0,GpuFormat.RGBA32_FLOAT),
+        new InstancedAttr(1,"InstEdgeXU1",16,GpuFormat.RGBA32_FLOAT),
+        new InstancedAttr(1,"InstEdgeZV0",32,GpuFormat.RGBA32_FLOAT),
+        new InstancedAttr(1,"InstV1",48,GpuFormat.R32_FLOAT),
+        new InstancedAttr(1,"InstColor",52,GpuFormat.RGBA8_UNORM)
+    );
+
+    private static InstancedPreparation prepareInstanced(RenderPipeline pipeline,List<BindGroupLayout.UniformDescription> declared,InstancedProgram inst) {
+        if(inst.pushBytes()>pipeline.pushConstantSize()) return null;
+        int stride0,stride1;
+        List<InstancedAttr> spec;
+        if("entity".equals(inst.mode())) { stride0=24; stride1=80; spec=ENTITY_INSTANCED_ATTRS; }
+        else if("particle".equals(inst.mode())) { stride0=24; stride1=56; spec=PARTICLE_INSTANCED_ATTRS; }
+        else if("shadow".equals(inst.mode())) { stride0=24; stride1=56; spec=SHADOW_INSTANCED_ATTRS; }
+        else return null;
+        var routes=new ArrayList<Route>();
+        var names=new ArrayList<String>();
+        resolveResources(declared,inst.resources(),routes,names);
+        var bindings=List.of(0,stride0,0,1,stride1,1);
+        var attributes=new ArrayList<Integer>();
+        var used=new HashSet<String>();
+        for(var attr:spec) {
+            var input=inst.inputs().get(attr.name());
+            if(input==null) continue;
+            used.add(attr.name());
+            Collections.addAll(attributes,attr.slot(),input.location(),attr.offset(),vertexFormat(attr.format(),input.type()));
+        }
+        if(used.size()!=inst.inputs().size()) throw new IllegalArgumentException("Missing active instanced vertex input for "+inst.program());
+        return new InstancedPreparation(inst.mode(),inst.program(),encodeStateWords(pipeline,bindings,attributes),List.copyOf(routes),List.copyOf(names));
+    }
+
+    private static int[] encodeStateWords(RenderPipeline pipeline,List<Integer> bindings,List<Integer> attributes) {
         var words=new ArrayList<Integer>();
         int topology=switch(pipeline.getPrimitiveTopology()) {
             case DEBUG_LINES -> 1; case DEBUG_LINE_STRIP -> 2; case TRIANGLE_STRIP -> 3; default -> 0;
@@ -168,7 +242,7 @@ final class RayniumPrograms {
             else for(var equation:List.of(blend.color(),blend.alpha()))
                 Collections.addAll(words,blendFactor(equation.sourceFactor()),blendFactor(equation.destFactor()),equation.op().ordinal());
         }
-        return new Preparation(program.program(),words.stream().mapToInt(i->i).toArray(),List.copyOf(routes),List.copyOf(names),pack);
+        return words.stream().mapToInt(i->i).toArray();
     }
 
     private static int blendFactor(BlendFactor f) {

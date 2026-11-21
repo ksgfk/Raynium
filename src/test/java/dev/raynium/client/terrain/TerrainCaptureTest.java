@@ -9,6 +9,13 @@ import static org.junit.jupiter.api.Assertions.*;
 class TerrainCaptureTest {
     @AfterEach void cleanup() { TerrainCapture.activate(false); }
     private static SectionPayload mesh() { return new SectionPayload(TerrainCapture.epoch(),new MeshPayload(TerrainCapture.epoch(),ByteBuffer.allocate(112))); }
+    @Test void largeSectionReusesEightMiBBucket() {
+        DirectUploadPool.clearForTests();
+        var buffer=DirectUploadPool.acquire((4<<20)+1);
+        assertEquals(8<<20,buffer.capacity());
+        DirectUploadPool.release(buffer);
+        assertSame(buffer,DirectUploadPool.acquire(8<<20));
+    }
     @Test void shrinkingAndGrowingCaptureReleasesDiscardedPayloads() {
         var buffer=new TerrainCapture.Buffer(); var a=mesh(); var b=mesh();
         buffer.put(0,a,0,0,0,1,1,0); buffer.put(1024,b,0,0,0,1,1,0); buffer.finish(1025);
@@ -18,13 +25,29 @@ class TerrainCaptureTest {
         for(int i=1;i<buffer.payloads.length;i++) assertNull(buffer.payloads[i]);
         buffer.clear(); assertNull(buffer.payloads[0]); assertEquals(0,buffer.count);
     }
+    @Test void sortedIndexUpdatesOnlyMarkTheCurrentOccupantOfACapturedSlot() {
+        var buffer=new TerrainCapture.Buffer();
+        var old=mesh(); var current=mesh();
+        buffer.put(0,old,0,0,0,1,1,0);
+        buffer.finish(1);
+        buffer.put(0,current,0,0,0,1,1,0);
+        buffer.refreshIndexCandidate(old);
+        assertTrue(buffer.uploadCandidates.isEmpty());
+        buffer.refreshIndexCandidate(current);
+        buffer.refreshIndexCandidate(current);
+        assertArrayEquals(new int[]{0},buffer.uploadCandidates.toIntArray());
+        buffer.finish(0);
+        assertFalse(buffer.contains(current));
+    }
     @Test void frameResetInvalidationAndDeactivationReleaseSnapshotAndReferences() throws Exception {
         var field=TerrainCapture.class.getDeclaredField("BUFFER"); field.setAccessible(true);
         var snapshotFlag=TerrainCapture.class.getDeclaredField("hasSnapshot"); snapshotFlag.setAccessible(true);
+        var capturedFlag=TerrainCapture.class.getDeclaredField("capturedSinceBeginFrame"); capturedFlag.setAccessible(true);
         var buffer=(TerrainCapture.Buffer)field.get(null);
         for(int operation=0;operation<3;operation++) {
             TerrainCapture.activate(true); var payload=mesh();
             buffer.put(0,payload,0,0,0,1,1,0); buffer.finish(1); snapshotFlag.setBoolean(null,true);
+            capturedFlag.setBoolean(null,false);
             TerrainCapture.removed(payload);
             if(operation==0) TerrainCapture.beginFrame();
             else if(operation==1) TerrainCapture.invalidate();
@@ -34,11 +57,49 @@ class TerrainCaptureTest {
             if(operation==0) assertEquals(java.util.List.of(payload),removed);
             else assertTrue(removed.isEmpty());
         }
+        // Consecutive active frame keeps warm snapshot buffer across one beginFrame(), then clears if no capture runs.
+        TerrainCapture.activate(true);
+        var activePayload=mesh();
+        buffer.put(0,activePayload,0,0,0,1,1,0); buffer.finish(1);
+        snapshotFlag.setBoolean(null,true); capturedFlag.setBoolean(null,true);
+        TerrainCapture.beginFrame();
+        assertNull(TerrainCapture.snapshot());
+        assertEquals(1,buffer.count); assertSame(activePayload,buffer.payloads[0]);
+        // Second beginFrame without a capture in between releases warm references.
+        TerrainCapture.beginFrame();
+        assertEquals(0,buffer.count); assertNull(buffer.payloads[0]);
+    }
+    @Test void dirtyIndicesQueueDrainsAndClearsOnInvalidate() {
+        TerrainCapture.activate(true);
+        var payload=mesh();
+        TerrainCapture.recordDirtyIndices(payload);
+        var drained=new ArrayList<SectionPayload>();
+        TerrainCapture.drainDirtyIndices(drained);
+        assertEquals(java.util.List.of(payload),drained);
+        TerrainCapture.recordDirtyIndices(payload);
+        TerrainCapture.invalidate();
+        drained.clear();
+        TerrainCapture.drainDirtyIndices(drained);
+        assertTrue(drained.isEmpty());
     }
     @Test void distanceKeysAreNonnegativeAndMonotone() {
         int last=-1;
         for(double distance:new double[]{0,.001,1,16,1e6,1e16,Double.POSITIVE_INFINITY,Double.NaN}) {
             int key=TerrainCapture.distanceKey(distance); assertTrue(key>=0); assertTrue(key>=last); last=key;
+        }
+    }
+    @Test void noopTerrainStagingBufferSkipsCopiesAndNeverFills() {
+        try(var staging=new NoopTerrainStagingBuffer()) {
+            var data=ByteBuffer.allocate(256);
+            var first=staging.tryAppend(data);
+            var second=staging.tryAppend(data);
+            assertNotNull(first);
+            assertSame(first,second);
+            assertEquals(0,data.position());
+            first.close();
+            try(var uploader=staging.startUploading(null)) {
+                uploader.checkValidFor(staging);
+            }
         }
     }
 }

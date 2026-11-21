@@ -100,30 +100,4 @@ bool MeshPassResources::PrepareOutput(Device& device,TextureFormat format) {
     }
     return true;
 }
-bool MeshPassResources::CreateMaterialBinding(Device& device,const rn_terrain_view_desc& desc,const TextureRegistry& uploaded,
-    MeshMaterialBinding& binding) const {
-    RADRAY_PROFILE_SCOPE_N("Raynium.Material.CreateBinding");
-    const auto resolve=[&](uint32_t id,size_t index,TextureView*& view,uint32_t& mips) {
-        if(id<16) { RADRAY_ERR_LOG("Material references reserved texture ID: {}",id); return false; }
-        const auto* owner=uploaded.Find(id);
-        if(!owner) { RADRAY_ERR_LOG("Material references missing uploaded texture: {}",id); return false; }
-        if(owner->desc.array_layers!=1 || IsDepthStencilFormat(owner->texture->GetDesc().Format)) { RADRAY_ERR_LOG("Terrain requires a color 2D texture: {}",id); return false; }
-        view=owner->texture->GetDefaultView().Get(); mips=owner->desc.mip_levels; binding.textures[index]=owner->texture; return true;
-    };
-    TextureView* albedo{}; TextureView* light{}; uint32_t albedoMips{},lightMips{};
-    if(!resolve(desc.terrain_albedo_texture,0,albedo,albedoMips) || !resolve(desc.terrain_light_texture,1,light,lightMips)) return false;
-    SamplerDescriptor sampler{.AddressS=AddressMode::ClampToEdge,.AddressT=AddressMode::ClampToEdge,.AddressR=AddressMode::ClampToEdge,
-        .MinFilter=FilterMode::Linear,.MagFilter=FilterMode::Linear,.MipmapFilter=FilterMode::Linear,
-        .LodMax=float(albedoMips-1),
-        .AnisotropyClamp=std::clamp(desc.terrain_anisotropy,1u,uint32_t(device.GetCapabilities().Limits.MaxSamplerAnisotropy))};
-    auto* albedoSampler=device.GetOrCreateSampler(sampler).Get();
-    sampler.LodMax=float(lightMips-1); sampler.AnisotropyClamp=1;
-    auto* lightSampler=device.GetOrCreateSampler(sampler).Get();
-    binding.parameters=device.CreateShaderParameterSet({_objects->materialGroupLayout.get()}).Release();
-    if(!albedoSampler || !lightSampler || !binding.parameters ||
-       !binding.parameters->Set(1,0,albedo) || !binding.parameters->Set(2,0,light) ||
-       !binding.parameters->Set(3,0,albedoSampler) || !binding.parameters->Set(4,0,lightSampler) ||
-       !binding.parameters->FlushWrites()) { RADRAY_ERR_LOG("Cannot create SOLID material bindings"); return false; }
-    return true;
-}
 }

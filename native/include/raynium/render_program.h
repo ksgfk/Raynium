@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <raynium/texture_registry.h>
 #include <raynium/shader_pack.h>
 #include <raynium/frame_upload.h>
@@ -22,6 +23,21 @@ struct RasterProgram {
     radray::unique_ptr<radray::gpu::PipelineLayout> layout;
     radray::array<radray::vector<uint32_t>,2> required;
     radray::vector<uint32_t> samplers;
+    radray::array<uint64_t,2> requiredMask{};
+    uint64_t samplerMask{};
+    bool hasHighBindings{};
+
+    bool RequiresBinding(uint32_t group,uint32_t slot) const noexcept {
+        if(slot<64u) return (requiredMask[group]&(uint64_t{1}<<slot))!=0;
+        if(!hasHighBindings) return false;
+        const auto& used=required[group];
+        return std::find(used.begin(),used.end(),slot)!=used.end();
+    }
+    bool HasSampler(uint32_t slot) const noexcept {
+        if(slot<64u) return (samplerMask&(uint64_t{1}<<slot))!=0;
+        if(!hasHighBindings) return false;
+        return std::find(samplers.begin(),samplers.end(),slot)!=samplers.end();
+    }
 };
 class RenderProgramLibrary {
 public:

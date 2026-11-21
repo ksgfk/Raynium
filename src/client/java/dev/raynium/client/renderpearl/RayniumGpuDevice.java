@@ -19,7 +19,24 @@ public final class RayniumGpuDevice implements GpuDevice,AutoCloseable {
     private final RayniumPrograms programs;
     private final FrontendCommandEncoder encoder;
     private final dev.raynium.client.terrain.RetainedTerrain terrain=new dev.raynium.client.terrain.RetainedTerrain();
-    CommandTape currentBatch() { return backend.encoder.tape(); }
+    private final IdentityHashMap<RenderPipeline,RayniumPipeline> compiledPipelines=new IdentityHashMap<>();
+    public CommandTape currentBatch() { return backend.encoder.tape(); }
+    public NativeRenderer nativeRenderer() { return backend.renderer; }
+    public boolean supportsInstanced(RenderPipeline pipeline,String mode) {
+        var compiled=compiledPipelines.get(pipeline);
+        return compiled!=null && compiled.supportsInstanced(mode);
+    }
+    public static CommandTape activeTape(RenderPass pass) {
+        if(!(pass instanceof com.mojang.renderpearl.frontend.FrontendRenderPass frontend) ||
+            !(frontend.backend instanceof RayniumRenderPassBackend recorder)) throw new IllegalArgumentException("Invalid Raynium render pass");
+        return recorder.tape();
+    }
+    public static boolean recordInstancedGeometry(RenderPass pass,String mode,long uploadOffset,int instanceCount,int instanceStride,
+            int[] runMeshIds,int[] runFirstInstances,int[] runInstanceCounts,int runCount) {
+        if(!(pass instanceof com.mojang.renderpearl.frontend.FrontendRenderPass frontend) ||
+            !(frontend.backend instanceof RayniumRenderPassBackend recorder)) return false;
+        return recorder.instancedGeometry(mode,uploadOffset,instanceCount,instanceStride,runMeshIds,runFirstInstances,runInstanceCounts,runCount);
+    }
     public CommandTape.TerrainView captureTerrain(net.minecraft.client.renderer.LevelRenderer level) {
         return terrain.capture(level,backend.renderer,currentBatch());
     }
@@ -78,7 +95,9 @@ public final class RayniumGpuDevice implements GpuDevice,AutoCloseable {
                 if(pushBytes<0 || pushBytes%4!=0 || pushBytes>backend.maxPushBytes)
                     throw new IllegalArgumentException("Unsupported push constant range "+pushBytes);
                 var prepared=programs.prepare(pipeline,source);
-                return ()->RayniumPipeline.register(backend.renderer,pipeline,prepared);
+                return ()->RayniumPipeline.register(backend.renderer,pipeline,prepared,
+                    compiledPipelines::put,
+                    (p,rp)->{ if(compiledPipelines.get(p)==rp) compiledPipelines.remove(p); });
             } catch(RuntimeException failure) {
                 LoggerFactory.getLogger("raynium").error("Cannot prepare pipeline {}",pipeline.getLocation(),failure);
                 return CompiledRenderPipeline.Pending.NULL;
@@ -87,6 +106,8 @@ public final class RayniumGpuDevice implements GpuDevice,AutoCloseable {
     }
     @Override public void close() {
         dev.raynium.client.terrain.TerrainCapture.activate(false);
+        dev.raynium.client.world.RetainedModelManager.onDeviceClose(backend.renderer);
+        compiledPipelines.clear();
         backend.close();
     }
 }

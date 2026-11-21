@@ -1,0 +1,17 @@
+{
+  "world": "../../run/saves/Newisle 1.3.1 - stress",
+  "optionsFile": "stress-options.txt",
+  "outputDir": "../../build/benchmarks/newisle-stress",
+  "width": 1920,
+  "height": 1080,
+  "renderDistance": 32,
+  "simulationDistance": 8,
+  "warmupSeconds": 90,
+  "route": [
+    { "seconds": 0,  "x": 232,  "y": 100, "z": -610, "yaw": 45,  "pitch": 10 },
+    { "seconds": 20, "x": -86,  "y": 111, "z": -291, "yaw": 22,  "pitch": 12 },
+    { "seconds": 36, "x": -194, "y": 119, "z": -245, "yaw": 145, "pitch": 30 },
+    { "seconds": 50, "x": -128, "y": 220, "z": -128, "yaw": 0,   "pitch": 15 },
+    { "seconds": 60, "x": -128, "y": 220, "z": -128, "yaw": 0,   "pitch": 15 }
+  ]
+}

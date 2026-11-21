@@ -9,3 +9,11 @@ accessible field com/mojang/renderpearl/frontend/FrontendGpuSurface hasBlittedTe
 accessible field com/mojang/renderpearl/frontend/FrontendRenderPass backend Lcom/mojang/renderpearl/backend/api/RenderPassBackend;
 accessible field net/minecraft/client/renderer/oit/OitRenderPassProvider$Parameters depthBoundsTargetView Lcom/mojang/renderpearl/api/textures/GpuTextureView;
 accessible field net/minecraft/client/renderer/oit/OitRenderPassProvider$Parameters transmittanceTargetViews [Lcom/mojang/renderpearl/api/textures/GpuTextureView;
+accessible class net/minecraft/client/renderer/feature/RenderTypeFeatureRenderer$Group
+accessible class net/minecraft/client/renderer/feature/QuadParticleFeatureRenderer$PreparedGroup
+accessible method net/minecraft/client/renderer/feature/QuadParticleFeatureRenderer$PreparedGroup <init> (Ljava/util/Map;Ljava/util/Map;Z)V
+accessible class net/minecraft/client/renderer/state/level/QuadParticleRenderState$Storage
+accessible field net/minecraft/client/renderer/state/level/QuadParticleRenderState$Storage floatValues [F
+accessible field net/minecraft/client/renderer/state/level/QuadParticleRenderState$Storage intValues [I
+accessible field net/minecraft/client/renderer/state/level/QuadParticleRenderState$Storage currentParticleIndex I
+accessible class net/minecraft/client/resources/model/ModelManager$ReloadState

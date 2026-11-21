@@ -52,9 +52,13 @@ static_assert(sizeof(rn_device_info)==592 && offsetof(rn_device_info,max_buffer_
 static_assert(sizeof(rn_uploaded_texture_desc)==32 && offsetof(rn_uploaded_texture_desc,array_layers)==24);
 static_assert(sizeof(rn_texture_upload_desc)==56 && offsetof(rn_texture_upload_desc,pixels)==32 && offsetof(rn_texture_upload_desc,byte_size)==40 && offsetof(rn_texture_upload_desc,array_layer)==48);
 static_assert(sizeof(rn_renderer_desc)==24 && offsetof(rn_renderer_desc,shader_pack)==8 && offsetof(rn_renderer_desc,shader_pack_size)==16);
+static_assert(sizeof(rn_terrain_mesh_layout)==72 && alignof(rn_terrain_mesh_layout)==8);
+static_assert(offsetof(rn_terrain_mesh_layout,flags)==28 && offsetof(rn_terrain_mesh_layout,minimum)==32 &&
+              offsetof(rn_terrain_mesh_layout,maximum)==44 && offsetof(rn_terrain_mesh_layout,original_quad_groups)==56 &&
+              offsetof(rn_terrain_mesh_layout,original_quad_groups_bytes)==64 && offsetof(rn_terrain_mesh_layout,reserved)==68);
 static_assert(sizeof(rn_index_update)==24);
-static_assert(sizeof(rn_mesh_update)==24);
-static_assert(offsetof(rn_mesh_update,vertex_count)==16 && offsetof(rn_mesh_update,layer)==20);
+static_assert(sizeof(rn_mesh_update)==32);
+static_assert(offsetof(rn_mesh_update,vertex_count)==16 && offsetof(rn_mesh_update,layer)==20 && offsetof(rn_mesh_update,layout)==24);
 static_assert(sizeof(rn_visible_item)==24);
 static_assert(offsetof(rn_visible_item,mesh)==0 && offsetof(rn_visible_item,element_mask)==8);
 static_assert(offsetof(rn_visible_item,sort_key)==12 && offsetof(rn_visible_item,first_instance)==16 && offsetof(rn_visible_item,instance_count)==20);
@@ -287,6 +291,16 @@ rn_status rn_upload_texture(rn_renderer* renderer,const rn_texture_upload_desc* 
 rn_status rn_destroy_texture(rn_renderer* renderer,uint32_t id) noexcept {
     return Invoke("rn_destroy_texture",[&] { return Owner(renderer) && renderer->renderer->DestroyTexture(id); });
 }
+rn_status rn_upsert_model_mesh(rn_renderer* renderer,int32_t mesh_id,const void* vertex_data,uint32_t vertex_bytes,uint32_t vertex_count,uint32_t index_count,uint32_t* out_page_id) noexcept {
+    return Invoke("rn_upsert_model_mesh",[&] {
+        if(!Owner(renderer)) return false;
+        if(!out_page_id || !vertex_data || !vertex_bytes) { RADRAY_ERR_LOG("rn_upsert_model_mesh: null or empty vertex data"); return false; }
+        return renderer->renderer->UpsertModelMesh(mesh_id,{static_cast<const radray::byte*>(vertex_data),vertex_bytes},vertex_count,index_count,*out_page_id);
+    });
+}
+rn_status rn_remove_model_mesh(rn_renderer* renderer,int32_t mesh_id) noexcept {
+    return Invoke("rn_remove_model_mesh",[&] { return Owner(renderer) && renderer->renderer->RemoveModelMesh(mesh_id); });
+}
 rn_status rn_create_query_pool(rn_renderer* renderer,uint32_t count,uint32_t* id) noexcept {
     return Invoke("rn_create_query_pool",[&] { return Owner(renderer) && id && renderer->renderer->CreateQueryPool(count,*id); });
 }
@@ -317,12 +331,13 @@ rn_status rn_destroy_buffer(rn_renderer* renderer,uint32_t id) noexcept {
     return Invoke("rn_destroy_buffer",[&] { return Owner(renderer) && renderer->renderer->DestroyBuffer(id); });
 }
 static_assert(sizeof(rn_buffer_desc)==24 && sizeof(rn_buffer_result)==16 && sizeof(rn_mapped_range)==24);
-static_assert(sizeof(rn_batch_desc)==80 && sizeof(rn_submit_result)==160);
+static_assert(sizeof(rn_batch_desc)==96 && sizeof(rn_submit_result)==160);
+static_assert(offsetof(rn_batch_desc,instance_uploads)==48 && offsetof(rn_batch_desc,dirty_ranges)==64 && offsetof(rn_batch_desc,views)==80);
 rn_status rn_submit_frame(rn_renderer* renderer,const rn_batch_desc* batch,rn_submit_result* result) noexcept {
     return Invoke("rn_submit_frame",[&] {
         if(!result) return false;
         *result={0,RN_PRESENT_NONE,0};
-        if(!Owner(renderer) || !batch || (batch->surface && batch->surface!=renderer->swapchain)) return false;
+        if(!Owner(renderer) || !batch || batch->struct_size!=sizeof(*batch) || (batch->surface && batch->surface!=renderer->swapchain)) return false;
         return renderer->renderer->SubmitFrame(*batch,batch->surface?batch->surface->swapchain.get():nullptr,*result);
     });
 }

@@ -13,7 +13,10 @@ JAVA = 'src/client/java/dev/raynium/client/'
 IMMEDIATE_JAVA = [JAVA+'renderpearl/RayniumRenderPassBackend.java', JAVA+'renderpearl/RayniumPrograms.java']
 IMMEDIATE_NATIVE = ['native/src/immediate_pass.cpp', 'native/src/immediate_draw.cpp']
 TERRAIN_JAVA = [JAVA+'mixin/TerrainAnchorMixin.java', JAVA+'terrain/RetainedTerrain.java']
-TERRAIN_NATIVE = ['native/src/terrain_feature.cpp', 'native/src/terrain_draw.cpp']
+TERRAIN_NATIVE = ['native/src/terrain_feature.cpp', 'native/src/terrain_residency.cpp', 'native/src/terrain_draw.cpp']
+MODEL_JAVA = [JAVA+'world/RetainedModelManager.java', JAVA+'world/ModelFastTrack.java']
+PARTICLE_JAVA = [JAVA+'world/ParticleFastTrack.java']
+WORLD_NATIVE = ['native/src/model_mesh_registry.cpp', 'native/src/world_features.cpp']
 TERRAIN_PROGRAMS = ['terrain','terrain_cutout','terrain_translucent','terrain_oit_bounds','terrain_oit_transmittance','terrain_oit_accumulate']
 
 
@@ -99,6 +102,12 @@ def main():
         if interface['names'] != entry['names']:
             raise ValueError('Catalog/interface identity mismatch: '+name)
         programs = TERRAIN_PROGRAMS if kind == 'terrain' else [interface['program']]
+        instanced = interface.get('instanced')
+        if instanced:
+            programs = [*programs, instanced['program']]
+            extra_java = MODEL_JAVA if instanced['mode'] == 'entity' else PARTICLE_JAVA
+            adapters = [*adapters, *extra_java]
+            native = [*native, *WORLD_NATIVE]
         for program in programs + [interface['program']]:
             for backend in (0, 1):
                 if (program.encode(), backend) not in packed:

@@ -18,15 +18,25 @@ class ShaderPackTest(unittest.TestCase):
         programs = set(PROGRAMS)
         source_index = json.loads((Path(__file__).resolve().parents[2] /
             'src/client/resources/assets/raynium/shaderpacks/default.json').read_text(encoding='utf-8'))
+        self.assertEqual(4, sum(entry.get('instanced', {}).get('mode') == 'shadow' for entry in source_index.values()))
         for key, entry in source_index.items():
             self.assertRegex(key, r'^p_[0-9a-f]{64}$')
             self.assertEqual(key[:58], entry['program'])
             programs.add(entry['program'])
+            if 'instanced' in entry:
+                inst = entry['instanced']
+                self.assertIn(inst['mode'], ('entity', 'particle', 'shadow'))
+                self.assertEqual(key[:57] + '_inst', inst['program'])
+                programs.add(inst['program'])
         self.assertEqual({(name.encode(), target) for name in programs for target in (0, 1)}, verify_shader_pack(self.data))
 
     def test_packed_bindings_are_covered_by_each_program_interface(self):
         resource_root = Path(__file__).resolve().parents[2] / 'src/client/resources/assets/raynium/shaderpacks'
-        catalog = {entry['program']: entry for entry in json.loads((resource_root/'default.json').read_text()).values()}
+        catalog = {}
+        for entry in json.loads((resource_root/'default.json').read_text()).values():
+            catalog[entry['program']] = entry
+            if 'instanced' in entry:
+                catalog[entry['instanced']['program']] = entry['instanced']
         count = struct.unpack_from('<I', self.data, 12)[0]
         for i in range(count):
             name, target, offset, length = struct.unpack_from('<64s3I', self.data, 24+96*i)

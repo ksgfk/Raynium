@@ -19,9 +19,14 @@ def main():
     base = dict(world=str(args.world.resolve()), optionsFile=str(args.options.resolve()),
                 width=1920, height=1080, renderDistance=32, simulationDistance=8,
                 warmupSeconds=2 if args.smoke else 60, startupTimeoutSeconds=600, shutdownTimeoutSeconds=180,
-                captureTimeoutSeconds=240, terrainSubmission='auto', profilerEnabled=False, jfrEnabled=False,
+                captureTimeoutSeconds=240, terrainSubmission='auto', clearBenchmarkEntities=True, profilerEnabled=False, jfrEnabled=False,
                 route=[point(0), point(duration/4, x=-12, yaw=155), point(duration/2, x=12, yaw=-155), point(duration, pitch=10)])
-    commands = ['weather clear', 'time set 6000', 'fill -24 179 -24 24 179 24 minecraft:smooth_stone', 'tick unfreeze']
+    # Seed each fill with one changed block so rerunning the fixture also succeeds.
+    commands = ['weather clear', 'time set 6000',
+                'setblock 0 185 0 minecraft:barrier',
+                'fill -24 180 -24 24 185 24 minecraft:air strict',
+                'setblock -24 179 -24 minecraft:barrier',
+                'fill -24 179 -24 24 179 24 minecraft:smooth_stone', 'tick unfreeze']
     entities = commands.copy()
     kinds = ['armor_stand', 'zombie', 'cow', 'sheep', 'slime', 'creeper', 'enderman', 'spider']
     for n in range(128):
@@ -36,7 +41,7 @@ def main():
                              'fill -18 180 -19 18 184 -19 minecraft:blue_stained_glass',
                              'fill -18 180 12 18 184 12 minecraft:glass',
                              'fill -18 180 14 18 180 18 minecraft:water']
-    gui = commands + ['clear @s']
+    gui = commands + ['give @s minecraft:stick', 'clear @s']
     items = ['clock','compass','diamond_sword','enchanted_book','filled_map','shield','bow','crossbow','trident',
              'white_banner','blue_shulker_box','end_crystal','spyglass','recovery_compass','brush','wolf_armor',
              'leather_chestplate','netherite_chestplate','totem_of_undying','glass','water_bucket','lava_bucket',

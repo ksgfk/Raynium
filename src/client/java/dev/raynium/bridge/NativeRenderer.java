@@ -7,7 +7,7 @@ import static java.lang.foreign.ValueLayout.*;
 
 /** Persistent terrain residency owner. All frame arrays are borrowed only until present returns. */
 public final class NativeRenderer implements AutoCloseable {
-    public static final int RGSS=1, IMPROVED_TRANSPARENCY=4, WIREFRAME=128;
+    public static final int RGSS=1, IMPROVED_TRANSPARENCY=4, WIREFRAME=128, REUSE_VISIBLE=256, REUSE_INSTANCES=512;
     public record Capture(int width,int height,byte[] rgba) {}
     public record SubmitResult(long sequence,int outcome,boolean success,boolean deviceLost,long[] measurements) {}
     public record WaitResult(long completedSequence,boolean success,boolean deviceLost) {}
@@ -97,6 +97,29 @@ public final class NativeRenderer implements AutoCloseable {
     }
     void uploadTexture(MemorySegment descriptor) { checkOpen(); NativeBindings.call(bindings.uploadTexture,"upload texture",handle,descriptor); }
     void destroyTexture(int id) { owner.checkOpen(); NativeBindings.call(bindings.destroyTexture,"destroy texture",handle,id); }
+    public int upsertModelMesh(int meshId,byte[] vertices,int vertexCount,int indexCount) {
+        checkOpen();
+        if(meshId<16 || vertices==null || vertices.length==0) throw new IllegalArgumentException("Invalid model mesh upsert");
+        try(var arena=Arena.ofConfined()) {
+            var nativeBytes=arena.allocateFrom(JAVA_BYTE,vertices);
+            return upsertModelMesh(meshId,nativeBytes,vertexCount,indexCount);
+        }
+    }
+    public int upsertModelMesh(int meshId,MemorySegment vertices,int vertexCount,int indexCount) {
+        checkOpen();
+        if(meshId<16 || vertices==null || !vertices.isNative() || vertices.byteSize()<=0 || vertices.byteSize()>Integer.MAX_VALUE)
+            throw new IllegalArgumentException("Invalid native model mesh upsert");
+        try(var arena=Arena.ofConfined()) {
+            var page=arena.allocate(JAVA_INT);
+            NativeBindings.call(bindings.upsertModelMesh,"upsert model mesh",handle,meshId,vertices,(int)vertices.byteSize(),vertexCount,indexCount,page);
+            return page.get(JAVA_INT,0);
+        }
+    }
+    public void removeModelMesh(int meshId) {
+        checkThread();
+        if(meshId<16) throw new IllegalArgumentException("Invalid model mesh id");
+        if(!isClosed()) NativeBindings.call(bindings.removeModelMesh,"remove model mesh",handle,meshId);
+    }
     public Optional<Capture> pollCapture(long sequence) {
         checkOpen();
         try(var arena=Arena.ofConfined()) {
@@ -180,29 +203,30 @@ public final class NativeRenderer implements AutoCloseable {
     }
     public SubmitResult submitFrame(MemorySegment commands,MemorySegment uploads,NativeSwapchain surface) {
         checkOpen();
-        return submitFrame(commands,uploads,surface,List.of(),false);
+        return submitFrame(commands,uploads,MemorySegment.NULL,surface,List.of(),false);
     }
-    public SubmitResult submitFrame(MemorySegment commands,MemorySegment uploads,NativeSwapchain surface,List<MemorySegment> views,boolean measure) {
+    public SubmitResult submitFrame(MemorySegment commands,MemorySegment uploads,MemorySegment instanceUploads,NativeSwapchain surface,List<MemorySegment> views,boolean measure) {
         checkOpen();
         if(surface!=null && surface!=swapchain) throw new IllegalArgumentException("Invalid submit surface");
         try(var arena=Arena.ofConfined()) {
-            var desc=arena.allocate(80,8);
-            desc.set(JAVA_INT,0,80); desc.set(JAVA_INT,4,measure?1:0);
+            var desc=arena.allocate(96,8);
+            desc.set(JAVA_INT,0,96); desc.set(JAVA_INT,4,measure?1:0);
             if(!views.isEmpty()) {
                 var records=arena.allocate((long)NativeFrameBuffer.BYTE_SIZE*views.size(),8);
                 for(int i=0;i<views.size();++i) records.asSlice((long)NativeFrameBuffer.BYTE_SIZE*i,NativeFrameBuffer.BYTE_SIZE).copyFrom(views.get(i));
-                desc.set(ADDRESS,64,records); desc.set(JAVA_INT,72,views.size());
+                desc.set(ADDRESS,80,records); desc.set(JAVA_INT,88,views.size());
             }
             desc.set(ADDRESS,8,surface==null?MemorySegment.NULL:surface.handle);
             desc.set(ADDRESS,16,commands);
             desc.set(JAVA_LONG,24,commands.byteSize());
             desc.set(ADDRESS,32,uploads);
             desc.set(JAVA_LONG,40,uploads.byteSize());
+            desc.set(ADDRESS,48,instanceUploads); desc.set(JAVA_LONG,56,instanceUploads.byteSize());
             if(!writableMappings.isEmpty()) {
                 var dirty=arena.allocate(24L*writableMappings.size(),8);
                 for(int i=0;i<writableMappings.size();++i) writableMappings.get(i).encode(dirty,24L*i);
-                desc.set(ADDRESS,48,dirty);
-                desc.set(JAVA_INT,56,writableMappings.size());
+                desc.set(ADDRESS,64,dirty);
+                desc.set(JAVA_INT,72,writableMappings.size());
             }
             var result=arena.allocate(160,8);
             int status=(int)bindings.submitFrame.invokeExact(handle,desc,result);

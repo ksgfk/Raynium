@@ -49,7 +49,7 @@ class NativeSurfaceFailureTest {
         }
         private int submit(MemorySegment renderer,MemorySegment batch,MemorySegment output) throws Throwable {
             ++submits;
-            targetedSurface=batch.reinterpret(80).get(ADDRESS,8).address()!=0;
+            targetedSurface=batch.reinterpret(96).get(ADDRESS,8).address()!=0;
             var result=output.reinterpret(160);
             if(failBeforeSubmit) result.fill((byte)0);
             else if((int)submit.invokeExact(renderer,batch,output)!=0) return 1;

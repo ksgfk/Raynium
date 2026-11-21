@@ -11,9 +11,9 @@
 | Minecraft Java Edition | 26.3 |
 | Java | 25 |
 | Fabric Loader | 0.20.1 |
-| Fabric API | 0.165.0+26.3 |
-| Fabric Loom | 1.19.3 |
-| Gradle Wrapper | 9.8.2 |
+| Fabric API | 0.166.2+26.3 |
+| Fabric Loom | 1.19.4 |
+| Gradle Wrapper | 9.9.2 |
 
 版本集中在 `gradle.properties`；Gradle 版本和分发包 SHA-256 在 `gradle/wrapper/gradle-wrapper.properties`。使用仓库内的 Wrapper，无须全局安装 Gradle。
 

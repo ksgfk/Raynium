@@ -4,6 +4,7 @@
 #include <raynium/modular_frame_pipeline.h>
 #include <radray/runtime/frame_scheduler.h>
 #include <raynium/immediate_pipeline.h>
+#include <raynium/static_geometry_registry.h>
 #include <span>
 #include <utility>
 
@@ -29,16 +30,25 @@ public:
     bool CreateTexture(const rn_uploaded_texture_desc& desc) { return _uploaded.Create(_device,desc); }
     bool UploadTexture(const rn_texture_upload_desc& desc) { return _uploaded.Upload(desc); }
     bool DestroyTexture(uint32_t id) { return _uploaded.Destroy(id); }
+    bool UpsertModelMesh(int32_t meshId,std::span<const radray::byte> vertices,uint32_t vertexCount,uint32_t indexCount,uint32_t& pageId) {
+        return !IsTerminal() && _staticGeometry->Upsert(meshId,vertices,vertexCount,indexCount,pageId);
+    }
+    bool RemoveModelMesh(int32_t meshId) { return _staticGeometry->Remove(meshId); }
     bool PollCapture(uint64_t sequence,rn_capture_info& info,void* pixels,uint64_t capacity) { return _pipeline->PollCapture(sequence,info,pixels,capacity); }
     bool SupportsWireframe() const { return _pipeline->Resources().SupportsWireframe(); }
     radray::DeviceContext& Runtime() { return _device; }
 private:
     Renderer(radray::DeviceContext& device,radray::unique_ptr<radray::FrameScheduler> scheduler,
-        radray::unique_ptr<radray::VertexBufferPool> vertices,radray::unique_ptr<radray::IndexBufferPool> indices,ModularFramePipeline* pipeline)
-        :_device(device),_scheduler(std::move(scheduler)),_terrain(device,std::move(vertices),std::move(indices)),_pipeline(pipeline) {}
+        radray::unique_ptr<radray::VertexBufferPool> vertices,radray::unique_ptr<radray::VertexBufferPool> translucentVertices,
+        radray::unique_ptr<radray::IndexBufferPool> quadPool,radray::unique_ptr<radray::IndexBufferPool> indices,
+        radray::unique_ptr<StaticGeometryRegistry> staticGeometry,ModularFramePipeline* pipeline)
+        :_device(device),_scheduler(std::move(scheduler)),
+         _terrain(device,std::move(vertices),std::move(translucentVertices),std::move(quadPool),std::move(indices)),
+         _staticGeometry(std::move(staticGeometry)),_pipeline(pipeline) {}
     radray::DeviceContext& _device;
     radray::unique_ptr<radray::FrameScheduler> _scheduler;
     TerrainResidency _terrain;
+    radray::unique_ptr<StaticGeometryRegistry> _staticGeometry;
     ModularFramePipeline* _pipeline;
     TextureRegistry _uploaded;
     QueryRegistry _queries;

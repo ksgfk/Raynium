@@ -78,8 +78,58 @@ final class RayniumRenderPassBackend implements RenderPassBackend {
     @Override public void setIndexBuffer(GpuBuffer buffer,IndexType type) { indexBuffer=buffer; indexType=type; }
     @Override public void writeTimestamp(GpuQueryPool pool,int index) { tape.writeTimestamp((RayniumQueryPool)pool,index); }
 
+    CommandTape tape() { return tape; }
+
     void terrain(CommandTape.TerrainView view,int stage,TextureViewAndSampler atlas,TextureViewAndSampler light,GpuTextureView[] inputs) {
         tape.terrain(view,stage,scissor,atlas,light,inputs);
+    }
+
+    private void stageInstancedUniforms() {
+        bindingCount=0;
+        var routes=pipeline.instancedRoutes;
+        var map=pipeline.instancedUniformMap;
+        for(int i=0;i<routes.size();++i) {
+            var route=routes.get(i);
+            var value=uniforms[map[i]];
+            if(value==null) throw new IllegalStateException("Unbound shader resource "+i);
+            switch(route.type()) {
+                case UNIFORM_BUFFER -> stageBuffer(3,route.binding(),(GpuBufferSlice)value,0,GpuBuffer.USAGE_UNIFORM);
+                case TEXEL_BUFFER -> stageBuffer(4,route.binding(),(GpuBufferSlice)value,NativeTexture.Format.from(route.format()).ordinal(),GpuBuffer.USAGE_UNIFORM_TEXEL_BUFFER);
+                case COMBINED_IMAGE_SAMPLER -> stageTexture(route,(TextureViewAndSampler)value);
+            }
+        }
+    }
+
+    private void writeBindings(MemorySegment record,long at) {
+        for(int i=0;i<bindingCount;++i) {
+            int id;
+            var image=bindingImage[i];
+            if(image!=null) { id=image.id(); tape.retain(image); }
+            else { var buffer=bindingBuffer[i]; id=buffer.id(); tape.retain(buffer); }
+            record.set(JAVA_INT,at,bindingKind[i]); record.set(JAVA_INT,at+4,bindingSlot[i]); record.set(JAVA_INT,at+8,id);
+            record.set(JAVA_INT,at+12,bindingFormat[i]); record.set(JAVA_LONG,at+16,bindingOffset[i]); record.set(JAVA_LONG,at+24,bindingLength[i]);
+            record.set(JAVA_INT,at+32,bindingMip[i]); record.set(JAVA_INT,at+36,bindingLevels[i]);
+            record.set(JAVA_FLOAT,at+40,bindingLod[i]); record.set(JAVA_INT,at+44,bindingAnisotropy[i]);
+            at+=48;
+        }
+    }
+
+    boolean instancedGeometry(String mode,long uploadOffset,int instanceCount,int instanceStride,int[] runMeshIds,int[] runFirstInstances,int[] runInstanceCounts,int runCount) {
+        if(pipeline==null || !pipeline.supportsInstanced(mode)) return false;
+        if(instanceCount<=0 || runCount<=0) return true;
+        stageInstancedUniforms();
+        var record=tape.beginInstancedGeometry(pipeline,uploadOffset,instanceCount,instanceStride,runCount,
+            scissor.x(),scissor.y(),scissor.width(),scissor.height(),bindingCount,push,pushLength);
+        writeBindings(record,56);
+        long runAt=56+48L*bindingCount;
+        for(int i=0;i<runCount;++i) {
+            record.set(JAVA_INT,runAt,runMeshIds[i]);
+            record.set(JAVA_INT,runAt+4,runFirstInstances[i]);
+            record.set(JAVA_INT,runAt+8,runInstanceCounts[i]);
+            record.set(JAVA_INT,runAt+12,0);
+            runAt+=16;
+        }
+        return true;
     }
 
     private void growBindings() {

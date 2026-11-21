@@ -22,6 +22,7 @@ abstract class RenderSectionIndicesMixin {
         var snapshot=payload.copyIndices(source,mesh.getSectionDraw(layer).indexType().bytes);
         UberGpuBuffer.UploadCallback<CompiledSectionMesh> adopted=value->{
             payload.indices=snapshot;
+            TerrainCapture.recordDirtyIndices(section);
             callback.bufferHasBeenUploaded(value);
         };
         return original.call(buffer,allocationKey,adopted,source);

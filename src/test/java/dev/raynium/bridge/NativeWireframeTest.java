@@ -129,22 +129,102 @@ class NativeWireframeTest {
             first.indices=List.of(new NativeRenderer.Index(2,ALL));
             submit(renderer,atlas,light,light,first); byte[] expected=await(renderer,1);
 
-            // Six live 28 MiB vertex and 6 MiB index intervals exceed both 32 MiB pool pages.
+            // 5 x 28 MiB crosses an opaque page. 24 x (28 MiB vertices, 6 MiB indices)
+            // crosses both translucent geometry buffers while keeping each upload batch small.
             byte[] filler=new byte[(1<<20)*28]; int[] fillerIndices=new int[(1<<20)/4*6];
-            var meshes=new ArrayList<NativeRenderer.Mesh>(); var indices=new ArrayList<NativeRenderer.Index>();
-            for(int i=0;i<6;i++) {
-                meshes.add(new NativeRenderer.Mesh(100+i,filler,1<<20,2));
-                indices.add(new NativeRenderer.Index(100+i,fillerIndices));
-            }
-            meshes.add(new NativeRenderer.Mesh(1,corner(false),8,0));
-            var grown=frame(2,1,atlas.id(),light.id(),1,-1); grown.meshes=meshes; grown.indices=indices;
-            submit(renderer,atlas,light,light,grown); assertArrayEquals(expected,await(renderer,2),"Both pools crossed pages before the visible wireframe allocation");
+            var opaqueMeshes=new ArrayList<NativeRenderer.Mesh>();
+            for(int i=0;i<5;i++) opaqueMeshes.add(new NativeRenderer.Mesh(100+i,filler,1<<20,0));
+            var growOpaque=frame(2,1,atlas.id(),light.id(),2,-1); growOpaque.meshes=opaqueMeshes;
+            submit(renderer,atlas,light,light,growOpaque); assertArrayEquals(expected,await(renderer,2));
 
-            var retired=frame(3,1,atlas.id(),light.id(),1,-1); retired.flags=0;
-            retired.removedMeshes=new long[]{100,101,102,103,104,105}; submit(renderer,atlas,light,light,retired);
-            var failed=frame(4,1,atlas.id(),light.id(),1,-1);
+            var removed=new long[5+24];
+            for(int i=0;i<5;i++) removed[i]=100+i;
+            for(int group=0;group<4;group++) {
+                var meshes=new ArrayList<NativeRenderer.Mesh>();
+                var indices=new ArrayList<NativeRenderer.Index>();
+                for(int i=0;i<6;i++) {
+                    int id=110+6*group+i;
+                    meshes.add(new NativeRenderer.Mesh(id,filler,1<<20,2));
+                    indices.add(new NativeRenderer.Index(id,fillerIndices));
+                    removed[5+6*group+i]=id;
+                }
+                boolean last=group==3;
+                if(last) meshes.add(new NativeRenderer.Mesh(1,corner(false),8,0));
+                int sequence=3+group;
+                var grown=frame(sequence,1,atlas.id(),light.id(),last?1:2,-1);
+                grown.meshes=meshes; grown.indices=indices;
+                submit(renderer,atlas,light,light,grown); assertArrayEquals(expected,await(renderer,sequence));
+            }
+            var retired=frame(7,1,atlas.id(),light.id(),1,-1); retired.flags=0;
+            retired.removedMeshes=removed;
+            submit(renderer,atlas,light,light,retired);
+            var failed=frame(8,1,atlas.id(),light.id(),1,-1);
             failed.instances=List.of();
             assertThrows(IllegalStateException.class,()->submit(renderer,atlas,light,light,failed));
+        }
+    }
+
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void preanalyzedDirectUploadAndReuseFlagsMatchLegacyPixelsAndRejectInvalidReuse(NativeEnvironment.Backend backend) throws Exception {
+        try(var environment=new NativeEnvironment(NativeTestSupport.locate(gameDirectory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var window=new NativeSwapchainTest.Window(); var runtime=environment.createRuntime();
+            var renderer=runtime.createRenderer(NativeTestSupport.shaders());
+            var chain=renderer.createSwapchain(window.hwnd,640,360,NativeSwapchain.PresentMode.IMMEDIATE);
+            var atlas=renderer.createTexture(1,1,1,NativeTexture.Format.RGBA8);
+            var light=renderer.createTexture(16,16,1,NativeTexture.Format.RGBA8)) {
+            atlas.upload(0,0,0,1,1,new byte[]{-1,-1,-1,-1});
+            byte[] lighting=new byte[1024]; Arrays.fill(lighting,(byte)255); light.upload(0,0,0,16,16,lighting);
+
+            // Reference frame using legacy heap mesh upload (layout == NULL).
+            byte[] rawCorner=corner(false);
+            var legacy=frame(1,1,atlas.id(),light.id(),1,-1);
+            legacy.flags=0;
+            legacy.meshes=List.of(new NativeRenderer.Mesh(1,rawCorner,8,0));
+            submit(renderer,atlas,light,light,legacy);
+            byte[] expected=await(renderer,1);
+            int colored=0; for(int i=0;i<expected.length;i+=4) if(expected[i]!=0 || expected[i+1]!=0) colored++;
+            assertTrue(colored>100,"Solid corner must be visible");
+
+            // Epoch 2: upload preanalyzed MeshPayload via zero-copy meshDirect + render frame 2.
+            var payload=new dev.raynium.client.terrain.MeshPayload(2,ByteBuffer.wrap(rawCorner),0);
+            try(var color=renderer.createTexture(128,128,1,1,NativeTexture.Format.RGBA8,NativeTexture.ATTACHMENT|NativeTexture.READBACK);
+                var depth=renderer.createTexture(128,128,1,1,NativeTexture.Format.DEPTH32F,NativeTexture.ATTACHMENT)) {
+                var f2=frame(2,2,atlas.id(),light.id(),1,-1); f2.flags=0;
+                try(var storage=new NativeFrameBuffer(); var tape=new dev.raynium.client.renderpearl.CommandTape(renderer)) {
+                    var wf=payload.originalQuadGroups;
+                    storage.begin(1,0,1,0,wf==null?0:NativeFrameBuffer.alignedBytes(wf.length));
+                    storage.terrain(atlas.id(),light.id(),1);
+                    storage.meshDirect(1L,java.lang.foreign.MemorySegment.ofBuffer(payload.directVertices()),
+                        payload.vertexCount,0,payload.directVertices(),payload.groupQuadCounts,payload.layoutFlags,
+                        payload.minBounds,payload.maxBounds,wf);
+                    storage.instance(0,0,0,1f);
+                    storage.visible(1L,-1,0,0,1);
+                    var view=tape.addView(storage,storage.finish(f2),atlas,light);
+                    dev.raynium.client.renderpearl.TerrainTestPass.record(tape,view,color,depth,atlas,light);
+                    tape.captureColor(new dev.raynium.client.renderpearl.CommandTape.Region(color,0,0,0,0,128,128),2);
+                    tape.submit();
+                }
+                payload.releaseVertices();
+                assertArrayEquals(expected,await(renderer,2),"Preanalyzed meshDirect must match legacy AnalyzeTerrainMesh pixels");
+
+                // Frame 3: reuse both visible & instances (0 visible/instance rows uploaded).
+                var f3=frame(3,2,atlas.id(),light.id(),1,-1);
+                f3.flags=NativeRenderer.REUSE_VISIBLE|NativeRenderer.REUSE_INSTANCES;
+                f3.visible=List.of(); f3.instances=List.of();
+                try(var storage=new NativeFrameBuffer(); var tape=new dev.raynium.client.renderpearl.CommandTape(renderer)) {
+                    var view=tape.addView(storage,storage.marshal(f3),atlas,light);
+                    dev.raynium.client.renderpearl.TerrainTestPass.record(tape,view,color,depth,atlas,light);
+                    tape.captureColor(new dev.raynium.client.renderpearl.CommandTape.Region(color,0,0,0,0,128,128),3);
+                    tape.submit();
+                }
+                assertArrayEquals(expected,await(renderer,3),"REUSE_VISIBLE|REUSE_INSTANCES must preserve cached terrain pixels");
+
+                // Frame 4: invalid reuse flag combination (REUSE_INSTANCES without REUSE_VISIBLE) must fail.
+                var f4=frame(4,2,atlas.id(),light.id(),1,-1);
+                f4.flags=NativeRenderer.REUSE_INSTANCES;
+                f4.instances=List.of();
+                assertThrows(IllegalStateException.class,()->submit(renderer,atlas,light,light,f4));
+            }
         }
     }
 }

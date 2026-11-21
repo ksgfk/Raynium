@@ -66,7 +66,10 @@ def main():
             for filename in ('interfaces.json', 'post-interfaces.json'):
                 for entry in json.loads((immediate / filename).read_text(encoding='utf-8')):
                     key = entry['key']
-                    catalog[key] = {k: entry[k] for k in ('program', 'resources', 'inputs', 'pushBytes')}
+                    record = {k: entry[k] for k in ('program', 'resources', 'inputs', 'pushBytes')}
+                    if 'instanced' in entry:
+                        record['instanced'] = entry['instanced']
+                    catalog[key] = record
             identities = {e['id']: e['identity'] for e in json.loads((immediate.parent/'pipelines.json').read_text(encoding='utf-8'))}
             terrain = {}
             for entry in json.loads((immediate/'interfaces.json').read_text(encoding='utf-8')):
@@ -77,6 +80,7 @@ def main():
                     terrain[hashlib.sha256(chr(0).join(fields).encode('utf-8')).hexdigest()] = entry['key']
             prefix = immediate.resolve().relative_to(root).as_posix()
             programs += [f"{e['program']}={prefix}/{e['program']}.hlsl" for e in catalog.values()]
+            programs += [f"{e['instanced']['program']}={prefix}/{e['instanced']['program']}.hlsl" for e in catalog.values() if 'instanced' in e]
         manifest_path = Path(directory) / 'program-list.txt'
         manifest_path.write_text('\n'.join(programs), encoding='utf-8')
         command.extend(['--program-list', str(manifest_path)])
@@ -84,8 +88,8 @@ def main():
         if not output.exists() or output.read_bytes() != temporary.read_bytes():
             os.replace(temporary, output)
         if args.program is None:
-            output.with_name('terrain-programs.json').write_text(json.dumps(terrain, sort_keys=True)+'\n', encoding='utf-8')
-            output.with_suffix('.json').write_text(json.dumps(catalog, sort_keys=True, separators=(',', ':'))+'\n', encoding='utf-8')
+            output.with_name('terrain-programs.json').write_text(json.dumps(terrain, sort_keys=True)+'\n', encoding='utf-8', newline='\n')
+            output.with_suffix('.json').write_text(json.dumps(catalog, sort_keys=True, separators=(',', ':'))+'\n', encoding='utf-8', newline='\n')
     print(f'Shader pack ready: {output}')
 
 

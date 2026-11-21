@@ -13,6 +13,7 @@ public final class RayniumQueryPool implements GpuQueryPool {
     private final BatchSubmission[] latest;
     private final int id;
     private int recordingReferences;
+    long lastRetainedTapeId;
     private boolean closed;
 
     public RayniumQueryPool(NativeRenderer renderer,int count) {

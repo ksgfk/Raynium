@@ -24,20 +24,27 @@ bool Renderer::Create(radray::DeviceContext& device,std::span<const radray::byte
         radray::VertexInputAttribute{0,24,"TEXCOORD",1,VertexFormat::UINT16X2},
         radray::VertexInputAttribute{1,0,"TEXCOORD",2,VertexFormat::SINT32X3},
         radray::VertexInputAttribute{1,12,"TEXCOORD",3,VertexFormat::FLOAT32}};
-    auto vertices=radray::VertexBufferPool::Create(device.GetDevice(),{.VertexStride=28,.PageVertexCapacity=(32u<<20)/28,
-        .Layouts=layouts,.Attributes=attributes,.DebugNamePrefix="TerrainVertices"}).Release();
-    auto indices=radray::IndexBufferPool::Create(device.GetDevice(),{.PageIndexCapacity=(32u<<20)/sizeof(uint32_t),
-        .DebugNamePrefix="TerrainIndices"}).Release();
-    if(!vertices || !indices) return false;
+    auto vertices=radray::VertexBufferPool::Create(device.GetDevice(),{.VertexStride=28,.PageVertexCapacity=(128u<<20)/28,
+        .AdditionalUsage=BufferUse::Resource,.Layouts=layouts,.Attributes=attributes,.DebugNamePrefix="TerrainVertices"}).Release();
+    auto translucentVertices=radray::VertexBufferPool::Create(device.GetDevice(),{.VertexStride=28,.PageVertexCapacity=(256u<<20)/28,
+        .AdditionalUsage=BufferUse::Resource,.Layouts=layouts,.Attributes=attributes,.DebugNamePrefix="TranslucentVertices"}).Release();
+    auto quadPool=radray::IndexBufferPool::Create(device.GetDevice(),{.PageIndexCapacity=(16u<<20)/sizeof(uint32_t),
+        .AdditionalUsage=BufferUse::Resource,.DebugNamePrefix="QuadIndices"}).Release();
+    auto indices=radray::IndexBufferPool::Create(device.GetDevice(),{.PageIndexCapacity=(128u<<20)/sizeof(uint32_t),
+        .AdditionalUsage=BufferUse::Resource,.DebugNamePrefix="TranslucentIndices"}).Release();
+    if(!vertices || !translucentVertices || !quadPool || !indices) return false;
+    radray::unique_ptr<StaticGeometryRegistry> staticGeometry;
+    if(!StaticGeometryRegistry::Create(device.GetDevice(),staticGeometry)) return false;
     radray::unique_ptr<ModularFramePipeline> pipeline;
     if(!ModularFramePipeline::Create(device,shaders,indirect,pipeline)) return false;
     auto* borrowed=pipeline.get();
     auto scheduler=radray::FrameScheduler::Create(device,std::move(pipeline),2).Release();
     if(!scheduler) return false;
-    out=radray::unique_ptr<Renderer>(new Renderer(device,std::move(scheduler),std::move(vertices),std::move(indices),borrowed)); return true;
+    out=radray::unique_ptr<Renderer>(new Renderer(device,std::move(scheduler),std::move(vertices),std::move(translucentVertices),std::move(quadPool),std::move(indices),std::move(staticGeometry),borrowed)); return true;
 }
 Renderer::~Renderer() noexcept try {
     _scheduler->WaitIdle();
+    _staticGeometry->Reset();
     _terrain.Reset();
 } catch(...) {
     AbortUnexpectedException("Renderer::~Renderer");
@@ -90,9 +97,15 @@ bool Renderer::SubmitFrame(const rn_batch_desc& batch,Swapchain* target,rn_submi
     if(device.IsDeviceLost()) return fail();
     _pipeline->MeasureBatch(slot,measure,target!=nullptr);
     auto& tape=*slot.Emplace<CommandTape>();
-    if(!tape.PrepareViews(batch,_terrain,_uploaded,_pipeline->Resources(),slot,_pipeline->UsesIndirect()) ||
-       !tape.Decode(batch,_uploaded,_queries,_buffers,_pipelines,device.GetCapabilities().Limits.MaxColorAttachments) || !_pipeline->PrepareTape(slot,tape) ||
-       !_buffers.Flush({batch.dirty_ranges,batch.dirty_count})) {
+    _staticGeometry->BeginSlot();
+    if(!_staticGeometry->PrepareQuadIndices(_terrain,slot,tape.WorldUploads()) ||
+       !tape.PrepareViews(batch,_terrain,_uploaded,_pipeline->Resources(),slot,_pipeline->UsesIndirect()) ||
+       !tape.Decode(batch,_uploaded,_queries,_buffers,_pipelines,*_staticGeometry,_terrain,device.GetCapabilities())) {
+        RADRAY_ERR_LOG("Invalid command tape or view");
+        return fail();
+    }
+    _staticGeometry->FlushPending(slot,tape.WorldUploads());
+    if(!_pipeline->PrepareTape(slot,tape) || !_buffers.Flush({batch.dirty_ranges,batch.dirty_count})) {
         RADRAY_ERR_LOG("Invalid command tape or readback reservation");
         return fail();
     }
@@ -104,7 +117,10 @@ bool Renderer::SubmitFrame(const rn_batch_desc& batch,Swapchain* target,rn_submi
         if(!target->Validate()) return fail();
         result.outcome=RN_PRESENT_SKIPPED;
         if(target->IsPresentable()) {
-            acquired=target->Chain().AcquireNext(100);
+            {
+                RADRAY_PROFILE_SCOPE_N("Raynium.Frame.AcquireNext");
+                acquired=target->Chain().AcquireNext(100);
+            }
             if(device.IsDeviceLost() && !acquired.Frame) return fail();
             auto outcome=ResolveSurfaceOutcome(backend,acquired.Status,acquired.NativeStatusCode);
             if(!outcome) return fail();
@@ -120,7 +136,12 @@ bool Renderer::SubmitFrame(const rn_batch_desc& batch,Swapchain* target,rn_submi
             frame.readyToPresent=acquired.Frame->GetReadyToPresent();
         }
     }
-    if(measure) { tape.Measure(result.metrics); _terrain.MeasureGeometry(result.metrics); }
+    if(measure) {
+        RADRAY_PROFILE_SCOPE_N("Raynium.Benchmark.BatchMetrics");
+        tape.Measure(result.metrics);
+        _terrain.MeasureGeometry(result.metrics);
+        _staticGeometry->MeasureGeometry(result.metrics);
+    }
     const auto prepared=now();
     _pipeline->SetTape(frame,tape,_buffers);
     auto clear=radray::MakeScopeGuard([&]() noexcept { _pipeline->ClearInput(); });
@@ -132,6 +153,7 @@ bool Renderer::SubmitFrame(const rn_batch_desc& batch,Swapchain* target,rn_submi
     const auto submitted=now();
     result.sequence=_pipeline->SubmittedSequence();
     if(acquired.Frame) {
+        RADRAY_PROFILE_SCOPE_N("Raynium.Frame.Present");
         const auto present=target->Chain().Present(std::move(*acquired.Frame));
         if(device.IsDeviceLost()) return fail();
         auto outcome=ResolveSurfaceOutcome(backend,present.Status,present.NativeStatusCode,acquired.NativeStatusCode);

@@ -4,7 +4,10 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from convert_vanilla_shaders import expand, raw_block, resource_declaration, link_varyings
+from convert_vanilla_shaders import (
+    expand, raw_block, resource_declaration, link_varyings,
+    instanced_entity_vertex_source, instanced_particle_vertex_source,
+)
 
 
 class VanillaShaderLayoutTest(unittest.TestCase):
@@ -71,3 +74,32 @@ class VanillaShaderLayoutTest(unittest.TestCase):
             shader.write_text('#include <other:a.glsl>\n')
             with self.assertRaisesRegex(ValueError, 'Unsupported'):
                 expand(shader, root)
+
+    def test_instanced_entity_and_particle_transforms_preserve_shader_contracts(self):
+        entity_vsh = (
+            '#version 330\n'
+            'layout(location = 0) in vec3 Position;\n'
+            'layout(location = 1) in vec4 Color;\n'
+            'layout(location = 2) in vec2 UV0;\n'
+            'layout(location = 3) in ivec2 UV1;\n'
+            'layout(location = 4) in ivec2 UV2;\n'
+            'layout(location = 5) in vec3 Normal;\n'
+            'void main() { gl_Position = vec4(Position + Normal, 1.0); }\n'
+        )
+        transformed_entity = instanced_entity_vertex_source(entity_vsh)
+        self.assertIn('in vec3 LocalPos;', transformed_entity)
+        self.assertIn('in vec4 InstNormalZ;', transformed_entity)
+        self.assertIn('LocalNormal.x * InstNormalX.xyz', transformed_entity)
+
+        particle_vsh = (
+            '#version 330\n'
+            'layout(location = 0) in vec3 Position;\n'
+            'layout(location = 1) in vec2 UV0;\n'
+            'layout(location = 2) in vec4 Color;\n'
+            'layout(location = 3) in ivec2 UV2;\n'
+            'void main() { gl_Position = vec4(Position, 1.0); }\n'
+        )
+        transformed_particle = instanced_particle_vertex_source(particle_vsh)
+        self.assertIn('in vec2 CornerPos;', transformed_particle)
+        self.assertIn('in vec4 InstRot;', transformed_particle)
+        self.assertIn('InstColor.bgra', transformed_particle)

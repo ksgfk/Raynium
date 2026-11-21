@@ -6,110 +6,376 @@ import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.ints.IntArrays;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.objects.ObjectArrayList;
+import java.lang.foreign.MemorySegment;
+import java.nio.ByteOrder;
+import java.util.Arrays;
 import net.minecraft.core.SectionPos;
+import static java.lang.foreign.ValueLayout.*;
 
 /** Render-thread residency. Commit only after a successful native submission. */
 final class TerrainResidency {
-    static final long UPLOAD_BUDGET=8L*1024*1024;
+    static final long UPLOAD_BUDGET=3L*1024*1024;
+    static final Runnable NOOP=()->{};
+    static {
+        if(ByteOrder.nativeOrder()!=ByteOrder.LITTLE_ENDIAN)
+            throw new IllegalStateException("Raynium requires little-endian native byte order");
+    }
     private final Long2ObjectOpenHashMap<SectionPayload> residentBySection=new Long2ObjectOpenHashMap<>(4096);
     final ObjectArrayList<SectionPayload> pendingRemovals=new ObjectArrayList<>();
     private final IntArrayList candidates=new IntArrayList(1024),staged=new IntArrayList(1024);
+    private final IntArrayList freeSlots=new IntArrayList(1024);
+    private final ObjectArrayList<MeshPayload> pendingSlotAllocs=new ObjectArrayList<>();
     private final ObjectArrayList<SectionPayload> evicting=new ObjectArrayList<>();
     private record IndexUpload(SectionPayload section,MeshPayload.IndexSnapshot snapshot) {}
     private final ObjectArrayList<IndexUpload> indexUploads=new ObjectArrayList<>();
+    private final ObjectArrayList<SectionPayload> dirtyIndicesScratch=new ObjectArrayList<>();
+    private int[] instScratch=new int[4096*4];
+    private int[] visScratch=new int[4096*6];
+    private int[] sectionToInstance=new int[4096];
     private TerrainCapture.Buffer capture;
     private long epoch,frameId;
     private int residentCount;
+    private int nextSlotId=1;
+    private int lastVisCount,lastInstCount;
+    private int lastReuseFlags;
+    private boolean hasDeferredUploads;
+    private boolean lastFrameCommitted,lastInstancesCommitted;
+    private boolean uncommittedPrepare,pendingAllowReuse;
     long uploadBytes;
 
     void reset(long epoch) {
-        residentBySection.clear(); pendingRemovals.clear(); staged.clear(); evicting.clear(); candidates.clear(); indexUploads.clear();
-        capture=null; this.epoch=epoch; residentCount=0;
+        for(int i=0;i<pendingSlotAllocs.size();i++) pendingSlotAllocs.get(i).slotId=0;
+        for(var section:residentBySection.values()) {
+            for(var layer:section.layers) if(layer!=null) layer.slotId=0;
+        }
+        residentBySection.clear(); pendingRemovals.clear(); staged.clear(); evicting.clear();
+        candidates.clear(); indexUploads.clear(); freeSlots.clear(); pendingSlotAllocs.clear();
+        dirtyIndicesScratch.clear();
+        capture=null; this.epoch=epoch; residentCount=0; nextSlotId=1;
+        lastVisCount=0; lastInstCount=0; lastReuseFlags=0;
+        hasDeferredUploads=false; lastFrameCommitted=false; lastInstancesCommitted=false; uncommittedPrepare=false;
     }
+    private int allocateSlot() {
+        return freeSlots.isEmpty()?nextSlotId++:freeSlots.popInt();
+    }
+    private void rollbackPendingSlots() {
+        if(pendingSlotAllocs.isEmpty()) return;
+        for(int i=0;i<pendingSlotAllocs.size();i++) {
+            var layer=pendingSlotAllocs.get(i);
+            if(layer.slotId!=0) { freeSlots.push(layer.slotId); layer.slotId=0; }
+        }
+        pendingSlotAllocs.clear();
+    }
+    private void ensureScratchCapacity(int sectionCount) {
+        int neededInst=Math.multiplyExact(Math.max(1024,sectionCount),4);
+        if(instScratch.length<neededInst) {
+            int cap=instScratch.length;
+            while(cap<neededInst) cap=Math.multiplyExact(cap,2);
+            instScratch=new int[cap];
+        }
+        int neededVis=Math.multiplyExact(Math.max(1024,sectionCount),18); // up to 3 layers * 6 ints
+        if(visScratch.length<neededVis) {
+            int cap=visScratch.length;
+            while(cap<neededVis) cap=Math.multiplyExact(cap,2);
+            visScratch=new int[cap];
+        }
+        if(sectionToInstance.length<sectionCount) {
+            int cap=sectionToInstance.length;
+            while(cap<sectionCount) cap=Math.multiplyExact(cap,2);
+            sectionToInstance=new int[cap];
+        }
+    }
+    private static <T> void swapPop(ObjectArrayList<T> list,int index) {
+        int last=list.size()-1;
+        if(index!=last) list.set(index,list.get(last));
+        list.remove(last);
+    }
+    private void emitIndexUploads(NativeFrameBuffer frame) {
+        for(int i=0;i<indexUploads.size();i++) {
+            var update=indexUploads.get(i);
+            long slotId=Integer.toUnsignedLong(update.section.layers[2].slotId);
+            var direct=update.snapshot.directBuffer();
+            if(direct!=null) {
+                frame.indexDirect(slotId,MemorySegment.ofBuffer(direct),update.snapshot.count,direct);
+            } else {
+                frame.index(slotId,update.snapshot.values());
+            }
+        }
+    }
+    int reuseFlags() { return lastReuseFlags; }
+    int effectiveVisibleCount() { return lastVisCount; }
     void prepare(TerrainCapture.Buffer capture,NativeFrameBuffer frame,int albedo,int lightmap) {
+        prepare(capture,frame,albedo,lightmap,false);
+    }
+    void prepare(TerrainCapture.Buffer capture,NativeFrameBuffer frame,int albedo,int lightmap,boolean allowReuse) {
+        if(uncommittedPrepare) {
+            lastFrameCommitted=false;
+            lastInstancesCommitted=false;
+        }
+        rollbackPendingSlots();
+        uncommittedPrepare=true;
+        pendingAllowReuse=allowReuse;
         this.capture=capture; frameId=NativeRenderer.nextFrameId();
         candidates.clear(); staged.clear(); evicting.clear(); indexUploads.clear();
-        long total=0; uploadBytes=0;
-        for(int i=0;i<capture.count;i++) {
-            var p=capture.payloads[i]; var indices=capture.indices[i];
-            if(p.uploadedEpoch==epoch) {
-                if(indices!=null && indices!=p.uploadedIndices) {
-                    indexUploads.add(new IndexUpload(p,indices)); uploadBytes+=indices.values().length*4L;
+        uploadBytes=0;
+        lastReuseFlags=0;
+
+        boolean canReuse=allowReuse && capture.fastReused && lastFrameCommitted && !hasDeferredUploads && pendingRemovals.isEmpty();
+        if(canReuse) {
+            dirtyIndicesScratch.clear();
+            TerrainCapture.drainDirtyIndices(dirtyIndicesScratch);
+            for(int i=0;i<dirtyIndicesScratch.size();i++) {
+                var payload=dirtyIndicesScratch.get(i);
+                if(payload.uploadedEpoch!=epoch && capture.contains(payload)) { canReuse=false; break; }
+            }
+        }
+        if(canReuse) {
+            long indexDataBytes=0;
+            for(int i=0;i<dirtyIndicesScratch.size();i++) {
+                var p=dirtyIndicesScratch.get(i);
+                if(p.uploadedEpoch!=epoch || p.layers[2]==null) continue;
+                var idx=p.layers[2].indices;
+                if(capture.contains(p)) capture.indices[p.capturedSlot]=idx;
+                if(idx!=null && idx!=p.uploadedIndices && idx.hasData() && p.dirtyIndexFrame!=frameId) {
+                    p.dirtyIndexFrame=frameId;
+                    indexUploads.add(new IndexUpload(p,idx));
+                    uploadBytes+=idx.byteSize();
+                    if(idx.directBuffer()==null) indexDataBytes+=NativeFrameBuffer.alignedBytes(idx.byteSize());
                 }
-            } else if(p.epoch==capture.epoch && p.vertexBytes>0 && (p.layers[2]==null || indices!=null)) {
+            }
+            boolean needInstUpload=capture.instancesChanged || !lastInstancesCommitted;
+            if(!needInstUpload) {
+                lastReuseFlags=NativeRenderer.REUSE_VISIBLE|NativeRenderer.REUSE_INSTANCES;
+                frame.begin(0,0,0,indexUploads.size(),indexDataBytes);
+                frame.terrain(albedo,lightmap,capture.anisotropy);
+                emitIndexUploads(frame);
+                frame.setVisibleAndInstanceCounts(0,0);
+                return;
+            }
+            for(int i=0;i<capture.updatedFadingSlots.size();i++) {
+                int slot=capture.updatedFadingSlots.getInt(i);
+                if(slot<sectionToInstance.length) {
+                    int instIdx=sectionToInstance[slot];
+                    if(instIdx>=0 && instIdx<lastInstCount) {
+                        instScratch[instIdx*4+3]=Float.floatToRawIntBits(capture.visibility[slot]);
+                    }
+                }
+            }
+            lastReuseFlags=NativeRenderer.REUSE_VISIBLE;
+            frame.begin(lastInstCount,0,0,indexUploads.size(),indexDataBytes);
+            frame.terrain(albedo,lightmap,capture.anisotropy);
+            emitIndexUploads(frame);
+            if(lastInstCount>0) {
+                MemorySegment.copy(instScratch,0,frame.instanceSegment(),JAVA_INT,0,lastInstCount*4);
+            }
+            frame.setVisibleAndInstanceCounts(0,lastInstCount);
+            return;
+        }
+
+        if(capture.fastReused) TerrainCapture.clearDirtyIndices();
+        final int count=capture.count;
+        final var payloads=capture.payloads;
+        final var indicesArr=capture.indices;
+        final var originX=capture.originX;
+        final var originY=capture.originY;
+        final var originZ=capture.originZ;
+        final var visibility=capture.visibility;
+        final var elementMask=capture.elementMask;
+        final var distKey=capture.distKey;
+        long total=0;
+        // A renderer epoch change or a second preparation of the same snapshot needs a fresh scan.
+        boolean checkedAtCapture=capture.checkedResidencyEpoch==epoch && epoch!=0 &&
+            (!capture.partialRefresh || (lastFrameCommitted && !hasDeferredUploads));
+        capture.checkedResidencyEpoch=0;
+        boolean refreshIndices=capture.fastReused || (capture.partialRefresh && !checkedAtCapture);
+        int updateCount=checkedAtCapture?capture.uploadCandidates.size():count;
+        for(int entry=0;entry<updateCount;entry++) {
+            int i=checkedAtCapture?capture.uploadCandidates.getInt(entry):entry;
+            var p=payloads[i];
+            var indices=indicesArr[i];
+            if(refreshIndices || (indices!=null && indices!=p.uploadedIndices && !indices.hasData())) {
+                var tr=p.layers[2];
+                indices=tr==null?null:tr.indices;
+                indicesArr[i]=indices;
+            }
+            if(p.uploadedEpoch==epoch) {
+                if(indices!=null && indices!=p.uploadedIndices && indices.hasData()) {
+                    indexUploads.add(new IndexUpload(p,indices)); uploadBytes+=indices.byteSize();
+                }
+            } else if(p.epoch==capture.epoch && p.hasVertices() && (p.layers[2]==null || (indices!=null && indices.hasData()))) {
                 candidates.add(i); total+=p.uploadBytes(indices);
             }
         }
-        if(total+uploadBytes>UPLOAD_BUDGET) IntArrays.unstableSort(candidates.elements(),0,candidates.size(),
-            (a,b)->Integer.compare(capture.distKey[a],capture.distKey[b]));
+        if(total+uploadBytes>UPLOAD_BUDGET) {
+            if(!capture.hasExplicitDistKeys) {
+                final double camX=capture.camX,camY=capture.camY,camZ=capture.camZ;
+                for(int i=0;i<candidates.size();i++) {
+                    int slot=candidates.getInt(i);
+                    double dx=originX[slot]-camX,dy=originY[slot]-camY,dz=originZ[slot]-camZ;
+                    distKey[slot]=TerrainCapture.distanceKey(dx*dx+dy*dy+dz*dz);
+                }
+            }
+            IntArrays.unstableSort(candidates.elements(),0,candidates.size(),
+                (a,b)->Integer.compare(distKey[a],distKey[b]));
+        }
         int meshes=0;
         long dataBytes=0;
         for(int i=0;i<candidates.size();i++) {
-            int entry=candidates.getInt(i); var p=capture.payloads[entry]; var indices=capture.indices[entry];
+            int entry=candidates.getInt(i); var p=payloads[entry]; var indices=indicesArr[entry];
             long bytes=p.uploadBytes(indices);
             if(uploadBytes+bytes>UPLOAD_BUDGET && (!staged.isEmpty() || uploadBytes!=0)) break;
             staged.add(entry); p.stagedFrame=frameId;
-            p.sectionKey=SectionPos.asLong(capture.originX[entry]>>4,capture.originY[entry]>>4,capture.originZ[entry]>>4);
+            p.sectionKey=SectionPos.asLong(originX[entry]>>4,originY[entry]>>4,originZ[entry]>>4);
             uploadBytes+=bytes;
             if(indices!=null) indexUploads.add(new IndexUpload(p,indices));
             for(var layer:p.layers) if(layer!=null) {
+                layer.slotId=allocateSlot();
+                pendingSlotAllocs.add(layer);
                 meshes++;
-                dataBytes+=NativeFrameBuffer.alignedBytes(layer.vertices.length);
+                if(layer.originalQuadGroups!=null) {
+                    dataBytes+=NativeFrameBuffer.alignedBytes(layer.originalQuadGroups.length);
+                }
             }
         }
-        for(var update:indexUploads) dataBytes+=NativeFrameBuffer.alignedBytes(update.snapshot.values().length*4L);
-        frame.begin(capture.count*3,pendingRemovals.size()*3,meshes,indexUploads.size(),dataBytes);
+        hasDeferredUploads=staged.size()<candidates.size();
+        for(int i=0;i<indexUploads.size();i++) {
+            var snap=indexUploads.get(i).snapshot;
+            if(snap.directBuffer()==null) dataBytes+=NativeFrameBuffer.alignedBytes(snap.byteSize());
+        }
+        frame.begin(count*3,pendingRemovals.size()*3,meshes,indexUploads.size(),dataBytes);
         frame.terrain(albedo,lightmap,capture.anisotropy);
-        for(var update:indexUploads) frame.index(update.section.layers[2].id,update.snapshot.values());
-        for(int entry:staged) for(var layer:capture.payloads[entry].layers) if(layer!=null)
-            frame.mesh(layer.id,layer.vertices,layer.vertexCount,layer.mode);
-        for(int i=0;i<capture.count;i++) {
-            var p=capture.payloads[i]; int mask=capture.elementMask[i];
+        emitIndexUploads(frame);
+        for(int i=0;i<staged.size();i++) {
+            for(var layer:payloads[staged.getInt(i)].layers) if(layer!=null) {
+                var direct=layer.directVertices();
+                frame.meshDirect(Integer.toUnsignedLong(layer.slotId),MemorySegment.ofBuffer(direct),
+                    layer.vertexCount,layer.mode,direct,layer.groupQuadCounts,layer.layoutFlags,
+                    layer.minBounds,layer.maxBounds,layer.originalQuadGroups);
+            }
+        }
+        ensureScratchCapacity(count);
+        final int[] instArr=instScratch;
+        final int[] visArr=visScratch;
+        final int[] secToInst=sectionToInstance;
+        int visCount=0,instCount=0;
+        int visOff=0,instOff=0;
+        for(int i=0;i<count;i++) {
+            var p=payloads[i]; int mask=elementMask[i];
             if(p.uploadedEpoch!=epoch && p.stagedFrame!=frameId) {
-                long key=SectionPos.asLong(capture.originX[i]>>4,capture.originY[i]>>4,capture.originZ[i]>>4);
+                long key=SectionPos.asLong(originX[i]>>4,originY[i]>>4,originZ[i]>>4);
                 p=residentBySection.get(key);
-                if(p==null || p.uploadedEpoch!=epoch) continue;
+                if(p==null || p.uploadedEpoch!=epoch) { secToInst[i]=-1; continue; }
                 mask=0;
-                for(int layer=0;layer<3;layer++) if(p.layers[layer]!=null) mask|=1<<(layer*8);
+                var layers=p.layers;
+                if(layers[0]!=null) mask|=1;
+                if(layers[1]!=null) mask|=1<<8;
+                if(layers[2]!=null) mask|=1<<16;
             }
             p.lastActiveFrame=frameId;
-            if(mask==0) continue;
-            int instance=frame.instance(capture.originX[i],capture.originY[i],capture.originZ[i],capture.visibility[i]);
-            for(int layer=0;layer<3;layer++) if(p.layers[layer]!=null) {
-                int elements=(mask>>>(layer*8))&127;
-                if(elements!=0) frame.visible(p.layers[layer].id,-1,layer==2?capture.count-i:capture.distKey[i]>>>16,instance,1);
+            if(mask==0) { secToInst[i]=-1; continue; }
+            int instance=instCount++;
+            secToInst[i]=instance;
+            instArr[instOff]=originX[i];
+            instArr[instOff+1]=originY[i];
+            instArr[instOff+2]=originZ[i];
+            instArr[instOff+3]=Float.floatToRawIntBits(visibility[i]);
+            instOff+=4;
+            var layers=p.layers;
+            var l0=layers[0];
+            if(l0!=null && (mask&127)!=0) {
+                visArr[visOff]=l0.slotId;
+                visArr[visOff+1]=0;
+                visArr[visOff+2]=-1;
+                visArr[visOff+3]=0;
+                visArr[visOff+4]=instance;
+                visArr[visOff+5]=1;
+                visOff+=6; visCount++;
+            }
+            var l1=layers[1];
+            if(l1!=null && ((mask>>>8)&127)!=0) {
+                visArr[visOff]=l1.slotId;
+                visArr[visOff+1]=0;
+                visArr[visOff+2]=-1;
+                visArr[visOff+3]=0;
+                visArr[visOff+4]=instance;
+                visArr[visOff+5]=1;
+                visOff+=6; visCount++;
+            }
+            var l2=layers[2];
+            if(l2!=null && ((mask>>>16)&127)!=0) {
+                visArr[visOff]=l2.slotId;
+                visArr[visOff+1]=0;
+                visArr[visOff+2]=-1;
+                visArr[visOff+3]=count-i;
+                visArr[visOff+4]=instance;
+                visArr[visOff+5]=1;
+                visOff+=6; visCount++;
             }
         }
+        if(instCount>0) MemorySegment.copy(instArr,0,frame.instanceSegment(),JAVA_INT,0,instOff);
+        if(visCount>0) MemorySegment.copy(visArr,0,frame.visibleSegment(),JAVA_INT,0,visOff);
+        frame.setVisibleAndInstanceCounts(visCount,instCount);
+        lastVisCount=visCount;
+        lastInstCount=instCount;
         for(int i=pendingRemovals.size()-1;i>=0;i--) {
             var p=pendingRemovals.get(i);
             if(p.uploadedEpoch!=epoch) {
-                if(p.stagedFrame!=frameId) pendingRemovals.remove(i);
+                if(p.stagedFrame!=frameId) {
+                    p.releaseBuffers();
+                    swapPop(pendingRemovals,i);
+                }
                 continue;
             }
             if(p.lastActiveFrame==frameId) continue;
             evicting.add(p);
             for(var layer:p.layers) if(layer!=null) {
-                frame.removeMesh(layer.id);
+                frame.removeMesh(Integer.toUnsignedLong(layer.slotId));
             }
         }
     }
     void commit() { stageCommit().run(); }
     Runnable stageCommit() {
-        var uploaded=new ObjectArrayList<MeshPayload>();
-        for(int entry:staged) {
-            var p=capture.payloads[entry]; p.uploadedEpoch=epoch; residentBySection.put(p.sectionKey,p); residentCount++;
+        uncommittedPrepare=false;
+        lastFrameCommitted=pendingAllowReuse;
+        lastInstancesCommitted=pendingAllowReuse;
+        pendingSlotAllocs.clear();
+        ObjectArrayList<MeshPayload> uploaded=staged.isEmpty()?null:new ObjectArrayList<>(staged.size()*2);
+        for(int i=0;i<staged.size();i++) {
+            var p=capture.payloads[staged.getInt(i)]; p.uploadedEpoch=epoch; residentBySection.put(p.sectionKey,p); residentCount++;
             for(var layer:p.layers) if(layer!=null) uploaded.add(layer);
         }
-        for(var update:indexUploads) update.section.uploadedIndices=update.snapshot;
-        for(var p:evicting) {
+        ObjectArrayList<MeshPayload.IndexSnapshot> uploadedIdx=indexUploads.isEmpty()?null:new ObjectArrayList<>(indexUploads.size());
+        for(int i=0;i<indexUploads.size();i++) {
+            var update=indexUploads.get(i);
+            update.section.uploadedIndices=update.snapshot;
+            if(update.snapshot.directBuffer()!=null) uploadedIdx.add(update.snapshot);
+        }
+        ObjectArrayList<SectionPayload> evictedCopy=evicting.isEmpty()?null:new ObjectArrayList<>(evicting);
+        for(int i=0;i<evicting.size();i++) {
+            var p=evicting.get(i);
             p.uploadedEpoch=0; p.uploadedIndices=null;
+            for(var layer:p.layers) if(layer!=null && layer.slotId!=0) {
+                freeSlots.push(layer.slotId);
+                layer.slotId=0;
+            }
             if(residentBySection.get(p.sectionKey)==p) residentBySection.remove(p.sectionKey);
             residentCount--;
         }
         if(!evicting.isEmpty()) {
-            for(int i=pendingRemovals.size()-1;i>=0;i--) if(pendingRemovals.get(i).uploadedEpoch!=epoch) pendingRemovals.remove(i);
+            for(int i=pendingRemovals.size()-1;i>=0;i--) {
+                if(pendingRemovals.get(i).uploadedEpoch!=epoch) swapPop(pendingRemovals,i);
+            }
         }
-        return ()->{ for(var layer:uploaded) layer.vertices=null; };
+        if((uploaded==null || uploaded.isEmpty()) && (uploadedIdx==null || uploadedIdx.isEmpty()) && evictedCopy==null)
+            return NOOP;
+        final var toClear=uploaded;
+        final var toClearIdx=uploadedIdx;
+        final var toClearEvicted=evictedCopy;
+        return ()->{
+            if(toClear!=null) for(int i=0;i<toClear.size();i++) toClear.get(i).releaseVertices();
+            if(toClearIdx!=null) for(int i=0;i<toClearIdx.size();i++) toClearIdx.get(i).releaseBuffer();
+            if(toClearEvicted!=null) for(int i=0;i<toClearEvicted.size();i++) toClearEvicted.get(i).releaseBuffers();
+        };
     }
     int residentCount() { return residentCount; }
 }

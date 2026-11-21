@@ -43,6 +43,7 @@ public final class NativeTexture implements com.mojang.renderpearl.api.textures.
     private final NativeRenderer owner;
     private final int id,width,height,mips,layers,flags;
     private int recordingReferences;
+    private long lastRetainedTapeId;
     private final Format format;
     private final String label;
     private final int usage;
@@ -63,6 +64,8 @@ public final class NativeTexture implements com.mojang.renderpearl.api.textures.
         checkOpen();
         if(owner!=renderer) throw new IllegalArgumentException("Texture belongs to a different renderer");
     }
+    public long lastRetainedTapeId() { return lastRetainedTapeId; }
+    public void setLastRetainedTapeId(long tapeId) { lastRetainedTapeId=tapeId; }
     public void retainRecording() { checkOpen(); recordingReferences=Math.incrementExact(recordingReferences); }
     public void releaseRecording() {
         owner.checkThread();

@@ -37,6 +37,7 @@ public final class BenchmarkSession {
     private final String screen;
     private final GameType playerMode;
     private final com.google.gson.JsonArray commands;
+    private final boolean clearBenchmarkEntities;
     private final BenchmarkMeasurements measurements;
     private final java.lang.management.ThreadMXBean threadBean=java.lang.management.ManagementFactory.getThreadMXBean();
     private final com.sun.management.ThreadMXBean allocationBean=(com.sun.management.ThreadMXBean)threadBean;
@@ -57,6 +58,7 @@ public final class BenchmarkSession {
             default -> throw new IllegalArgumentException("Unsupported benchmark playerMode");
         };
         commands=json.has("commands")?json.getAsJsonArray("commands"):new com.google.gson.JsonArray();
+        clearBenchmarkEntities = json.has("clearBenchmarkEntities") && json.get("clearBenchmarkEntities").getAsBoolean();
         measurements=new BenchmarkMeasurements((int)Math.min(2_000_000,Math.max(16384,Math.ceil(route.duration()*2000))));
         warmupSeconds = json.get("warmupSeconds").getAsDouble();
         startupTimeoutSeconds = json.get("startupTimeoutSeconds").getAsDouble();
@@ -149,11 +151,26 @@ public final class BenchmarkSession {
                         var player = server.getPlayerList().getPlayer(id);
                         if (player == null) throw new IllegalStateException("Benchmark player missing on server");
                         player.setGameMode(playerMode);
+                        if (clearBenchmarkEntities) {
+                            var previous = new java.util.ArrayList<net.minecraft.world.entity.Entity>();
+                            for (var entity : player.level().getAllEntities()) {
+                                if (entity.entityTags().contains("raynium_bench")) previous.add(entity);
+                            }
+                            previous.forEach(net.minecraft.world.entity.Entity::discard);
+                            result.addProperty("removedBenchmarkEntities", previous.size());
+                        }
                         var source=server.createCommandSourceStack().withEntity(player).withLevel(player.level()).withPosition(player.position()).withSuppressedOutput();
                         for(var command:commands) {
                             var failed=new java.util.concurrent.atomic.AtomicBoolean();
                             server.getCommands().performPrefixedCommand(source.withCallback((ok,value)->{if(!ok) failed.set(true);}),command.getAsString());
                             if(failed.get()) throw new IllegalArgumentException("Benchmark command failed: "+command.getAsString());
+                        }
+                        if (clearBenchmarkEntities) {
+                            int tagged = 0;
+                            for (var entity : player.level().getAllEntities()) {
+                                if (entity.entityTags().contains("raynium_bench")) tagged++;
+                            }
+                            result.addProperty("preparedBenchmarkEntities", tagged);
                         }
                         if (!player.teleportTo(player.level(), point.x(), point.y(), point.z(), Set.of(), point.yaw(), point.pitch(), true))
                             throw new IllegalStateException("Cannot teleport to benchmark start");
@@ -169,6 +186,15 @@ public final class BenchmarkSession {
                 result.addProperty("dimension", client.level.dimension().toString());
                 result.addProperty("windowWidth", client.getWindow().getWidth());
                 result.addProperty("windowHeight", client.getWindow().getHeight());
+                boolean javaTracy=com.mojang.jtracy.TracyClient.isAvailable();
+                boolean jfr=jdk.jfr.FlightRecorder.isInitialized() && jdk.jfr.FlightRecorder.getFlightRecorder()
+                        .getRecordings().stream().anyMatch(r->r.getState()==jdk.jfr.RecordingState.RUNNING);
+                boolean lwjglChecks=org.lwjgl.system.Checks.CHECKS;
+                boolean assertions=BenchmarkSession.class.desiredAssertionStatus();
+                result.addProperty("javaTracyLoaded",javaTracy);
+                result.addProperty("jfrRecording",jfr);
+                result.addProperty("lwjglChecks",lwjglChecks);
+                result.addProperty("javaAssertions",assertions);
                 switch(screen) {
                     case "none" -> {}
                     case "inventory" -> client.gui.setScreen(new net.minecraft.client.gui.screens.inventory.InventoryScreen(client.player));

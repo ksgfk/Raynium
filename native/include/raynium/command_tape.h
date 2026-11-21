@@ -14,13 +14,18 @@ class CommandTape final {
 public:
     void Measure(rn_frame_metrics&) const;
     bool PrepareViews(const rn_batch_desc&,TerrainResidency&,const TextureRegistry&,const MeshPassResources&,radray::FrameSlot&,bool indirect);
-    bool Decode(const rn_batch_desc&,const TextureRegistry&,const QueryRegistry&,const BufferRegistry&,const ImmediatePipelineRegistry&,uint32_t maxColors);
+    bool Decode(const rn_batch_desc&,const TextureRegistry&,const QueryRegistry&,const BufferRegistry&,const ImmediatePipelineRegistry&,
+        const StaticGeometryRegistry&,const TerrainResidency&,const radray::gpu::GpuDeviceCapabilities&);
+    radray::vector<GeometryUpload>& WorldUploads() noexcept { return _worldUploads; }
     bool PrepareReadbacks(radray::gpu::Device&,FrameReadbacks&);
     bool ReserveReadbacks(radray::AsyncReadbackQueue&) const;
     std::span<const QueryRegistry::Write> Timestamps() const { return _timestamps; }
     void Replay(radray::RDGBuilder&,FrameTextureImports&,radray::AsyncReadbackQueue&,const OutputPassResources&,const FrameTimestamps&,const FrameReadbacks&,radray::gpu::Texture* backBuffer);
 private:
     radray::vector<TerrainView> _views;
+    radray::vector<GeometryUpload> _worldUploads;
+    std::span<const radray::byte> _instanceUploads;
+    radray::vector<radray::gpu::DrawIndexedIndirectArguments> _geometryIndirectArgs;
     radray::gpu::GpuBackend _backend{};
     struct Region {
         radray::IntrusivePtr<radray::GpuTexture> texture;
@@ -29,8 +34,8 @@ private:
     };
     struct Clear { Region target; radray::gpu::ColorClearValue value; };
     struct Capture { Region source; uint64_t id; };
-    struct Upload { Region target; radray::vector<radray::byte> pixels; uint32_t pitch; };
-    struct WriteBuffer { radray::shared_ptr<BufferEntry> target; uint64_t offset; radray::vector<radray::byte> bytes; };
+    struct Upload { Region target; std::span<const radray::byte> pixels; uint32_t pitch; };
+    struct WriteBuffer { radray::shared_ptr<BufferEntry> target; uint64_t offset; std::span<const radray::byte> borrowed; };
     struct CopyBuffer { radray::shared_ptr<BufferEntry> source,destination; uint64_t srcOffset,dstOffset,size,stagingOffset; };
     struct TextureBuffer {
         Region image;

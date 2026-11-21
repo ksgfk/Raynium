@@ -14,7 +14,7 @@ import zipfile
 from shader_pack import RESOURCE_PATH, verify_shader_pack
 
 
-ABI_VERSION = 19
+ABI_VERSION = 22
 
 
 def digest(path):
@@ -94,7 +94,8 @@ def checked_dependencies(dll, environment):
                 'rn_register_pipeline', 'rn_destroy_pipeline', 'rn_create_buffer', 'rn_destroy_buffer', 'rn_create_query_pool', 'rn_destroy_query_pool', 'rn_sync_query_pool',
                 'rn_query_device_info', 'rn_wait_submit', 'rn_submit_frame',
                 'rn_create_swapchain', 'rn_resize_swapchain', 'rn_destroy_swapchain',
-                'rn_create_texture', 'rn_upload_texture', 'rn_destroy_texture', 'rn_poll_capture'}
+                'rn_create_texture', 'rn_upload_texture', 'rn_destroy_texture', 'rn_poll_capture',
+                'rn_upsert_model_mesh', 'rn_remove_model_mesh'}
     if actual != expected:
         raise RuntimeError(f'ABI {ABI_VERSION} export mismatch: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}')
     text = run(['dumpbin', '/nologo', '/dependents', str(dll)], dll.parent, environment, True).stdout

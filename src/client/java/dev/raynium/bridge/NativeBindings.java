@@ -31,7 +31,7 @@ final class NativeBindings {
     final MethodHandle queryDeviceInfo,createSwapchain,resizeSwapchain,destroySwapchain;
     final MethodHandle createBuffer,destroyBuffer,registerPipeline,destroyPipeline;
     final MethodHandle createQueryPool,destroyQueryPool,syncQueryPool;
-    final MethodHandle createTexture,uploadTexture,destroyTexture,pollCapture,waitSubmit,submitFrame;
+    final MethodHandle createTexture,uploadTexture,destroyTexture,upsertModelMesh,removeModelMesh,pollCapture,waitSubmit,submitFrame;
 
     NativeBindings(SymbolLookup library) {
         Linker linker = Linker.nativeLinker();
@@ -57,6 +57,10 @@ final class NativeBindings {
         createTexture=bind(linker,library,"rn_create_texture",signature(2));
         uploadTexture=bind(linker,library,"rn_upload_texture",signature(2));
         destroyTexture=bind(linker,library,"rn_destroy_texture",FunctionDescriptor.of(ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
+        upsertModelMesh=bind(linker,library,"rn_upsert_model_mesh",FunctionDescriptor.of(ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.JAVA_INT,ValueLayout.JAVA_INT,ValueLayout.JAVA_INT,ValueLayout.ADDRESS));
+        removeModelMesh=bind(linker,library,"rn_remove_model_mesh",FunctionDescriptor.of(ValueLayout.JAVA_INT,
             ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
         pollCapture=bind(linker,library,"rn_poll_capture",FunctionDescriptor.of(ValueLayout.JAVA_INT,
             ValueLayout.ADDRESS,ValueLayout.JAVA_LONG,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_LONG));

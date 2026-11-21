@@ -13,6 +13,10 @@ abstract class UberBufferDrainMixin<T> implements TerrainDrain {
     @Shadow private static <T,U extends T> void runCallbackUnchecked(T key,UberGpuBuffer.StagedAllocationEntry<U> entry) { throw new AssertionError(); }
     @Override public void raynium$drain(StagingBuffer.Uploader uploader) {
         uploader.checkValidFor(stagingBuffer);
+        if(stagedAllocations.isEmpty()) {
+            skippedStagedAllocations.clear();
+            return;
+        }
         try {
             for(var entry:stagedAllocations.entrySet()) try(var staged=entry.getValue()) {
                 if(!skippedStagedAllocations.contains(entry.getKey())) runCallbackUnchecked(entry.getKey(),staged);

@@ -11,7 +11,7 @@ namespace raynium {
 namespace {
 using namespace radray::gpu;
 
-enum class Opcode : uint32_t { ClearColor=1, ClearDepth, CaptureColor, UploadTexture, CopyTexture, BlitToSurface, WriteTimestamp, WriteBufferBytes, CopyBufferBytes, BufferToTexture, TextureToBuffer, BeginPass, EndPass, Draw, RetainedTerrain };
+enum class Opcode : uint32_t { ClearColor=1, ClearDepth, CaptureColor, UploadTexture, CopyTexture, BlitToSurface, WriteTimestamp, WriteBufferBytes, CopyBufferBytes, BufferToTexture, TextureToBuffer, BeginPass, EndPass, Draw, RetainedTerrain, InstancedGeometry };
 struct Header { Opcode opcode; uint32_t size; };
 struct WireRegion { uint32_t id,mip,layer,x,y,width,height; };
 struct WireClear { Header header; WireRegion target; float value[4]; uint32_t reserved; };
@@ -61,10 +61,13 @@ void CopyRegion(radray::RDGBuilder& graph,radray::RDGTextureHandle source,const 
 void CommandTape::Measure(rn_frame_metrics& metrics) const {
     for(const auto& view:_views)
         for(const auto& geometry:view.uploads) metrics.terrain_upload_bytes+=geometry.source.GetMaxSize();
+    for(const auto& geometry:_worldUploads) metrics.scene_upload_bytes+=geometry.source.GetMaxSize();
+    metrics.scene_upload_bytes+=_instanceUploads.size();
+    metrics.scene_upload_bytes+=uint64_t(_geometryIndirectArgs.size())*sizeof(DrawIndexedIndirectArguments);
     for(const auto& command:_commands) {
         if(const auto* raster=std::get_if<radray::shared_ptr<ImmediatePass>>(&command)) (*raster)->Measure(metrics);
         else if(const auto* upload=std::get_if<Upload>(&command)) metrics.texture_upload_bytes+=upload->pixels.size();
-        else if(const auto* write=std::get_if<WriteBuffer>(&command)) metrics.scene_upload_bytes+=write->bytes.size();
+        else if(const auto* write=std::get_if<WriteBuffer>(&command)) metrics.scene_upload_bytes+=write->borrowed.size();
     }
 }
 bool CommandTape::PrepareViews(const rn_batch_desc& batch,TerrainResidency& terrain,const TextureRegistry& textures,const MeshPassResources& mesh,
@@ -72,18 +75,27 @@ bool CommandTape::PrepareViews(const rn_batch_desc& batch,TerrainResidency& terr
     if(batch.struct_size!=sizeof(batch) || batch.view_reserved || (batch.view_count && !batch.views) || batch.view_count>65536) return false;
     _views.resize(batch.view_count);
     _backend=slot.GetDevice().GetBackend();
+    const auto& caps=slot.GetDevice().GetCapabilities();
+    terrain.BeginSlotViews({batch.views,batch.view_count},slot);
     for(size_t i=0;i<_views.size();++i) {
         auto& view=_views[i];
-        view.mesh=&mesh; view.useIndirect=indirect;
-        view.indirectLimit=slot.GetDevice().GetCapabilities().Limits.MaxDrawIndirectCount;
-        if(!terrain.PrepareFrame(textures,batch.views[i],mesh,{slot,view.uploads,view.lists,indirect},view.frame)) return false;
+        auto& cache=terrain.View(i);
+        view.draws=&cache.draws;
+        view.mesh=&mesh; view.vertexPool=&terrain.VertexPool(); view.translucentVertexPool=&terrain.TranslucentVertexPool(); view.quadIndexPool=&terrain.QuadIndexPool(); view.translucentIndexPool=&terrain.TranslucentIndexPool();
+        view.capabilities=&caps; view.useIndirect=indirect;
+        view.indirectLimit=caps.Limits.MaxDrawIndirectCount;
+        if(!terrain.PrepareFrame(textures,batch.views[i],mesh,{slot,view.uploads,cache,indirect},view.frame)) return false;
     }
     return true;
 }
-bool CommandTape::Decode(const rn_batch_desc& batch,const TextureRegistry& textures,const QueryRegistry& queries,const BufferRegistry& buffers,const ImmediatePipelineRegistry& pipelines,uint32_t maxColors) {
+bool CommandTape::Decode(const rn_batch_desc& batch,const TextureRegistry& textures,const QueryRegistry& queries,const BufferRegistry& buffers,
+    const ImmediatePipelineRegistry& pipelines,const StaticGeometryRegistry& staticGeometry,const TerrainResidency& terrain,const GpuDeviceCapabilities& caps) {
+    const uint32_t maxColors=caps.Limits.MaxColorAttachments;
+    const bool canGeometryIndirect=caps.Features.IndirectDraw && caps.Features.IndirectFirstInstance && caps.Limits.MaxDrawIndirectCount>=2;
+    const uint32_t indirectLimit=caps.Limits.MaxDrawIndirectCount;
     if(batch.struct_size!=sizeof(batch) || (batch.flags&~RN_BATCH_MEASURE) || batch.reserved || (batch.dirty_count && !batch.dirty_ranges) ||
        (batch.command_bytes && !batch.commands) || (batch.upload_bytes && !batch.uploads) ||
-       batch.command_bytes>PTRDIFF_MAX || batch.upload_bytes>PTRDIFF_MAX) {
+       batch.command_bytes>PTRDIFF_MAX || batch.upload_bytes>PTRDIFF_MAX || (batch.instance_upload_bytes && !batch.instance_uploads) || batch.instance_upload_bytes>PTRDIFF_MAX) {
         RADRAY_ERR_LOG("Invalid command batch descriptor");
         return false;
     }
@@ -97,6 +109,7 @@ bool CommandTape::Decode(const rn_batch_desc& batch,const TextureRegistry& textu
     };
     std::span commands{static_cast<const radray::byte*>(batch.commands),size_t(batch.command_bytes)};
     const std::span uploads{static_cast<const radray::byte*>(batch.uploads),size_t(batch.upload_bytes)};
+    _instanceUploads={static_cast<const radray::byte*>(batch.instance_uploads),size_t(batch.instance_upload_bytes)};
     bool hasBlit=false;
     radray::shared_ptr<ImmediatePass> raster;
     while(!commands.empty()) {
@@ -106,7 +119,9 @@ bool CommandTape::Decode(const rn_batch_desc& batch,const TextureRegistry& textu
         if(header.size<sizeof(header) || header.size>commands.size()) return false;
         const auto bytes=commands.first(header.size);
         commands=commands.subspan(header.size);
-        if(raster && header.opcode!=Opcode::RetainedTerrain && header.opcode!=Opcode::Draw && header.opcode!=Opcode::WriteTimestamp && header.opcode!=Opcode::EndPass) return false;
+        if(raster && header.opcode!=Opcode::RetainedTerrain && header.opcode!=Opcode::InstancedGeometry &&
+           header.opcode!=Opcode::Draw &&
+           header.opcode!=Opcode::WriteTimestamp && header.opcode!=Opcode::EndPass) return false;
         Region region{};
         switch(header.opcode) {
         case Opcode::ClearColor:
@@ -139,7 +154,7 @@ bool CommandTape::Decode(const rn_batch_desc& batch,const TextureRegistry& textu
             const uint64_t size=uint64_t(wire.pitch)*(wire.target.height-1)+row;
             if(wire.pitch<row || wire.offset>uploads.size() || size>uploads.size()-wire.offset) return false;
             auto pixels=uploads.subspan(wire.offset,size);
-            _commands.emplace_back(Upload{region,{pixels.begin(),pixels.end()},wire.pitch});
+            _commands.emplace_back(Upload{region,pixels,wire.pitch});
             break;
         }
         case Opcode::CopyTexture: {
@@ -186,7 +201,7 @@ bool CommandTape::Decode(const rn_batch_desc& batch,const TextureRegistry& textu
             if(!target || !(target->usage&RN_BUFFER_COPY_DST) || !target->Contains(wire.offset,wire.size) ||
                wire.uploadOffset>uploads.size() || wire.size>uploads.size()-wire.uploadOffset) return false;
             auto pixels=uploads.subspan(wire.uploadOffset,wire.size);
-            _commands.emplace_back(WriteBuffer{std::move(target),wire.offset,{pixels.begin(),pixels.end()}});
+            _commands.emplace_back(WriteBuffer{std::move(target),wire.offset,pixels});
             break;
         }
         case Opcode::CopyBufferBytes: {
@@ -216,6 +231,9 @@ bool CommandTape::Decode(const rn_batch_desc& batch,const TextureRegistry& textu
         }
         case Opcode::RetainedTerrain:
             if(!raster || !raster->AddTerrain(bytes,_views,textures)) return false;
+            break;
+        case Opcode::InstancedGeometry:
+            if(!raster || !raster->AddInstancedGeometry(bytes,_instanceUploads,_geometryIndirectArgs,canGeometryIndirect,indirectLimit,pipelines,buffers,textures,staticGeometry,terrain)) return false;
             break;
         case Opcode::Draw:
             if(!raster || !raster->AddDraw(bytes,pipelines,buffers,textures)) return false;
@@ -254,7 +272,7 @@ bool CommandTape::PrepareReadbacks(Device& device,FrameReadbacks& frame) {
                 return false;
         }
         if(auto* write=std::get_if<WriteBuffer>(&command); write && !write->target->host.empty())
-            frame.AddInline(write->target,write->offset,std::move(write->bytes));
+            frame.AddInline(write->target,write->offset,{write->borrowed.begin(),write->borrowed.end()});
         if(auto* copy=std::get_if<CopyBuffer>(&command); copy && !copy->destination->host.empty()) {
             if(!frame.Reserve(copy->destination,copy->dstOffset,copy->size,1,copy->size,
                               std::max<uint64_t>(1,device.GetDetail().BufferCopyOffsetAlignment),copy->stagingOffset)) return false;
@@ -323,6 +341,23 @@ void CommandTape::ReplayTextureBuffer(radray::RDGBuilder& graph,FrameTextureImpo
     }
 }
 void CommandTape::Replay(radray::RDGBuilder& graph,FrameTextureImports& imports,radray::AsyncReadbackQueue& queue,const OutputPassResources& output,const FrameTimestamps& timestamps,const FrameReadbacks& readbacks,Texture* backBuffer) {
+    for(auto& upload:_worldUploads) {
+        auto h=graph.ImportPersistentOwned(upload.target);
+        graph.UploadBuffer(h,upload.offset,std::move(upload.source));
+        graph.MarkOutput(h);
+    }
+    _worldUploads.clear();
+    radray::RDGBufferHandle instanceBuffer;
+    if(!_instanceUploads.empty()) {
+        instanceBuffer=graph.CreateBuffer({.MaxSize=_instanceUploads.size(),.Usage=BufferUse::Vertex},
+            radray::RDGUploadSource::BorrowedBytes(_instanceUploads));
+    }
+    radray::RDGBufferHandle geometryIndirectBuffer;
+    if(!_geometryIndirectArgs.empty()) {
+        const auto argBytes=std::as_bytes(std::span{_geometryIndirectArgs});
+        geometryIndirectBuffer=graph.CreateBuffer({.MaxSize=argBytes.size(),.Usage=BufferUse::Indirect},
+            radray::RDGUploadSource::BorrowedBytes(argBytes));
+    }
     for(auto& view:_views) view.Import(graph,_backend);
     for(auto& command:_commands) {
         if(auto* clear=std::get_if<Clear>(&command)) {
@@ -341,12 +376,12 @@ void CommandTape::Replay(radray::RDGBuilder& graph,FrameTextureImports& imports,
             if(!queue.EnqueueReserved(graph,read->id,handle,read->source.area)) RADRAY_ABORT("Prepared texture readback rejected");
         } else if(auto* upload=std::get_if<Upload>(&command)) {
             auto handle=imports.Import(upload->target.texture,upload->target.full);
-            graph.UploadTexture(handle,upload->target.area,radray::RDGTextureUploadSource::OwnedBytes(std::move(upload->pixels),upload->pitch));
+            graph.UploadTexture(handle,upload->target.area,radray::RDGTextureUploadSource::BorrowedBytes(upload->pixels,upload->pitch));
             graph.MarkOutput(handle);
         } else if(auto* write=std::get_if<WriteBuffer>(&command)) {
             if(write->target->host.empty()) {
                 auto dst=write->target->Import(graph);
-                graph.UploadBuffer(dst,write->offset,radray::RDGUploadSource::OwnedBytes(std::move(write->bytes)));
+                graph.UploadBuffer(dst,write->offset,radray::RDGUploadSource::BorrowedBytes(write->borrowed));
                 graph.MarkOutput(dst);
             }
         } else if(auto* copy=std::get_if<CopyBuffer>(&command)) {
@@ -362,7 +397,7 @@ void CommandTape::Replay(radray::RDGBuilder& graph,FrameTextureImports& imports,
         } else if(auto* image=std::get_if<TextureBuffer>(&command)) {
             ReplayTextureBuffer(graph,imports,readbacks,*image);
         } else if(auto* raster=std::get_if<radray::shared_ptr<ImmediatePass>>(&command)) {
-            (*raster)->Replay(graph,imports,timestamps);
+            (*raster)->Replay(graph,imports,timestamps,instanceBuffer,geometryIndirectBuffer);
         } else if(auto* timestamp=std::get_if<Timestamp>(&command)) {
             timestamps.Write(graph,timestamp->physicalIndex);
         } else if(auto* blit=std::get_if<Blit>(&command)) {

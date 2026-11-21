@@ -107,26 +107,104 @@ def program_key(sources, identity):
     return 'p_' + hashlib.sha256(chr(0).join(fields).encode('utf-8')).hexdigest()
 
 
-def convert(entry, root, destination, glslang, cross, expanded=None):
-    identity = entry['identity']
-    sources = {}
-    for stage, suffix in [('VERTEX', 'vsh'), ('FRAGMENT', 'fsh')]:
-        shader = identity['shaders'][stage]
-        if expanded is not None:
-            sources[stage] = expanded[stage]
-            continue
-        if not shader.startswith('minecraft:') or '..' in Path(shader.split(':', 1)[1]).parts:
-            raise ValueError(f'Non-vanilla shader: {shader}')
-        sources[stage] = expand(root / (shader.split(':', 1)[1] + '.' + suffix), root)
-    source_key = program_key(sources, identity)
-    name = source_key[:58]
+def instanced_entity_vertex_source(source):
+    original = (
+        'layout(location = 0) in vec3 Position;\n'
+        'layout(location = 1) in vec4 Color;\n'
+        'layout(location = 2) in vec2 UV0;\n'
+        'layout(location = 3) in ivec2 UV1;\n'
+        'layout(location = 4) in ivec2 UV2;\n'
+        'layout(location = 5) in vec3 Normal;'
+    )
+    if original not in source or 'void main() {' not in source:
+        raise ValueError('Unexpected core/entity.vsh interface for instanced fast-track')
+    replacement = (
+        'layout(location = 0) in vec3 LocalPos;\n'
+        'layout(location = 1) in vec2 UV0;\n'
+        'layout(location = 2) in vec4 LocalNormal;\n'
+        'layout(location = 3) in vec4 InstRow0;\n'
+        'layout(location = 4) in vec4 InstRow1;\n'
+        'layout(location = 5) in vec4 InstRow2;\n'
+        'layout(location = 6) in vec4 InstColor;\n'
+        'layout(location = 7) in ivec2 InstUV1;\n'
+        'layout(location = 8) in ivec2 InstUV2;\n'
+        'layout(location = 9) in vec4 InstNormalX;\n'
+        'layout(location = 10) in vec4 InstNormalY;\n'
+        'layout(location = 11) in vec4 InstNormalZ;'
+    )
+    preamble = (
+        'void main() {\n'
+        '    vec4 rnLocal = vec4(LocalPos, 1.0);\n'
+        '    vec3 Position = vec3(dot(InstRow0, rnLocal), dot(InstRow1, rnLocal), dot(InstRow2, rnLocal));\n'
+        '    vec4 Color = InstColor;\n'
+        '    ivec2 UV1 = InstUV1;\n'
+        '    ivec2 UV2 = InstUV2;\n'
+        '    vec3 Normal = LocalNormal.x * InstNormalX.xyz + LocalNormal.y * InstNormalY.xyz + LocalNormal.z * InstNormalZ.xyz;\n'
+    )
+    return source.replace(original, replacement, 1).replace('void main() {', preamble, 1)
+
+
+def instanced_particle_vertex_source(source):
+    original = (
+        'layout(location = 0) in vec3 Position;\n'
+        'layout(location = 1) in vec2 UV0;\n'
+        'layout(location = 2) in vec4 Color;\n'
+        'layout(location = 3) in ivec2 UV2;'
+    )
+    if original not in source or 'void main() {' not in source:
+        raise ValueError('Unexpected core/particle.vsh interface for instanced fast-track')
+    replacement = (
+        'layout(location = 0) in vec2 CornerPos;\n'
+        'layout(location = 1) in vec2 CornerUvMask;\n'
+        'layout(location = 2) in vec4 InstPosScale;\n'
+        'layout(location = 3) in vec4 InstRot;\n'
+        'layout(location = 4) in vec4 InstUvRect;\n'
+        'layout(location = 5) in vec4 InstColor;\n'
+        'layout(location = 6) in ivec2 InstUV2;'
+    )
+    preamble = (
+        'void main() {\n'
+        '    vec4 rnQ = InstRot;\n'
+        '    float rnXX = rnQ.x * rnQ.x, rnYY = rnQ.y * rnQ.y, rnZZ = rnQ.z * rnQ.z, rnWW = rnQ.w * rnQ.w;\n'
+        '    float rnXY = rnQ.x * rnQ.y, rnXZ = rnQ.x * rnQ.z, rnYZ = rnQ.y * rnQ.z;\n'
+        '    float rnXW = rnQ.x * rnQ.w, rnYW = rnQ.y * rnQ.w, rnZW = rnQ.z * rnQ.w;\n'
+        '    float rnK = 1.0 / (rnXX + rnYY + rnZZ + rnWW);\n'
+        '    vec3 rnRotated = vec3(\n'
+        '        ((rnXX - rnYY - rnZZ + rnWW) * rnK) * CornerPos.x + (2.0 * (rnXY - rnZW) * rnK) * CornerPos.y,\n'
+        '        (2.0 * (rnXY + rnZW) * rnK) * CornerPos.x + ((rnYY - rnXX - rnZZ + rnWW) * rnK) * CornerPos.y,\n'
+        '        (2.0 * (rnXZ - rnYW) * rnK) * CornerPos.x + (2.0 * (rnYZ + rnXW) * rnK) * CornerPos.y\n'
+        '    );\n'
+        '    vec3 Position = rnRotated * InstPosScale.w + InstPosScale.xyz;\n'
+        '    vec2 UV0 = vec2(CornerUvMask.x > 0.5 ? InstUvRect.y : InstUvRect.x, CornerUvMask.y > 0.5 ? InstUvRect.w : InstUvRect.z);\n'
+        '    vec4 Color = InstColor.bgra;\n'
+        '    ivec2 UV2 = InstUV2;\n'
+    )
+    return source.replace(original, replacement, 1).replace('void main() {', preamble, 1)
+
+
+def instanced_shadow_vertex_source(source):
+    original = """layout(location = 0) in vec3 Position;
+layout(location = 1) in vec4 Color;
+layout(location = 2) in vec2 UV0;"""
+    inputs = """layout(location = 0) in vec3 LocalPos;
+layout(location = 1) in vec4 InstOriginU0;
+layout(location = 2) in vec4 InstEdgeXU1;
+layout(location = 3) in vec4 InstEdgeZV0;
+layout(location = 4) in float InstV1;
+layout(location = 5) in vec4 InstColor;"""
+    body = """void main() {
+    vec3 Position = InstOriginU0.xyz + LocalPos.x * InstEdgeXU1.xyz + LocalPos.z * InstEdgeZV0.xyz;
+    vec2 UV0 = vec2(LocalPos.x > 0.5 ? InstEdgeXU1.w : InstOriginU0.w,
+                    LocalPos.z > 0.5 ? InstV1 : InstEdgeZV0.w);
+    vec4 Color = InstColor;"""
+    if original not in source or 'void main() {' not in source:
+        raise ValueError('Unexpected entity shadow vertex interface')
+    return source.replace(original, inputs, 1).replace('void main() {', body, 1)
+
+
+def convert_program(sources, identity, name, destination, glslang, cross):
     directory = destination / name
     directory.mkdir(parents=True, exist_ok=True)
-    if identity['shaders']['VERTEX'] == 'minecraft:core/debug_point':
-        # One vertex stream element per instance; six generated corners preserve pixel-sized points.
-        sources['VERTEX'] = sources['VERTEX'].replace('gl_PointSize = LineWidth;', '''
-    const vec2 corners[6] = vec2[6](vec2(-1,-1),vec2(1,-1),vec2(1,1),vec2(1,1),vec2(-1,1),vec2(-1,-1));
-    gl_Position.xy += corners[gl_VertexIndex % 6] * LineWidth / ScreenSize * gl_Position.w;''')
     combined = '\n'.join(sources.values())
     blocks = sorted(set(re.findall(r'layout\(std140\)\s+uniform\s+(\w+)', combined)))
     textures = sorted(set(re.findall(r'uniform\s+[iu]?sampler\w+\s+(\w+)\s*;', combined)))
@@ -235,7 +313,41 @@ def convert(entry, root, destination, glslang, cross, expanded=None):
         if resource['group'] == 1:
             sampler = resource['binding'] // 2
             resource['sampler'] = resource['binding'] + 1 if f'register(s{sampler}, space1)' in source else -1
-    return {'program': name, 'key': source_key, 'inputs': inputs, 'resources': resources, 'pushBytes': push_size}
+    return {'program': name, 'inputs': inputs, 'resources': resources, 'pushBytes': push_size}
+
+
+def convert(entry, root, destination, glslang, cross, expanded=None):
+    identity = entry['identity']
+    sources = {}
+    for stage, suffix in [('VERTEX', 'vsh'), ('FRAGMENT', 'fsh')]:
+        shader = identity['shaders'][stage]
+        if expanded is not None:
+            sources[stage] = expanded[stage]
+            continue
+        if not shader.startswith('minecraft:') or '..' in Path(shader.split(':', 1)[1]).parts:
+            raise ValueError(f'Non-vanilla shader: {shader}')
+        sources[stage] = expand(root / (shader.split(':', 1)[1] + '.' + suffix), root)
+    source_key = program_key(sources, identity)
+    name = source_key[:58]
+    base_sources = dict(sources)
+    if identity['shaders']['VERTEX'] == 'minecraft:core/debug_point':
+        # One vertex stream element per instance; six generated corners preserve pixel-sized points.
+        base_sources['VERTEX'] = base_sources['VERTEX'].replace('gl_PointSize = LineWidth;', '''
+    const vec2 corners[6] = vec2[6](vec2(-1,-1),vec2(1,-1),vec2(1,1),vec2(1,1),vec2(-1,1),vec2(-1,-1));
+    gl_Position.xy += corners[gl_VertexIndex % 6] * LineWidth / ScreenSize * gl_Position.w;''')
+    result = {'key': source_key, **convert_program(base_sources, identity, name, destination, glslang, cross)}
+    if expanded is None:
+        vshader = identity['shaders']['VERTEX']
+        variants = {
+            'minecraft:core/entity': ('entity', instanced_entity_vertex_source),
+            'minecraft:core/particle': ('particle', instanced_particle_vertex_source),
+            'minecraft:core/rendertype_entity_shadow': ('shadow', instanced_shadow_vertex_source),
+        }
+        if vshader in variants:
+            mode, transform = variants[vshader]
+            inst_sources = {**sources, 'VERTEX': transform(sources['VERTEX'])}
+            result['instanced'] = {'mode': mode, **convert_program(inst_sources, identity, source_key[:57] + '_inst', destination, glslang, cross)}
+    return result
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

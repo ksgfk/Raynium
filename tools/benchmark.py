@@ -11,7 +11,6 @@ from pathlib import Path
 import re
 import shutil
 import socket
-import stat
 import subprocess
 import sys
 import time
@@ -23,7 +22,7 @@ DEFAULTS = {
     'warmupSeconds': 20, 'startupTimeoutSeconds': 180, 'shutdownTimeoutSeconds': 60,
     'captureTimeoutSeconds': 120, 'width': 1280, 'height': 720,
     'renderDistance': 32, 'simulationDistance': 8, 'jfrEnabled': False, 'terrainSubmission': 'auto',
-    'profilerEnabled': False, 'renderer': 'raynium', 'commands': [], 'screen': 'none', 'oit': False, 'playerMode': 'spectator',
+    'profilerEnabled': False, 'renderer': 'raynium', 'commands': [], 'clearBenchmarkEntities': False, 'screen': 'none', 'oit': False, 'playerMode': 'spectator',
 }
 PATH_KEYS = ('tracyCapture', 'world', 'optionsFile', 'outputDir')
 
@@ -83,7 +82,7 @@ def load_config(path, capture_override=None, *, profiler_override=None, renderer
         raise ValueError('Invalid benchmark scene screen or commands')
     if config['playerMode'] not in ('spectator', 'creative', 'survival'):
         raise ValueError('playerMode must be spectator, creative or survival')
-    for key in ('jfrEnabled', 'profilerEnabled', 'oit'):
+    for key in ('jfrEnabled', 'profilerEnabled', 'oit', 'clearBenchmarkEntities'):
         if type(config[key]) is not bool:
             raise ValueError(f'{key} must be a boolean')
     for key in ('warmupSeconds', 'startupTimeoutSeconds', 'shutdownTimeoutSeconds', 'captureTimeoutSeconds'):
@@ -160,7 +159,7 @@ def gradle_command(*arguments):
 
 def gradle_properties(config):
     return ['-PnativeConfig=Release', '-PnativeProfiler=' + str(config.get('profilerEnabled', False)).lower(), '-PrhiValidation=false',
-            '-PrhiBackend=' + config['backend'],
+            '-PcaptureTracyImages=false', '-PrhiBackend=' + config['backend'],
             '-PterrainSubmission=' + config['terrainSubmission'],
             '-PnativePython=' + sys.executable]
 
@@ -205,7 +204,7 @@ def capture_connected(pid, port):
 
 @contextmanager
 def locked_world(world):
-    # MC locks the whole session.lock file. Hold one byte while copying so a live save is never copied.
+    # Minecraft locks the whole file; an overlapping byte detects an active game.
     import msvcrt
     with (world / 'session.lock').open('a+b') as lock:
         lock.seek(0)
@@ -223,14 +222,12 @@ def locked_world(world):
 def prepare_run(config, session):
     world = Path(config['world'])
     run = session / 'game'
+    import _winapi
+
+    saves = run / 'saves'
+    saves.mkdir(parents=True)
     with locked_world(world):
-        # Reject directory links rather than following data outside the selected world.
-        for base, directories, files in os.walk(world, followlinks=False):
-            for name in directories + files:
-                path = Path(base) / name
-                if path.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
-                    raise RuntimeError(f'World contains a link; use a regular save copy: {path}')
-        shutil.copytree(world, run / 'saves/benchmark', ignore=shutil.ignore_patterns('session.lock'))
+        _winapi.CreateJunction(str(world), str(saves / 'benchmark'))
     options = {}
     if 'optionsFile' in config:
         for line in Path(config['optionsFile']).read_text(encoding='utf-8').splitlines():
@@ -272,7 +269,7 @@ def check_payload(session, profiler):
     shutil.copyfile(payload / 'native-manifest.json', session / 'native-manifest.json')
 
 
-def check_result(session, game_code, capture_code, jfr_enabled, profiler=True, renderer='raynium'):
+def check_result(session, game_code, capture_code, jfr_enabled, profiler=True, renderer='raynium', backend='d3d12'):
     if game_code != 0 or capture_code != 0:
         raise RuntimeError(f'Process failed: game/Gradle={game_code}, Tracy={capture_code}')
     client = read_json(session / 'client-result.json')
@@ -288,6 +285,17 @@ def check_result(session, game_code, capture_code, jfr_enabled, profiler=True, r
         if marker in game_log:
             raise RuntimeError('Benchmark scene has invalid Minecraft input: '+marker)
     native_log = (session / 'game.log').read_text(encoding='utf-8', errors='replace') if (session / 'game.log').exists() else ''
+    expected = 'Vulkan' if renderer == 'vanilla' else 'Raynium'
+    if f'Using graphics backend {expected},' not in game_log:
+        raise RuntimeError(f'Client did not select the requested graphics backend {expected}')
+    if renderer == 'raynium' and not re.search(
+            rf'DeviceContext: ready backend={re.escape(backend)} .* RHI validation=false driver validation=false\b',
+            native_log, re.IGNORECASE):
+        raise RuntimeError(f'Missing device confirmation for {backend} with both validation layers off')
+    for flag, expected in (('javaTracyLoaded', False), ('jfrRecording', jfr_enabled),
+                           ('lwjglChecks', False), ('javaAssertions', False)):
+        if client.get(flag) is not expected:
+            raise RuntimeError(f'Benchmark requires {flag}={expected} in the client result')
     if '[critical]' in native_log or re.search(r'\[error\][^\n]*\r?\n(?:d3d12 validation|vk Validation|RHI validation)', native_log):
         raise RuntimeError('Native validation or abort in benchmark log')
     if profiler:
@@ -323,7 +331,7 @@ def run_benchmark(config):
                'jfrEnabled': config['jfrEnabled'], 'terrainSubmission': config['terrainSubmission']}
     game = capture = build = gpu_memory = None
     try:
-        print('Copying world and preparing isolated options...', flush=True)
+        print('Opening source world and preparing isolated options...', flush=True)
         run = prepare_run(config, session)
         properties = gradle_properties(config)
         print('Building Release native payload and Java client (build.log)...', flush=True)
@@ -334,12 +342,17 @@ def run_benchmark(config):
                 raise RuntimeError('Build failed; see build.log (dependencies must be prepared explicitly)')
         if config['renderer'] == 'raynium':
             check_payload(session, profiler)
-        with socket.socket() as reservation:
-            reservation.bind(('127.0.0.1', 0))
-            port = reservation.getsockname()[1]
         environment = os.environ.copy()
-        environment['TRACY_PORT'] = str(port)
-        summary['port'] = port
+        if profiler:
+            with socket.socket() as reservation:
+                reservation.bind(('127.0.0.1', 0))
+                port = reservation.getsockname()[1]
+            environment['TRACY_PORT'] = str(port)
+            summary['port'] = port
+        for name in ('VK_INSTANCE_LAYERS', 'VK_LOADER_LAYERS_ENABLE', 'VK_LOADER_LAYERS_ALLOW'):
+            environment.pop(name, None)
+        environment['VK_LOADER_LAYERS_DISABLE'] = '~all~'
+        summary['vulkanLayerFilter'] = environment['VK_LOADER_LAYERS_DISABLE']
         command = gradle_command('runClientNative' if config['renderer'] == 'raynium' else 'runClientReference', '-x', 'nativeStage', *properties,
                                  '-PgameUsername=RayniumTest',
                                  '-PbenchmarkRunDir=' + str(run), '-PbenchmarkConfig=' + str(session / 'benchmark.json'))
@@ -393,7 +406,8 @@ def run_benchmark(config):
             if profiler:
                 print('Game exited; waiting for Tracy to finish saving...', flush=True)
                 capture.wait(timeout=config['captureTimeoutSeconds'])
-        summary['client'] = check_result(session, game.returncode, capture.returncode if profiler else 0, config['jfrEnabled'], profiler, config['renderer'])
+        summary['client'] = check_result(session, game.returncode, capture.returncode if profiler else 0,
+                                         config['jfrEnabled'], profiler, config['renderer'], config['backend'])
         if profiler:
             summary['traceBytes'] = (session / 'session.tracy').stat().st_size
         if config['jfrEnabled']:
@@ -429,6 +443,9 @@ def run_benchmark(config):
         terminate_tree(build)
         terminate_tree(game)
         terminate_tree(capture)
+        link = session / 'game/saves/benchmark'
+        if link.is_dir() and link.resolve() == Path(config['world']):
+            link.rmdir()
         summary['finishedAt'] = datetime.now().astimezone().isoformat()
         write_json(session / 'summary.json', summary)
     return 0 if summary['status'] == 'completed' else 1
