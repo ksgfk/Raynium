@@ -181,11 +181,44 @@ final class NativeBindings {
     private static void checkStatus(String operation,int status) {
         if(status!=0) throw new IllegalStateException(operation+" failed, status="+status);
     }
-    static void call(MethodHandle method,String operation,Object... arguments) {
-        try {
-            int status=(int)method.invokeWithArguments(arguments);
-            checkStatus(operation,status);
-        } catch(RuntimeException | Error failure) { throw failure; }
+    static void call(MethodHandle method,String operation,MemorySegment handle) {
+        try { checkStatus(operation,(int)method.invokeExact(handle)); }
+        catch(RuntimeException | Error failure) { throw failure; }
+        catch(Throwable failure) { throw new IllegalStateException(operation,failure); }
+    }
+    static void call(MethodHandle method,String operation,MemorySegment handle,MemorySegment desc) {
+        try { checkStatus(operation,(int)method.invokeExact(handle,desc)); }
+        catch(RuntimeException | Error failure) { throw failure; }
+        catch(Throwable failure) { throw new IllegalStateException(operation,failure); }
+    }
+    static void call(MethodHandle method,String operation,MemorySegment handle,MemorySegment desc,MemorySegment out) {
+        try { checkStatus(operation,(int)method.invokeExact(handle,desc,out)); }
+        catch(RuntimeException | Error failure) { throw failure; }
+        catch(Throwable failure) { throw new IllegalStateException(operation,failure); }
+    }
+    static void call(MethodHandle method,String operation,MemorySegment handle,int id) {
+        try { checkStatus(operation,(int)method.invokeExact(handle,id)); }
+        catch(RuntimeException | Error failure) { throw failure; }
+        catch(Throwable failure) { throw new IllegalStateException(operation,failure); }
+    }
+    static void call(MethodHandle method,String operation,MemorySegment handle,int count,MemorySegment out) {
+        try { checkStatus(operation,(int)method.invokeExact(handle,count,out)); }
+        catch(RuntimeException | Error failure) { throw failure; }
+        catch(Throwable failure) { throw new IllegalStateException(operation,failure); }
+    }
+    static void call(MethodHandle method,String operation,MemorySegment handle,MemorySegment info,int size) {
+        try { checkStatus(operation,(int)method.invokeExact(handle,info,size)); }
+        catch(RuntimeException | Error failure) { throw failure; }
+        catch(Throwable failure) { throw new IllegalStateException(operation,failure); }
+    }
+    static void call(MethodHandle method,String operation,MemorySegment handle,int id,MemorySegment vertices,int bytes,int count,int indices,MemorySegment page) {
+        try { checkStatus(operation,(int)method.invokeExact(handle,id,vertices,bytes,count,indices,page)); }
+        catch(RuntimeException | Error failure) { throw failure; }
+        catch(Throwable failure) { throw new IllegalStateException(operation,failure); }
+    }
+    static void call(MethodHandle method,String operation,MemorySegment handle,long sequence,MemorySegment info,MemorySegment pixels,long size) {
+        try { checkStatus(operation,(int)method.invokeExact(handle,sequence,info,pixels,size)); }
+        catch(RuntimeException | Error failure) { throw failure; }
         catch(Throwable failure) { throw new IllegalStateException(operation,failure); }
     }
     private MethodHandle bind(Linker linker, SymbolLookup library, String name, FunctionDescriptor descriptor) {

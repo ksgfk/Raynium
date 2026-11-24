@@ -16,6 +16,30 @@ class TerrainCaptureTest {
         DirectUploadPool.release(buffer);
         assertSame(buffer,DirectUploadPool.acquire(8<<20));
     }
+    @Test void refreshesMoreThan64DirtySlotsWithoutFullCapture() throws Exception {
+        TerrainCapture.activate(true);
+        var field=TerrainCapture.class.getDeclaredField("BUFFER");
+        field.setAccessible(true);
+        var buffer=(TerrainCapture.Buffer)field.get(null);
+        for(int i=0;i<128;i++) {
+            var payload=mesh();
+            buffer.put(i,payload,i,0,0,1,1,0);
+            TerrainCapture.recordDirtyIndices(payload);
+        }
+        buffer.finish(128);
+        assertTrue(TerrainCapture.refreshDirty(TerrainCapture.epoch(),0));
+        assertEquals(128,buffer.uploadCandidates.size());
+    }
+    @Test void largeCandidateSetDeduplicatesAfterGrowthAndGenerationWrap() {
+        var buffer=new TerrainCapture.Buffer();
+        buffer.ensureCapacity(2048);
+        for(int pass=0;pass<2;pass++) for(int slot=1024;slot<1280;slot++) buffer.addCandidate(slot);
+        assertEquals(256,buffer.uploadCandidates.size());
+        buffer.generation=-1;
+        buffer.resetCandidates();
+        buffer.addCandidate(1024);
+        assertArrayEquals(new int[]{1024},buffer.uploadCandidates.toIntArray());
+    }
     @Test void shrinkingAndGrowingCaptureReleasesDiscardedPayloads() {
         var buffer=new TerrainCapture.Buffer(); var a=mesh(); var b=mesh();
         buffer.put(0,a,0,0,0,1,1,0); buffer.put(1024,b,0,0,0,1,1,0); buffer.finish(1025);

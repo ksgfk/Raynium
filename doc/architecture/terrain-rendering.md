@@ -17,7 +17,7 @@
 `LevelTerrainHookMixin` 在 `LevelRenderer.prepareChunkRenders` 与 `prepareChunkRendersIndirect` 入口完成 Raynium 视图准备后直接返回仅携带视图句柄的占位 `ChunkSectionsToRender`，避免原版二次加锁遍历可见区块并构造未消费的绘制列表。
 `CompiledSectionMeshMixin` 维护层就绪位掩码，`RenderSectionStateMixin` 在 `setSectionMesh` 与 `reset` 时将 `SectionPayload` 与就绪位掩码直接缓存到 `RenderSection` 并将变更区块加入并发脏队列；`LevelTerrainHookMixin`（`clearVisibleSections`）与 `SectionOcclusionGraphMixin`（`addSectionsInFrustum`）推进 `VISIBLE_LIST_VERSION`。
 
-`TerrainCapture` 复用扁平数组并跨连续活跃帧保留热快照；当视图、可见列表和淡入时长匹配时，采集器按世代和槽号定位变更区块，并刷新活动淡入。区块替换和透明索引更新同时到达时，按当前槽位归并上传候选，一次最多就地处理 64 个通知。可见区块从空变为非空或从非空变为空、脏项超限或无法沿用快照时，持 dispatcher 锁全量采集并重新分配槽号。投影包含受伤、摇晃与反胃变换；每帧由 Native 进行朝向剔除。普通透明保持原版反向 section 顺序；其他层按原版可见遍历顺序送入，由 Native 按页分桶组织。连续两帧未捕获、失效或停用时释放快照引用；关闭的 section 进入延迟回收队列。
+`TerrainCapture` 复用扁平数组并跨连续活跃帧保留热快照；当视图、可见列表和淡入时长匹配时，采集器按世代和槽号定位变更区块，并刷新活动淡入。区块替换和透明索引更新同时到达时，按当前槽位归并上传候选，候选用槽号世代戳去重，淡入成员用布尔数组跟踪。每次最多就地处理 `max(256, 可见槽数 / 4)` 个通知。可见区块从空变为非空或从非空变为空、脏项超限或无法沿用快照时，在 dispatcher 锁内采集区块状态、原点和上传时间并分配槽号，解锁后计算淡入和筛选上传候选。投影包含受伤、摇晃与反胃变换；每帧由 Native 进行朝向剔除。普通透明保持原版反向 section 顺序；其他层按原版可见遍历顺序送入，由 Native 按页分桶组织。连续两帧未捕获、失效或停用时释放快照引用；关闭的 section 进入延迟回收队列。
 
 同批的每个视图独占一份 `NativeFrameBuffer`。Java `TerrainResidency` 在渲染线程通过空闲栈为暂存/驻留的每个 `MeshPayload` 分配 32 位稠密槽位号 `slotId`（`1..maxSlot`，`0` 保留为空），提交淘汰时回收，未提交的分配在下次准备前自动回滚，epoch 切换时重置。预分析网格和堆外索引通过 `meshDirect`/`indexDirect` 零拷贝传递原生指针，`NativeFrameBuffer` 强引用借用的 `DirectByteBuffer` 直至 `rn_submit_frame` 返回并由 `CommandTape.release()` 清空；非预分析路径仍保留拷贝回退。可见项与实例通过复用 `int[]` 暂存批量 `MemorySegment.copy` 写入。
 
@@ -52,9 +52,9 @@ Native 按视图求逆 projection × view，变换 (0,0,1,0) 得到有效视点�
 按实际 AABB 及 0.001 容差计算轴向组；general 始终保留。多实例取可见组并集，再与显式请求掩码和有效元素位求交。
 计算得到零掩码正常跳过绘制；显式非法掩码失败。Native 寿命与批次规则见[Native runtime](native-runtime.md)。
 
-`TerrainResidency` 通过按 `slotId` 索引的平坦数组（`meshesBySlot`，上限 `kMaxMeshSlot`）和 64 字节对齐热数组（`_hotSlots`）实现 $O(1)$ 寻址。几何池均开启 `BufferUse::Resource`，分为 128 MiB/页的 `TerrainVertices`（承载 `OPAQUE` 与 `CUTOUT`）、独立的 256 MiB/页 `TranslucentVertices`（承载 `TRANSLUCENT`）、专供共享四边形的 16 MiB 索引页及半透明和线框使用的 128 MiB 索引页。帧槽回收后可释放空闲页。
+`TerrainResidency` 通过按 `slotId` 索引的平坦数组（`meshesBySlot`，上限 `kMaxMeshSlot`）和 64 字节对齐热数组（`_hotSlots`）实现 $O(1)$ 寻址。几何池均开启 `BufferUse::Resource`，分为 128 MiB/页的 `TerrainVertices`（承载 `OPAQUE` 与 `CUTOUT`）、独立的每页至多 512 MiB、受设备单缓冲上限约束的 `TranslucentVertices`（承载 `TRANSLUCENT`）、专供共享四边形的 16 MiB 索引页及半透明和线框使用的 128 MiB 索引页。帧槽回收后可释放空闲页。
 
-每个视图按层缓存实例、可见列表、分页代表命令及索引绘制参数。Solid 和 Cutout 在有效视点各轴 ±1 方块内记录可能跨越可见平面的区块及其有效面掩码。视点在盒内移动且触及候选平面时，只复查这些候选。相同视点和未触及平面的位移直接复用绘制参数。有效掩码翻转、离开盒子或几何版本变化会触发重建。线框对多面组使用按请求掩码生成的原序索引。经典透明按排序键保持顺序，OIT 按顶点和索引页合批。
+每个视图按层缓存实例、可见列表、分页代表命令及索引绘制参数。Solid 和 Cutout 在有效视点各轴 ±1 方块内记录可能跨越可见平面的区块及其有效面掩码。视点在盒内移动且触及候选平面时，只复查这些候选。相同视点和未触及平面的位移直接复用绘制参数。有效掩码翻转、离开盒子或几何版本变化会触发重建。线框对多面组使用按请求掩码生成的原序索引。经典透明以排序键为初始顺序，跨页时在八项窗口内仅将投影包围盒与所有被跨越项严格分离的单实例调到同页项旁。包围盒无效或穿过视点时维持原序。发生交换的绘制参数在下个视图重建。OIT 按顶点和索引页合批。
 
 变化的实例表和逐层间接参数使用当前帧槽的瞬态 RDG 缓冲。内容和有效字节数保持相同，且连续两次用于绘制后，视图将数据上传到专属 Device 缓冲。后续命中帧只导入缓冲。没有地形绘制时，未变的实例表保留原缓冲和命中计数。实例表有变化则重新计数，等待恢复绘制后晋升。
 

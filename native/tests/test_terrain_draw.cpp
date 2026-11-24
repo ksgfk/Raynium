@@ -1,4 +1,5 @@
 #include <raynium/terrain_draw.h>
+#include <raynium/buffer_registry.h>
 #include <raynium/terrain_feature.h>
 #include "test_fakes.h"
 #include <raynium/terrain_residency.h>
@@ -99,6 +100,63 @@ public:
     radray::vector<DrawIndexedIndirectArguments> direct;
     radray::vector<Indirect> indirect;
 };
+
+TEST(BufferRegistry, ReuseRequiresCompletedSubmissionAndLastSlotReference) {
+    radray::test::FakeDevice device;
+    device.EnableHostBuffers=true;
+    device.Capabilities.Limits.MaxBufferSize=64u<<20;
+    BufferRegistry registry;
+    const rn_buffer_desc desc{sizeof(rn_buffer_desc),RN_BUFFER_MAP_WRITE|RN_BUFFER_COPY_SRC,256,nullptr};
+    rn_buffer_result first{},next{};
+    ASSERT_TRUE(registry.Create(device,desc,first));
+    auto retained=registry.Find(first.id);
+    registry.Advance(5,3);
+    ASSERT_TRUE(registry.Destroy(first.id));
+    EXPECT_FALSE(registry.Find(first.id));
+    device.BuffersUntilFailure=0;
+    EXPECT_FALSE(registry.Create(device,desc,next));
+    registry.Advance(5,5);
+    EXPECT_FALSE(registry.Create(device,desc,next));
+    retained.reset();
+    ASSERT_TRUE(registry.Create(device,desc,next));
+    EXPECT_NE(first.id,next.id);
+    EXPECT_EQ(first.mapped,next.mapped);
+    ASSERT_TRUE(registry.Destroy(next.id));
+    registry.Advance(125,125);
+    EXPECT_FALSE(registry.Create(device,desc,next));
+}
+
+TEST(BufferRegistry, IdleBudgetCapsExactSizeBuckets) {
+    radray::test::FakeDevice device;
+    device.EnableHostBuffers=true;
+    device.Capabilities.Limits.MaxBufferSize=64u<<20;
+    BufferRegistry registry;
+    rn_buffer_desc desc{sizeof(rn_buffer_desc),RN_BUFFER_MAP_WRITE|RN_BUFFER_COPY_SRC,16u<<20,nullptr};
+    radray::array<rn_buffer_result,5> outputs{};
+    for(auto& out:outputs) ASSERT_TRUE(registry.Create(device,desc,out));
+    for(auto& out:outputs) ASSERT_TRUE(registry.Destroy(out.id));
+    device.BuffersUntilFailure=0;
+    for(unsigned i=0;i<4;++i) EXPECT_TRUE(registry.Create(device,desc,outputs[i]));
+    EXPECT_FALSE(registry.Create(device,desc,outputs[4]));
+}
+
+TEST(TerrainBounds, OnlyStrictlySeparatedScreenBoundsCanCross) {
+    TerrainHotSlot hot{};
+    hot.flags=kTerrainHotFlagFiniteBounds;
+    hot.maxBound[0]=hot.maxBound[1]=hot.maxBound[2]=1;
+    rn_terrain_view_desc frame{};
+    for(int i=0;i<16;i+=5) frame.projection[i]=frame.view[i]=1;
+    rn_instance first{},other{};
+    auto a=ProjectTerrainBounds(hot,first,frame);
+    other.origin[2]=3;
+    EXPECT_FALSE(a.Disjoint(ProjectTerrainBounds(hot,other,frame)));
+    other.origin[0]=1;
+    EXPECT_FALSE(a.Disjoint(ProjectTerrainBounds(hot,other,frame)));
+    other.origin[0]=2;
+    EXPECT_TRUE(a.Disjoint(ProjectTerrainBounds(hot,other,frame)));
+    frame.projection[15]=0;
+    EXPECT_FALSE(a.Disjoint(ProjectTerrainBounds(hot,other,frame)));
+}
 
 TEST(StaticGeometry, BuiltinsStayResidentAndUserIdsCanBeReused) {
     radray::test::FakeDevice device;

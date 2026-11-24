@@ -14,6 +14,8 @@
 
 MC 的实体、天空、GUI、画中画、光照图、动画图集与后处理继续使用自己的 RenderPass、管线、附件和视图。`RayniumGpuDevice` 提供 `FrontendCommandEncoder`，后端在绘制点保存当前管线、窗口区域、绑定、动态偏移与 Push Constant。时间戳、跨资源复制和最终上屏随实际调用位置进入批次。
 
+RenderPearl 编码器复用一个光栅录制器及其绑定数组。每个前端 pass 持有独立的后端句柄，关闭时解除对录制器的引用，并清除已使用的绑定和裁剪状态。
+
 `acquireNextTexture` 的前端获取状态可以跨多个离屏提交。只有记录上屏 blit 的批次携带 surface。可恢复的交换链结果由表面保存，后续 configure 重建。终态通过共用路径释放前端获取状态。截图和图集导出使用 MC 自身的纹理复制、只读映射与 Fence 路径。
 
 ## 地形、世界快轨与帧事件

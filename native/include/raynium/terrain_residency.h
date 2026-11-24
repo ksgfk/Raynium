@@ -35,6 +35,13 @@ struct alignas(64) TerrainHotSlot {
 };
 static_assert(sizeof(TerrainHotSlot) == 64 && alignof(TerrainHotSlot) == 64);
 
+struct ProjectedTerrainBounds {
+    float left{},right{},bottom{},top{};
+    bool valid{};
+    bool Disjoint(const ProjectedTerrainBounds& other) const noexcept;
+};
+ProjectedTerrainBounds ProjectTerrainBounds(const TerrainHotSlot&,const rn_instance&,const rn_terrain_view_desc&) noexcept;
+
 struct TerrainEyeCrossingCache {
     struct Item { uint32_t mesh,firstInstance,instanceCount; uint8_t requestedMask,effectiveMask; };
     static_assert(sizeof(Item)==16);
@@ -227,6 +234,8 @@ private:
     radray::unordered_map<uint32_t,size_t> _oitPageLookup;
     radray::array<radray::unordered_map<uint64_t,uint32_t>,2> _wirePages;
     radray::vector<FastClassicTranslucentItem> _fastClassicTranslucent;
+    radray::vector<ProjectedTerrainBounds> _classicBounds;
+    bool GroupDisjointClassicItems(std::span<const rn_instance>,const rn_terrain_view_desc&);
     radray::vector<uint32_t> _fastBatchRepSlots;
 };
 }

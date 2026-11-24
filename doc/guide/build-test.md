@@ -159,7 +159,7 @@ python tools/benchmark.py --config tools/benchmark.example.json --profiler --tra
 城市存档的航线与相机坐标见 [Metcalf](../../tools/benchmarks/metcalf-stress.json)、[Tideworn](../../tools/benchmarks/tideworn-stress.json) 和 [Newisle](../../tools/benchmarks/newisle-stress.json)。使用主采样参数时显式传入 `--no-profiler --no-jfr`。
 
 产物位于 outputDir 的独立时间目录，包含配置、构建/游戏日志、client-result.json、summary.json、frames.csv 与 gpu.csv；native 运行另保存 payload 清单，诊断按开关保存 session.tracy/session.jfr。脚本检查路线完成和资源关闭；诊断额外检查采集器退出和文件保存。
-`frames.csv` 的 native 指标按本世界帧的实际批次汇总，包括上传字节、驻留几何记录与绘制、即时绘制和绑定数。即时绘制含 GUI 和后处理；独立的旧 GUI 计数列保留为零。原版缺少的 native 指标为 -1。`javaPrepareNs` 计量提交前封存瞬态内存的时间，`nativeCallNs` 计量 Java 进入命令带提交到该方法返回的时间。`renderWallNs` 涵盖整帧渲染。几何池容量和 Windows 进程显存分别采样。
+`frames.csv` 的 native 指标按本世界帧的实际批次汇总，包括上传字节、驻留几何记录与绘制、即时绘制和绑定数。即时绘制含 GUI 和后处理；独立的旧 GUI 计数列保留为零。原版缺少的 native 指标为 -1。`javaPrepareNs` 计量提交前封存瞬态内存的时间，`nativeCallNs` 计量 Java 进入命令带提交到该方法返回的时间。`nativeSyncWaitNs` 汇总同一测量帧内显式等待和轮询 `rn_wait_submit` 的墙钟时间，单位为纳秒。原版帧记为 -1。`renderWallNs` 涵盖整帧渲染。几何池容量和 Windows 进程显存分别采样。
 客户端以固定容量的原始数组记录测量区间，结束后写文件及计算最近秩 p50/p95/p99。clientFrameInterval 包括两次帧入口之间的客户端工作，renderWall 是 renderFrame 的 CPU 侧墙钟时间；它包含等待，不等于线程忙碌时间。Windows 线程 CPU 计数粒度较粗，只报告总量并保留原始列。native 另返回槽等待、资源准备、RDG RunFrame 和呈现时间；RDG RunFrame 包含建图、准备、录制及提交，不与参考 renderer 的不同职责阶段直接等同。
 GPU 样本均在完成后读取：native 按批测量并在上屏边界汇总，参考使用原版 TimerQuery 并保留实际样本数量，不重复其滑动平均值。进程内存由 Windows 进程计数器轮询，summary 保存峰值工作集、提交量和采样私有内存；GPU Process Memory 计数器按客户端 PID 汇总适配器的专用、共享和提交量采样峰值，同时保存有效样本数；不可用时记录原因，不用零代替。它们是操作系统进程计数，与 native 几何池预留/已分配容量分别报告。客户端保存区间分配量及 GC 次数/时间。普通游戏帧不开启这些测量。
 
@@ -195,7 +195,7 @@ ABI 参数检查及资源寿命保护始终执行。benchmark 记录每批 GPU �
 `Raynium.Frame.AcquireNext` 标出取得交换链图像的调用，`Raynium.Frame.Present` 覆盖提交呈现与结果检查。测量批次的统计工作记为 `Raynium.Benchmark.BatchMetrics`，可通过首末标记定位正式路线。
 `Raynium.Frame.QueueSubmit` 覆盖队列提交，并随槽回收发布 `Raynium.GpuMilliseconds`。
 `Raynium.Terrain.Prepare` 覆盖驻留更新、可见解析及参数构建；`Raynium.Terrain.Sort`、`BuildArguments` 分别记录排序和参数构建，`Raynium.Terrain.Record` 记录几何 pass 的内联录制；没有逐 draw profiling scope。上传字节的复制与生成计入 `RadRay.RDG.FillUploads`。
-锁定 RadRay 的 `CompiledRDG::Record` 按 Upload execution group 记录一个 `RDG UploadBatch` GPU 计时区，逐上传节点保留 CPU zone。该 GPU 区间包含组内拷贝和重叠写屏障，不包含组入口屏障；完整 native GPU 耗时仍读取上述帧外围 timestamp，不能用上传子区间之和替代。实现来源为 RadRay `modules/runtime/src/rdg.cpp`。
+锁定 RadRay 的 `CompiledRDG::Record` 按 Upload execution group 记录一个 `RDG UploadBatch` GPU 计时区，逐上传节点保留 CPU zone。D3D12 的光栅 GPU 区间覆盖整个原生 render pass，合并组使用首个 RDG 光栅 pass 名。该上传 GPU 区间包含组内拷贝和重叠写屏障，不包含组入口屏障；完整 native GPU 耗时仍读取上述帧外围 timestamp，不能用上传子区间之和替代。实现来源为 RadRay `modules/runtime/src/rdg.cpp`。
 `Raynium.Visible.Solid/Cutout/Translucent` 记录各层输入项；`Raynium.Terrain.<层>.SelectedGroups/Records/Batches` 记录各层选中面组、参数记录及批次。
 `Raynium.Terrain.BuiltRecords/BuiltBatches/ArgumentBytes` 统计本帧生效参数总量，`Raynium.Terrain.UploadedArgumentBytes` 仅统计本帧实际上传的间接参数字节（稳态缓存命中时为 0），`OitParameterBuilds` 在有 OIT 透明输入时为 1。
 `Raynium.Resident.Meshes`、`Raynium.Uploads.Bytes` 与 `Raynium.Geometry.VertexPages/IndexPages` 记录驻留网格数、上传字节和池保留页数。启用 Tracy 时，定期发布 `Raynium.Geometry.Vertex/IndexReservedBytes`、`Vertex/IndexFreeBytes` 与 `Vertex/IndexAllocatedBytes`；Allocated 为保留容量减空闲量，包含等待退役的区间。这些稀疏样本不能把未发布帧当成零，也不表示最大连续空闲区间。runtime 另提供几何池、上传、槽回收、RDG 编译/屏障/录制区间。

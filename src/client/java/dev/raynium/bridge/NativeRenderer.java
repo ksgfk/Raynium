@@ -36,7 +36,35 @@ public final class NativeRenderer implements AutoCloseable {
     private boolean poisoned;
     private Runnable releaseAcquiredSurface;
     private final Set<NativeBuffer> buffers=new HashSet<>();
-    private final List<NativeBuffer.Mapping> writableMappings=new ArrayList<>();
+    private final List<NativeBuffer> writableBuffers=new ArrayList<>();
+    private final Arena scratch=Arena.ofConfined();
+    private final MemorySegment waitResult=scratch.allocate(16,8),batchDesc=scratch.allocate(96,8),submitResult=scratch.allocate(160,8);
+    final MemorySegment bufferDesc=scratch.allocate(24,8),bufferResult=scratch.allocate(16,8);
+    private final Records viewRecords=new Records(NativeFrameBuffer.BYTE_SIZE),dirtyRanges=new Records(24);
+
+    private static final class Records implements AutoCloseable {
+        final int stride;
+        Arena arena;
+        MemorySegment memory;
+        int capacity,lowUse;
+        Records(int stride) { this.stride=stride; }
+        MemorySegment reserve(int count) {
+            if(count<=capacity/4 && capacity>4) ++lowUse; else lowUse=0;
+            if(count>capacity || lowUse>=120) {
+                close();
+                lowUse=0;
+                if(count==0) return MemorySegment.NULL;
+                capacity=Math.max(4,Math.multiplyExact(Integer.highestOneBit(Math.max(count-1,1)),2));
+                arena=Arena.ofConfined();
+                memory=arena.allocate((long)capacity*stride,8);
+            }
+            return count==0?MemorySegment.NULL:memory;
+        }
+        public void close() {
+            if(arena!=null) arena.close();
+            arena=null; memory=null; capacity=0;
+        }
+    }
     private record Completion(long sequence,Runnable callback) {}
     private final ArrayDeque<Completion> completions=new ArrayDeque<>();
     private long nextTextureId=16;
@@ -51,7 +79,7 @@ public final class NativeRenderer implements AutoCloseable {
             var output=arena.allocate(ADDRESS);
             NativeBindings.call(bindings.createRenderer,"create renderer",runtime,desc,output);
             renderer.handle=output.get(ADDRESS,0); return renderer;
-        }
+        } catch(RuntimeException | Error failure) { renderer.scratch.close(); throw failure; }
     }
     public NativeSwapchain createSwapchain(long hwnd,int width,int height,NativeSwapchain.PresentMode mode) {
         checkOpen(); if(swapchain!=null) throw new IllegalStateException("Renderer already has a swapchain");
@@ -163,7 +191,7 @@ public final class NativeRenderer implements AutoCloseable {
         owner.checkThread();
         if(!isClosed()) NativeBindings.call(bindings.destroyBuffer,"destroy buffer",handle,id);
     }
-    void trackWritable(NativeBuffer.Mapping mapping) { writableMappings.add(mapping); }
+    void trackWritable(NativeBuffer buffer) { writableBuffers.add(buffer); }
     public void onCompleted(long sequence,List<Runnable> callbacks) {
         for(var callback:callbacks) completions.addLast(new Completion(sequence,callback));
     }
@@ -193,11 +221,13 @@ public final class NativeRenderer implements AutoCloseable {
     public void syncQueryPool(int id,int first,int count,MemorySegment samples) {
         checkOpen();
         if(first<0 || count<0 || !samples.isNative() || samples.byteSize()<(long)count*16) throw new IllegalArgumentException("Invalid query result slice");
-        try(var arena=Arena.ofConfined()) {
-            var result=arena.allocate(16,8);
+        try {
+            var result=waitResult;
             int status=(int)bindings.syncQueryPool.invokeExact(handle,id,first,count,samples,result);
-            if(status!=0) terminalFailure((result.get(JAVA_INT,8)&1)!=0);
-            publishCompleted(result.get(JAVA_LONG,0));
+            long completed=result.get(JAVA_LONG,0);
+            boolean lost=(result.get(JAVA_INT,8)&1)!=0;
+            if(status!=0) terminalFailure(lost);
+            publishCompleted(completed);
         } catch(RuntimeException | Error failure) { throw failure; }
         catch(Throwable failure) { throw new IllegalStateException("Cannot sync query pool",failure); }
     }
@@ -208,13 +238,13 @@ public final class NativeRenderer implements AutoCloseable {
     public SubmitResult submitFrame(MemorySegment commands,MemorySegment uploads,MemorySegment instanceUploads,NativeSwapchain surface,List<MemorySegment> views,boolean measure) {
         checkOpen();
         if(surface!=null && surface!=swapchain) throw new IllegalArgumentException("Invalid submit surface");
-        try(var arena=Arena.ofConfined()) {
-            var desc=arena.allocate(96,8);
+        try {
+            var desc=batchDesc;
             desc.set(JAVA_INT,0,96); desc.set(JAVA_INT,4,measure?1:0);
+            var records=viewRecords.reserve(views.size());
+            desc.set(ADDRESS,80,records); desc.set(JAVA_INT,88,views.size());
             if(!views.isEmpty()) {
-                var records=arena.allocate((long)NativeFrameBuffer.BYTE_SIZE*views.size(),8);
                 for(int i=0;i<views.size();++i) records.asSlice((long)NativeFrameBuffer.BYTE_SIZE*i,NativeFrameBuffer.BYTE_SIZE).copyFrom(views.get(i));
-                desc.set(ADDRESS,80,records); desc.set(JAVA_INT,88,views.size());
             }
             desc.set(ADDRESS,8,surface==null?MemorySegment.NULL:surface.handle);
             desc.set(ADDRESS,16,commands);
@@ -222,16 +252,17 @@ public final class NativeRenderer implements AutoCloseable {
             desc.set(ADDRESS,32,uploads);
             desc.set(JAVA_LONG,40,uploads.byteSize());
             desc.set(ADDRESS,48,instanceUploads); desc.set(JAVA_LONG,56,instanceUploads.byteSize());
-            if(!writableMappings.isEmpty()) {
-                var dirty=arena.allocate(24L*writableMappings.size(),8);
-                for(int i=0;i<writableMappings.size();++i) writableMappings.get(i).encode(dirty,24L*i);
-                desc.set(ADDRESS,64,dirty);
-                desc.set(JAVA_INT,72,writableMappings.size());
-            }
-            var result=arena.allocate(160,8);
+            int count=0;
+            for(int i=0;i<writableBuffers.size();i++) count=Math.addExact(count,writableBuffers.get(i).rangeCount());
+            var dirty=dirtyRanges.reserve(count);
+            long at=0;
+            for(int i=0;i<writableBuffers.size();i++) at=writableBuffers.get(i).encodeRanges(dirty,at);
+            desc.set(ADDRESS,64,dirty); desc.set(JAVA_INT,72,count);
+            var result=submitResult;
             int status=(int)bindings.submitFrame.invokeExact(handle,desc,result);
-            writableMappings.removeIf(NativeBuffer.Mapping::releaseIfClosed);
-            return new SubmitResult(result.get(JAVA_LONG,0),result.get(JAVA_INT,8),status==0,(result.get(JAVA_INT,12)&1)!=0,measure?result.asSlice(16,144).toArray(JAVA_LONG):null);
+            var batch=new SubmitResult(result.get(JAVA_LONG,0),result.get(JAVA_INT,8),status==0,(result.get(JAVA_INT,12)&1)!=0,measure?result.asSlice(16,144).toArray(JAVA_LONG):null);
+            writableBuffers.removeIf(NativeBuffer::afterSubmit);
+            return batch;
         } catch(RuntimeException | Error failure) { throw failure; }
         catch(Throwable failure) { throw new IllegalStateException("Cannot submit command tape",failure); }
     }
@@ -254,10 +285,13 @@ public final class NativeRenderer implements AutoCloseable {
     public WaitResult waitSubmit(long sequence,long timeoutNs) {
         checkOpen();
         if(sequence<0) throw new IllegalArgumentException("Negative submission sequence");
-        try(var arena=Arena.ofConfined()) {
-            var result=arena.allocate(16,8);
+        try {
+            var result=waitResult;
+            long start=dev.raynium.client.benchmark.BenchmarkSession.syncWaitStart();
             int status=(int)bindings.waitSubmit.invokeExact(handle,sequence,timeoutNs,result);
-            return new WaitResult(result.get(JAVA_LONG,0),status==0,(result.get(JAVA_INT,8)&1)!=0);
+            var wait=new WaitResult(result.get(JAVA_LONG,0),status==0,(result.get(JAVA_INT,8)&1)!=0);
+            if(start!=0) dev.raynium.client.benchmark.BenchmarkSession.syncWaitEnd(start);
+            return wait;
         } catch(RuntimeException | Error failure) { throw failure; }
         catch(Throwable failure) { throw new IllegalStateException("Cannot wait for renderer submission",failure); }
     }
@@ -269,7 +303,8 @@ public final class NativeRenderer implements AutoCloseable {
         if(swapchain!=null) throw new IllegalStateException("Close outputs before renderer");
         for(var buffer:buffers) buffer.endRenderer();
         buffers.clear();
-        writableMappings.clear();
+        writableBuffers.clear();
+        viewRecords.close(); dirtyRanges.close(); scratch.close();
         completions.clear();
         NativeBindings.call(bindings.destroyRenderer,"destroy renderer",handle); handle=MemorySegment.NULL; owner.releasedRenderer(this);
     }

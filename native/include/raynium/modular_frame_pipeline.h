@@ -19,6 +19,7 @@ public:
     RenderProgramLibrary& Programs() { return *_programs; }
     void SetTape(const TerrainFrame& input,CommandTape& tape,BufferRegistry& buffers) noexcept { _pending=&input; _tape=&tape; _buffers=&buffers; }
     void ClearInput() noexcept { _pending=nullptr; _tape=nullptr; _buffers=nullptr; }
+    uint64_t CompletedSequence() const noexcept { return _completed; }
     uint64_t SubmittedSequence() const noexcept { return _submitted; }
     bool PrepareTape(radray::FrameSlot& slot,CommandTape& tape) {
         return tape.PrepareReadbacks(slot.GetDevice(),_slots[slot.GetIndex()].readbacks) && tape.ReserveReadbacks(_readback) && _slots[slot.GetIndex()].timestamps.Prepare(slot.GetDevice(),slot.GetQueue(),tape.Timestamps());
@@ -65,6 +66,6 @@ private:
     BufferRegistry* _buffers{};
     void PublishCompleted(uint64_t sequence);
     radray::array<uint64_t,2> _inFlight{};
-    uint64_t _submitted{},_gpuSequence{},_gpuNanoseconds{},_pendingGpuNs{};
+    uint64_t _submitted{},_completed{},_gpuSequence{},_gpuNanoseconds{},_pendingGpuNs{};
 };
 }

@@ -3,6 +3,7 @@
 #include <raynium/exception.h>
 #include <radray/logger.h>
 #include <radray/profiler.h>
+#include <Eigen/Core>
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -120,6 +121,60 @@ uint32_t TerrainEyeCrossingCache::Capture(const rn_visible_item& item,const Terr
     const auto result=EvaluateFaces<true>(hot,baseBlock,center,eyeValid,instances,requested,this);
     if(result.mayCross) crossingItems.push_back({uint32_t(item.mesh),item.first_instance,item.instance_count,requested,uint8_t(result.bits)});
     return result.bits;
+}
+
+bool ProjectedTerrainBounds::Disjoint(const ProjectedTerrainBounds& other) const noexcept {
+    return valid && other.valid && (right<other.left || other.right<left || top<other.bottom || other.top<bottom);
+}
+
+ProjectedTerrainBounds ProjectTerrainBounds(const TerrainHotSlot& hot,const rn_instance& instance,const rn_terrain_view_desc& frame) noexcept {
+    if(!(hot.flags&kTerrainHotFlagFiniteBounds)) return {};
+    const auto view=Eigen::Map<const Eigen::Matrix4f>(frame.view);
+    const auto projection=Eigen::Map<const Eigen::Matrix4f>(frame.projection);
+    const float inf=std::numeric_limits<float>::infinity();
+    ProjectedTerrainBounds bounds{inf,-inf,inf,-inf,true};
+    for(unsigned corner=0;corner<8;++corner) {
+        Eigen::Vector4f position;
+        for(unsigned axis=0;axis<3;++axis) {
+            const int64_t delta=int64_t(instance.origin[axis])-frame.camera_block[axis];
+            if(delta<INT32_MIN || delta>INT32_MAX) return {};
+            position[axis]=((corner&(1u<<axis)?hot.maxBound[axis]:hot.minBound[axis])+float(delta))-frame.camera_fraction[axis];
+        }
+        position.w()=1;
+        const Eigen::Vector4f clip=projection*(view*position);
+        if(!clip.allFinite() || clip.w()<=0.001f) return {};
+        const float x=clip.x()/clip.w(),y=clip.y()/clip.w();
+        if(!std::isfinite(x) || !std::isfinite(y)) return {};
+        constexpr float margin=0.001f;
+        bounds.left=std::min(bounds.left,x-margin); bounds.right=std::max(bounds.right,x+margin);
+        bounds.bottom=std::min(bounds.bottom,y-margin); bounds.top=std::max(bounds.top,y+margin);
+    }
+    return bounds;
+}
+
+bool TerrainResidency::GroupDisjointClassicItems(std::span<const rn_instance> instances,const rn_terrain_view_desc& frame) {
+    auto& items=_fastClassicTranslucent;
+    if(items.size()<3 || (_translucentVertices->GetPageCount()<2 && _indices->GetPageCount()<2)) return false;
+    const auto samePage=[](const auto& a,const auto& b) { return a.vertexPageId==b.vertexPageId && a.indexPageId==b.indexPageId; };
+    _classicBounds.clear();
+    for(const auto& item:items) {
+        _classicBounds.push_back(item.arg.InstanceCount==1?
+            ProjectTerrainBounds(_hotSlots[item.slotId],instances[item.arg.FirstInstance],frame):ProjectedTerrainBounds{});
+    }
+    bool reordered=false;
+    for(size_t i=1;i+1<items.size();++i) {
+        if(samePage(items[i-1],items[i])) continue;
+        for(size_t j=i+1;j<std::min(items.size(),i+8);++j) {
+            if(!samePage(items[i-1],items[j])) continue;
+            if(!std::all_of(_classicBounds.begin()+i,_classicBounds.begin()+j,
+                [&](const auto& crossed) { return _classicBounds[j].Disjoint(crossed); })) break;
+            std::rotate(items.begin()+i,items.begin()+j,items.begin()+j+1);
+            std::rotate(_classicBounds.begin()+i,_classicBounds.begin()+j,_classicBounds.begin()+j+1);
+            reordered=true;
+            break;
+        }
+    }
+    return reordered;
 }
 
 void TerrainEyeCrossingCache::Reset(const radray::array<int32_t,3>& block,const radray::array<double,3>& eye,bool valid) noexcept {
@@ -601,6 +656,7 @@ bool TerrainResidency::PrepareFrame(const TextureRegistry& uploaded,const rn_ter
         };
         const bool fracEyeFinite=eye.valid && std::isfinite(fracEye[0]) && std::isfinite(fracEye[1]) && std::isfinite(fracEye[2]);
 
+        bool classicReordered=false;
         const bool canReuseCache=warm && draws.oit==oit && draws.wireframe==wireframe && visibleIdentical && cache.partitionVersion==_partitionVersion;
         if(visibleIdentical && cache.partitionVersion==_partitionVersion && cache.maxInstanceEnd>activeInstances.size()) {
             RADRAY_ERR_LOG("Cached visible instance range exceeds current instance count");
@@ -888,6 +944,7 @@ bool TerrainResidency::PrepareFrame(const TextureRegistry& uploaded,const rn_ter
                                     });
                             }
                         }
+                        classicReordered=GroupDisjointClassicItems(activeInstances,f);
                         if(_fastClassicTranslucent.size()>UINT32_MAX) { RADRAY_ERR_LOG("Terrain indirect argument count overflow"); return false; }
                         prepared.IndexedArguments.reserve(_fastClassicTranslucent.size());
                         _fastBatchRepSlots.clear();
@@ -933,7 +990,7 @@ bool TerrainResidency::PrepareFrame(const TextureRegistry& uploaded,const rn_ter
                     }
                     layerData.recordCount=uint32_t(prepared.IndexedArguments.size());
                     {
-                        cache.layers[2]={_layerGeometryVersion[2],{},visibleCounts[2],true};
+                        cache.layers[2]={_layerGeometryVersion[2],{},visibleCounts[2],!classicReordered};
                     }
                 }
             }

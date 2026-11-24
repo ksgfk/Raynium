@@ -31,6 +31,7 @@ bool ModularFramePipeline::Create(radray::DeviceContext& device,std::span<const 
     return true;
 }
 void ModularFramePipeline::PublishCompleted(uint64_t sequence) {
+    _completed=std::max(_completed,sequence);
     for(auto& slot:_slots) slot.timestamps.Publish(sequence);
     // Two in-flight batches may target overlapping host bytes; publish them in submission order.
     size_t first=_slots[1].readbacks.Sequence()<_slots[0].readbacks.Sequence()?1:0;

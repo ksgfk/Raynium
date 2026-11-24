@@ -15,11 +15,11 @@ import java.util.function.Supplier;
 import org.lwjgl.PointerBuffer;
 import static java.lang.foreign.ValueLayout.*;
 
-final class RayniumRenderPassBackend implements RenderPassBackend {
+final class RayniumRenderPassBackend {
     private static final int INITIAL_UNIFORMS=16;
     private static final int INITIAL_BINDINGS=16;
-    private final CommandTape tape;
-    private final RenderPass.RenderArea area;
+    private CommandTape tape;
+    private RenderPass.RenderArea area;
     private RenderPass.RenderArea scissor;
     private RayniumPipeline pipeline;
     private Object[] uniforms=new Object[INITIAL_UNIFORMS];
@@ -42,11 +42,58 @@ final class RayniumRenderPassBackend implements RenderPassBackend {
     private int[] bindingAnisotropy=new int[INITIAL_BINDINGS];
     private int bindingCount;
 
-    RayniumRenderPassBackend(CommandTape tape,RenderPassDescriptor descriptor) {
+
+    static final class Lease implements RenderPassBackend {
+        private RayniumRenderPassBackend recorder;
+        Lease(RayniumRenderPassBackend recorder) { this.recorder=recorder; }
+        RayniumRenderPassBackend recorder() {
+            if(recorder==null) throw new IllegalStateException("Render pass is closed");
+            return recorder;
+        }
+        void close() {
+            recorder().reset();
+            recorder=null;
+        }
+        @Override public void setPipeline(BackendRenderPipeline value) { recorder().setPipeline(value); }
+        @Override public void setUniform(int index,Object value) { recorder().setUniform(index,value); }
+        @Override public void pushConstants(ByteBuffer value) { recorder().pushConstants(value); }
+        @Override public void pushDebugGroup(Supplier<String> label) { recorder().pushDebugGroup(label); }
+        @Override public void popDebugGroup() { recorder().popDebugGroup(); }
+        @Override public void enableScissor(int x,int y,int width,int height) { recorder().enableScissor(x,y,width,height); }
+        @Override public void disableScissor() { recorder().disableScissor(); }
+        @Override public void setVertexBuffer(int slot,GpuBufferSlice buffer) { recorder().setVertexBuffer(slot,buffer); }
+        @Override public void setIndexBuffer(GpuBuffer buffer,IndexType type) { recorder().setIndexBuffer(buffer,type); }
+        @Override public void writeTimestamp(GpuQueryPool pool,int index) { recorder().writeTimestamp(pool,index); }
+        @Override public void draw(int count,int instances,int first,int firstInstance) { recorder().draw(count,instances,first,firstInstance); }
+        @Override public void drawIndexed(int count,int instances,int first,int base,int firstInstance) { recorder().drawIndexed(count,instances,first,base,firstInstance); }
+        @Override public void drawIndirect(GpuBufferSlice commands,int count) { recorder().drawIndirect(commands,count); }
+        @Override public void drawIndexedIndirect(GpuBufferSlice commands,int count) { recorder().drawIndexedIndirect(commands,count); }
+        @Override public void multiDraw(IntBuffer args,int instances,int firstInstance,int count) { recorder().multiDraw(args,instances,firstInstance,count); }
+        @Override public void multiDrawIndexed(IntBuffer args,int instances,int firstInstance,int count) { recorder().multiDrawIndexed(args,instances,firstInstance,count); }
+        @Override public void multiDraw(IntBuffer first,IntBuffer counts,int count) { recorder().multiDraw(first,counts,count); }
+        @Override public void multiDrawIndexed(PointerBuffer offsets,IntBuffer counts,IntBuffer bases,int count) { recorder().multiDrawIndexed(offsets,counts,bases,count); }
+    }
+
+    private int usedBindings,vertexMask;
+
+    private void reset() {
+        Arrays.fill(uniforms,0,uniformCount,null);
+        for(int mask=vertexMask;mask!=0;mask&=mask-1) vertices[Integer.numberOfTrailingZeros(mask)]=null;
+        int end=Math.max(bindingCount,usedBindings);
+        Arrays.fill(bindingBuffer,0,end,null);
+        Arrays.fill(bindingImage,0,end,null);
+        uniformCount=bindingCount=usedBindings=vertexMask=pushLength=0;
+        pipeline=null; indexBuffer=null; indexType=null;
+        tape=null; area=scissor=null;
+    }
+
+    Lease open(CommandTape tape,RenderPassDescriptor descriptor) {
+        if(this.tape!=null) throw new IllegalStateException("Render pass already open");
         this.tape=tape;
         this.area=this.scissor=descriptor.renderArea();
+        return new Lease(this);
     }
-    @Override public void setPipeline(BackendRenderPipeline value) {
+    void setPipeline(BackendRenderPipeline value) {
         if(!(value instanceof RayniumPipeline selected) || selected.isClosed()) throw new IllegalArgumentException("Invalid render pipeline");
         pipeline=selected;
         int count=selected.routes.size();
@@ -55,28 +102,28 @@ final class RayniumRenderPassBackend implements RenderPassBackend {
         uniformCount=count;
         pushLength=0;
     }
-    @Override public void setUniform(int index,Object value) {
+    void setUniform(int index,Object value) {
         Objects.checkIndex(index,uniformCount);
         uniforms[index]=value;
     }
-    @Override public void pushConstants(ByteBuffer value) {
+    void pushConstants(ByteBuffer value) {
         int size=pipeline.pushBytes;
         if(value.remaining()<size) throw new BufferUnderflowException();
         if(push.length<size) push=new byte[size];
         if(size>0) value.get(value.position(),push,0,size);
         pushLength=size;
     }
-    @Override public void pushDebugGroup(Supplier<String> label) {}
-    @Override public void popDebugGroup() {}
-    @Override public void enableScissor(int x,int y,int width,int height) {
+    void pushDebugGroup(Supplier<String> label) {}
+    void popDebugGroup() {}
+    void enableScissor(int x,int y,int width,int height) {
         if(width<=0 || height<=0 || x<area.x() || y<area.y() || (long)x+width>(long)area.x()+area.width() ||
             (long)y+height>(long)area.y()+area.height()) throw new IllegalArgumentException("Invalid scissor");
         scissor=new RenderPass.RenderArea(x,y,width,height);
     }
-    @Override public void disableScissor() { scissor=area; }
-    @Override public void setVertexBuffer(int slot,GpuBufferSlice buffer) { vertices[slot]=buffer; }
-    @Override public void setIndexBuffer(GpuBuffer buffer,IndexType type) { indexBuffer=buffer; indexType=type; }
-    @Override public void writeTimestamp(GpuQueryPool pool,int index) { tape.writeTimestamp((RayniumQueryPool)pool,index); }
+    void disableScissor() { scissor=area; }
+    void setVertexBuffer(int slot,GpuBufferSlice buffer) { vertices[slot]=buffer; vertexMask|=1<<slot; }
+    void setIndexBuffer(GpuBuffer buffer,IndexType type) { indexBuffer=buffer; indexType=type; }
+    void writeTimestamp(GpuQueryPool pool,int index) { tape.writeTimestamp((RayniumQueryPool)pool,index); }
 
     CommandTape tape() { return tape; }
 
@@ -85,6 +132,7 @@ final class RayniumRenderPassBackend implements RenderPassBackend {
     }
 
     private void stageInstancedUniforms() {
+        usedBindings=Math.max(usedBindings,bindingCount);
         bindingCount=0;
         var routes=pipeline.instancedRoutes;
         var map=pipeline.instancedUniformMap;
@@ -187,6 +235,7 @@ final class RayniumRenderPassBackend implements RenderPassBackend {
             baseVertex=Math.addExact(baseVertex,first);
             kind=4; first=0;
         }
+        usedBindings=Math.max(usedBindings,bindingCount);
         bindingCount=0;
         for(int i=0;i<vertices.length;++i) if(vertices[i]!=null) stageBuffer(0,i,vertices[i],0,GpuBuffer.USAGE_VERTEX);
         if(kind==1 || kind==3) {
@@ -217,23 +266,23 @@ final class RayniumRenderPassBackend implements RenderPassBackend {
             at+=48;
         }
     }
-    @Override public void draw(int count,int instances,int first,int firstInstance) { drawCommand(0,count,instances,first,0,firstInstance,null); }
-    @Override public void drawIndexed(int count,int instances,int first,int base,int firstInstance) { drawCommand(1,count,instances,first,base,firstInstance,null); }
-    @Override public void drawIndirect(GpuBufferSlice commands,int count) { drawCommand(2,count,1,0,0,0,commands); }
-    @Override public void drawIndexedIndirect(GpuBufferSlice commands,int count) { drawCommand(3,count,1,0,0,0,commands); }
-    @Override public void multiDraw(IntBuffer args,int instances,int firstInstance,int count) {
+    void draw(int count,int instances,int first,int firstInstance) { drawCommand(0,count,instances,first,0,firstInstance,null); }
+    void drawIndexed(int count,int instances,int first,int base,int firstInstance) { drawCommand(1,count,instances,first,base,firstInstance,null); }
+    void drawIndirect(GpuBufferSlice commands,int count) { drawCommand(2,count,1,0,0,0,commands); }
+    void drawIndexedIndirect(GpuBufferSlice commands,int count) { drawCommand(3,count,1,0,0,0,commands); }
+    void multiDraw(IntBuffer args,int instances,int firstInstance,int count) {
         Objects.checkFromIndexSize(0,Math.multiplyExact(2,count),args.remaining());
         for(int i=0;i<count;++i) { int p=args.position()+2*i; draw(args.get(p+1),instances,args.get(p),firstInstance); }
     }
-    @Override public void multiDrawIndexed(IntBuffer args,int instances,int firstInstance,int count) {
+    void multiDrawIndexed(IntBuffer args,int instances,int firstInstance,int count) {
         Objects.checkFromIndexSize(0,Math.multiplyExact(3,count),args.remaining());
         for(int i=0;i<count;++i) { int p=args.position()+3*i; drawIndexed(args.get(p+1),instances,args.get(p),args.get(p+2),firstInstance); }
     }
-    @Override public void multiDraw(IntBuffer first,IntBuffer counts,int count) {
+    void multiDraw(IntBuffer first,IntBuffer counts,int count) {
         Objects.checkFromIndexSize(0,count,Math.min(first.remaining(),counts.remaining()));
         for(int i=0;i<count;++i) draw(counts.get(counts.position()+i),1,first.get(first.position()+i),0);
     }
-    @Override public void multiDrawIndexed(PointerBuffer offsets,IntBuffer counts,IntBuffer bases,int count) {
+    void multiDrawIndexed(PointerBuffer offsets,IntBuffer counts,IntBuffer bases,int count) {
         Objects.checkFromIndexSize(0,count,Math.min(offsets.remaining(),Math.min(counts.remaining(),bases.remaining())));
         for(int i=0;i<count;++i) drawIndexed(counts.get(counts.position()+i),1,Math.toIntExact(offsets.get(offsets.position()+i)/indexType.bytes),bases.get(bases.position()+i),0);
     }

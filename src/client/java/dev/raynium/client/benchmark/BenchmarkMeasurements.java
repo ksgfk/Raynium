@@ -12,7 +12,7 @@ final class BenchmarkMeasurements {
         "javaPrepareNs","nativeCallNs","nativeWaitNs","nativePrepareNs","nativeRdgRunNs","nativePresentNs",
         "terrainUploadBytes","textureUploadBytes","sceneUploadBytes","guiUploadBytes",
         "terrainDrawRecords","terrainDrawCalls","sceneDrawCalls","guiDrawCalls","geometryAndPostBindCalls",
-        "terrainVertexCapacityBytes","terrainIndexCapacityBytes","terrainAllocatedBytes"};
+        "terrainVertexCapacityBytes","terrainIndexCapacityBytes","terrainAllocatedBytes","nativeSyncWaitNs"};
     private final long[][] frames;
     private final long[] gpu;
     private int frameCount,gpuCount;
@@ -44,7 +44,7 @@ final class BenchmarkMeasurements {
         return result;
     }
     JsonObject finish(Path directory) throws IOException {
-        var result=new JsonObject(); for(int i=1;i<COLUMNS.length;i++) if(i!=3) result.add(COLUMNS[i],distribution(frames[i],frameCount,i<10));
+        var result=new JsonObject(); for(int i=1;i<COLUMNS.length;i++) if(i!=3) result.add(COLUMNS[i],distribution(frames[i],frameCount,COLUMNS[i].endsWith("Ns")));
         long cpu=0; for(int i=0;i<frameCount;i++) cpu+=Math.max(0,frames[3][i]);
         result.addProperty("coarseRenderThreadCpuTotalNs",cpu);
         result.add("gpuFrameNs",distribution(gpu,gpuCount));

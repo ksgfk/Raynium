@@ -13,21 +13,19 @@ import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.Objects;
-import java.util.function.BiFunction;
 import org.joml.Vector4fc;
 
 final class RayniumCommandEncoderBackend implements CommandEncoderBackend, AutoCloseable {
     private final NativeRenderer renderer;
     private final RayniumTransientMemory memory;
-    private final BiFunction<CommandTape,RenderPassDescriptor,RenderPassBackend> passes;
+    private final RayniumRenderPassBackend recorder=new RayniumRenderPassBackend();
     private final ArrayDeque<NativeFrameBuffer> freeViews = new ArrayDeque<>();
     private final ArrayDeque<CommandTape.Storage> freeStorage = new ArrayDeque<>();
     private CommandTape tape;
-    private boolean passOpen;
+    private RayniumRenderPassBackend.Lease activePass;
 
-    RayniumCommandEncoderBackend(NativeRenderer renderer,BiFunction<CommandTape,RenderPassDescriptor,RenderPassBackend> passes) {
+    RayniumCommandEncoderBackend(NativeRenderer renderer) {
         this.renderer=renderer;
-        this.passes=passes;
         tape=new CommandTape(renderer,freeViews,freeStorage);
         memory=new RayniumTransientMemory(renderer,this::tape);
     }
@@ -35,7 +33,7 @@ final class RayniumCommandEncoderBackend implements CommandEncoderBackend, AutoC
     CommandTape tape() { return tape; }
 
     @Override public void submit() {
-        if(passOpen) throw new IllegalStateException("Close the render pass before submission");
+        if(activePass!=null) throw new IllegalStateException("Close the render pass before submission");
         boolean measuring=dev.raynium.client.benchmark.BenchmarkSession.isMeasuring();
         long start=measuring?System.nanoTime():0;
         memory.seal(tape);
@@ -49,16 +47,17 @@ final class RayniumCommandEncoderBackend implements CommandEncoderBackend, AutoC
     @Override public TransientMemory transientMemory() { return memory; }
 
     @Override public RenderPassBackend createRenderPass(RenderPassDescriptor descriptor) {
-        if(passOpen) throw new IllegalStateException("A render pass is already open");
-        var pass=passes.apply(tape,descriptor);
+        if(activePass!=null) throw new IllegalStateException("A render pass is already open");
         tape.beginRaster(descriptor);
-        passOpen=true;
-        return pass;
+        activePass=recorder.open(tape,descriptor);
+        return activePass;
     }
 
     @Override public void submitRenderPass() {
+        if(activePass==null) throw new IllegalStateException("No open render pass");
         tape.endRaster();
-        passOpen=false;
+        activePass.close();
+        activePass=null;
     }
 
     private static NativeTexture image(GpuTexture texture) {
@@ -157,6 +156,7 @@ final class RayniumCommandEncoderBackend implements CommandEncoderBackend, AutoC
     }
 
     @Override public void close() {
+        if(activePass!=null) { activePass.close(); activePass=null; }
         memory.close();
         tape.close();
         freeViews.forEach(NativeFrameBuffer::close);

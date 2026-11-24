@@ -17,3 +17,4 @@ accessible field net/minecraft/client/renderer/state/level/QuadParticleRenderSta
 accessible field net/minecraft/client/renderer/state/level/QuadParticleRenderState$Storage intValues [I
 accessible field net/minecraft/client/renderer/state/level/QuadParticleRenderState$Storage currentParticleIndex I
 accessible class net/minecraft/client/resources/model/ModelManager$ReloadState
+accessible field net/minecraft/client/renderer/chunk/SectionRenderDispatcher$RenderSection uploadedTime J

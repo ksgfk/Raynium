@@ -148,6 +148,14 @@ class NativeCommandTapeTest {
             assertTrue(visible.data().isReadOnly());
             assertEquals(java.nio.ByteOrder.nativeOrder(),visible.data().order());
             assertEquals(0,visible.data().getInt(0));
+            var old=upload.map(4,4,false,true);
+            var oldBytes=old.data();
+            old.close();
+            try(var replacement=upload.map(4,4,false,true)) {
+                old.close();
+                assertThrows(IllegalStateException.class,()->oldBytes.getInt(0));
+                replacement.data().putInt(0,42);
+            }
             open.data().putInt(0,77);
             open.data().putInt(4,88);
             current.set(pre);
@@ -156,7 +164,10 @@ class NativeCommandTapeTest {
             pre.copyBuffer(device,0,host,0,16);
             pre.copyBuffer(upload,0,device,8,8);
             var callbacks=new ArrayList<Integer>();
-            pre.onCompleted(()->callbacks.add(1));
+            pre.onCompleted(()->{
+                callbacks.add(1);
+                renderer.pollCompleted();
+            });
             pre.submit();
             current.set(next);
             crossing.close();

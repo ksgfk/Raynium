@@ -28,14 +28,14 @@ public final class RayniumGpuDevice implements GpuDevice,AutoCloseable {
     }
     public static CommandTape activeTape(RenderPass pass) {
         if(!(pass instanceof com.mojang.renderpearl.frontend.FrontendRenderPass frontend) ||
-            !(frontend.backend instanceof RayniumRenderPassBackend recorder)) throw new IllegalArgumentException("Invalid Raynium render pass");
-        return recorder.tape();
+            !(frontend.backend instanceof RayniumRenderPassBackend.Lease lease)) throw new IllegalArgumentException("Invalid Raynium render pass");
+        return lease.recorder().tape();
     }
     public static boolean recordInstancedGeometry(RenderPass pass,String mode,long uploadOffset,int instanceCount,int instanceStride,
             int[] runMeshIds,int[] runFirstInstances,int[] runInstanceCounts,int runCount) {
         if(!(pass instanceof com.mojang.renderpearl.frontend.FrontendRenderPass frontend) ||
-            !(frontend.backend instanceof RayniumRenderPassBackend recorder)) return false;
-        return recorder.instancedGeometry(mode,uploadOffset,instanceCount,instanceStride,runMeshIds,runFirstInstances,runInstanceCounts,runCount);
+            !(frontend.backend instanceof RayniumRenderPassBackend.Lease lease)) return false;
+        return lease.recorder().instancedGeometry(mode,uploadOffset,instanceCount,instanceStride,runMeshIds,runFirstInstances,runInstanceCounts,runCount);
     }
     public CommandTape.TerrainView captureTerrain(net.minecraft.client.renderer.LevelRenderer level) {
         return terrain.capture(level,backend.renderer,currentBatch());
@@ -43,8 +43,8 @@ public final class RayniumGpuDevice implements GpuDevice,AutoCloseable {
     public static void recordTerrain(RenderPass pass,CommandTape.TerrainView view,int stage,
             com.mojang.renderpearl.util.TextureViewAndSampler atlas,com.mojang.renderpearl.util.TextureViewAndSampler light,GpuTextureView... inputs) {
         if(!(pass instanceof com.mojang.renderpearl.frontend.FrontendRenderPass frontend) ||
-            !(frontend.backend instanceof RayniumRenderPassBackend recorder)) throw new IllegalArgumentException("Invalid terrain render pass");
-        recorder.terrain(view,stage,atlas,light,inputs);
+            !(frontend.backend instanceof RayniumRenderPassBackend.Lease lease)) throw new IllegalArgumentException("Invalid terrain render pass");
+        lease.recorder().terrain(view,stage,atlas,light,inputs);
     }
     public RayniumGpuDevice(NativeRuntime runtime,NativeRenderer renderer,boolean debug) {
         this(runtime,renderer,debug,java.nio.file.Path.of("."));

@@ -5,6 +5,7 @@
 #include <radray/profiler.h>
 #include <radray/logger.h>
 #include <radray/scope_guard.h>
+#include <algorithm>
 #include <span>
 #include <chrono>
 #include <utility>
@@ -26,7 +27,9 @@ bool Renderer::Create(radray::DeviceContext& device,std::span<const radray::byte
         radray::VertexInputAttribute{1,12,"TEXCOORD",3,VertexFormat::FLOAT32}};
     auto vertices=radray::VertexBufferPool::Create(device.GetDevice(),{.VertexStride=28,.PageVertexCapacity=(128u<<20)/28,
         .AdditionalUsage=BufferUse::Resource,.Layouts=layouts,.Attributes=attributes,.DebugNamePrefix="TerrainVertices"}).Release();
-    auto translucentVertices=radray::VertexBufferPool::Create(device.GetDevice(),{.VertexStride=28,.PageVertexCapacity=(256u<<20)/28,
+    constexpr uint64_t targetPageBytes=512ull<<20;
+    const auto translucentPageBytes=caps.Limits.MaxBufferSize?std::min(targetPageBytes,caps.Limits.MaxBufferSize):targetPageBytes;
+    auto translucentVertices=radray::VertexBufferPool::Create(device.GetDevice(),{.VertexStride=28,.PageVertexCapacity=uint32_t(translucentPageBytes/28),
         .AdditionalUsage=BufferUse::Resource,.Layouts=layouts,.Attributes=attributes,.DebugNamePrefix="TranslucentVertices"}).Release();
     auto quadPool=radray::IndexBufferPool::Create(device.GetDevice(),{.PageIndexCapacity=(16u<<20)/sizeof(uint32_t),
         .AdditionalUsage=BufferUse::Resource,.DebugNamePrefix="QuadIndices"}).Release();
@@ -152,6 +155,7 @@ bool Renderer::SubmitFrame(const rn_batch_desc& batch,Swapchain* target,rn_submi
     }
     const auto submitted=now();
     result.sequence=_pipeline->SubmittedSequence();
+    _buffers.Advance(result.sequence,_pipeline->CompletedSequence());
     if(acquired.Frame) {
         RADRAY_PROFILE_SCOPE_N("Raynium.Frame.Present");
         const auto present=target->Chain().Present(std::move(*acquired.Frame));

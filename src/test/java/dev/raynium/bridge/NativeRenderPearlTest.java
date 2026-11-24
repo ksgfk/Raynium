@@ -81,7 +81,12 @@ class NativeRenderPearlTest {
                 var view=device.createTextureView(texture); var read=device.createBuffer(null,GpuBuffer.USAGE_COPY_DST|GpuBuffer.USAGE_MAP_READ,32)) {
                 mixedTerrainViews(device,renderer,shader);
                 var encoder=device.createCommandEncoder();
+                var previousPass=encoder.createRenderPass(()->"closed",view,Optional.empty());
+                previousPass.setPipeline(shader);
+                previousPass.close();
                 try(var pass=encoder.createRenderPass(()->"push",view,Optional.of(new Vector4f(0,0,0,1)))) {
+                    assertThrows(IllegalStateException.class,()->previousPass.setPipeline(shader));
+                    assertThrows(IllegalStateException.class,()->RayniumGpuDevice.activeTape(previousPass));
                     pass.setPipeline(shader);
                     var push=ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
                     push.putFloat(4,1f).putFloat(12,1f); pass.pushConstants(push); pass.draw(3,1,0,0);

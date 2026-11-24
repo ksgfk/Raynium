@@ -23,6 +23,7 @@ import org.slf4j.LoggerFactory;
 // See doc/guide/build-test.md for the opt-in benchmark protocol and capture boundaries.
 public final class BenchmarkSession {
     private static final Logger LOGGER = LoggerFactory.getLogger("raynium.benchmark");
+    private static final String CONFIG=System.getProperty("raynium.benchmark.config");
     private static BenchmarkSession active;
     private final BenchmarkRoute route;
     private final Path directory;
@@ -41,7 +42,7 @@ public final class BenchmarkSession {
     private final BenchmarkMeasurements measurements;
     private final java.lang.management.ThreadMXBean threadBean=java.lang.management.ManagementFactory.getThreadMXBean();
     private final com.sun.management.ThreadMXBean allocationBean=(com.sun.management.ThreadMXBean)threadBean;
-    private final long[] nativeTimes=new long[18];
+    private final long[] nativeTimes=new long[19];
     private long frameStarted,frameCpuStarted,previousFrame,frameInterval,firstOutputSequence,lastGpuSequence,allocatedStart,gcCountStart,gcMillisStart;
     private boolean measuringFrame;
 
@@ -73,7 +74,7 @@ public final class BenchmarkSession {
     }
 
     public static void register() {
-        String config = System.getProperty("raynium.benchmark.config");
+        String config = CONFIG;
         if (config == null) return;
         try {
             active = new BenchmarkSession(Path.of(config));
@@ -86,6 +87,12 @@ public final class BenchmarkSession {
     public static boolean isActive() { return active!=null && !active.phase.equals("finished"); }
     public static boolean isMeasuring() { return active!=null && active.phase.equals("measuring"); }
 
+    public static long syncWaitStart() {
+        return CONFIG!=null && active!=null && active.measuringFrame?System.nanoTime():0;
+    }
+    public static void syncWaitEnd(long start) {
+        active.nativeTimes[18]+=System.nanoTime()-start;
+    }
     public static void nativeFrame() {
         if (active != null) active.nativeFrames++;
     }
@@ -116,7 +123,7 @@ public final class BenchmarkSession {
         if(active!=null) {
             long now=System.nanoTime(); active.measuringFrame=active.phase.equals("measuring");
             active.frameInterval=active.previousFrame==0?-1:now-active.previousFrame; active.previousFrame=now;
-            if(active.measuringFrame) { active.frameStarted=now; active.frameCpuStarted=active.threadBean.getCurrentThreadCpuTime(); java.util.Arrays.fill(active.nativeTimes,-1); }
+            if(active.measuringFrame) { active.frameStarted=now; active.frameCpuStarted=active.threadBean.getCurrentThreadCpuTime(); java.util.Arrays.fill(active.nativeTimes,-1); if(!RenderMode.REFERENCE) active.nativeTimes[18]=0; }
         }
         if (active == null || client.player == null) return;
         if (!active.phase.equals("warmup") && !active.phase.equals("measuring")) return;

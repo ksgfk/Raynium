@@ -38,6 +38,11 @@ public final class TerrainCapture {
         final IntArrayList fadingSlots=new IntArrayList();
         final ObjectArrayList<SectionRenderDispatcher.RenderSection> fadingSections=new ObjectArrayList<>();
         final IntArrayList updatedFadingSlots=new IntArrayList();
+        int[] candidateStamp=new int[1024];
+        int generation=1;
+        boolean[] fading=new boolean[1024];
+        long[] uploadedAt=new long[1024];
+        SectionRenderDispatcher.RenderSection[] capturedSections=new SectionRenderDispatcher.RenderSection[1024];
         long checkedResidencyEpoch;
         double camX,camY,camZ;
         boolean hasExplicitDistKeys;
@@ -53,6 +58,10 @@ public final class TerrainCapture {
             if(needed<=payloads.length) return;
             int capacity=payloads.length;
             while(capacity<needed) capacity=Math.multiplyExact(capacity,2);
+            candidateStamp=Arrays.copyOf(candidateStamp,capacity);
+            fading=Arrays.copyOf(fading,capacity);
+            uploadedAt=Arrays.copyOf(uploadedAt,capacity);
+            capturedSections=Arrays.copyOf(capturedSections,capacity);
             payloads=Arrays.copyOf(payloads,capacity); indices=Arrays.copyOf(indices,capacity);
             originX=Arrays.copyOf(originX,capacity); originY=Arrays.copyOf(originY,capacity); originZ=Arrays.copyOf(originZ,capacity);
             visibility=Arrays.copyOf(visibility,capacity); elementMask=Arrays.copyOf(elementMask,capacity); distKey=Arrays.copyOf(distKey,capacity);
@@ -71,15 +80,36 @@ public final class TerrainCapture {
             int slot=payload.capturedSlot;
             var layer=payload.layers[2];
             indices[slot]=layer==null?null:layer.indices;
-            if(!uploadCandidates.contains(slot)) uploadCandidates.add(slot);
+            addCandidate(slot);
+        }
+        void addCandidate(int slot) {
+            if(candidateStamp[slot]!=generation) {
+                candidateStamp[slot]=generation;
+                uploadCandidates.add(slot);
+            }
+        }
+        void resetCandidates() {
+            uploadCandidates.clear();
+            if(++generation==0) { Arrays.fill(candidateStamp,0); generation=1; }
+        }
+        void resetFading() {
+            for(int i=0;i<fadingSlots.size();i++) fading[fadingSlots.getInt(i)]=false;
+            fadingSlots.clear();
+            fadingSections.clear();
+        }
+        void addFading(int slot,SectionRenderDispatcher.RenderSection section) {
+            if(!fading[slot]) {
+                fading[slot]=true;
+                fadingSlots.add(slot);
+                fadingSections.add(section);
+            }
         }
         void finish(int size) { if(size<count) { Arrays.fill(payloads,size,count,null); Arrays.fill(indices,size,count,null); } count=size; }
         void clear() {
             finish(0);
             checkedResidencyEpoch=0;
-            uploadCandidates.clear();
-            fadingSlots.clear();
-            fadingSections.clear();
+            resetCandidates();
+            resetFading();
             updatedFadingSlots.clear();
             hasExplicitDistKeys=false;
             fastReused=false;
@@ -171,6 +201,7 @@ public final class TerrainCapture {
                         instChanged=true;
                     }
                     if(v>=1.0f) {
+                        BUFFER.fading[slot]=false;
                         int last=BUFFER.fadingSlots.size()-1;
                         if(i!=last) {
                             BUFFER.fadingSlots.set(i,BUFFER.fadingSlots.getInt(last));
@@ -197,9 +228,8 @@ public final class TerrainCapture {
         ++captureGeneration;
         long now=fade<=0L?0L:Util.getMillis();
         int count=0;
-        BUFFER.uploadCandidates.clear();
-        BUFFER.fadingSlots.clear();
-        BUFFER.fadingSections.clear();
+        BUFFER.resetCandidates();
+        BUFFER.resetFading();
         BUFFER.updatedFadingSlots.clear();
         BUFFER.hasExplicitDistKeys=false;
         BUFFER.fastReused=false;
@@ -215,7 +245,6 @@ public final class TerrainCapture {
             var originX=BUFFER.originX;
             var originY=BUFFER.originY;
             var originZ=BUFFER.originZ;
-            var visibility=BUFFER.visibility;
             var elementMask=BUFFER.elementMask;
             for(int i=0;i<sectionCount;i++) {
                 var section=sections.get(i);
@@ -235,18 +264,22 @@ public final class TerrainCapture {
                 var translucent=payload.layers[2];
                 var indexSnapshot=translucent==null?null:translucent.indices;
                 indices[slot]=indexSnapshot;
-                if(payload.uploadedEpoch!=residencyEpoch || indexSnapshot!=payload.uploadedIndices)
-                    BUFFER.uploadCandidates.add(slot);
                 originX[slot]=origin.getX(); originY[slot]=origin.getY(); originZ[slot]=origin.getZ();
-                float vis=fade<=0L?1.0f:section.getVisibility(now,fade);
-                visibility[slot]=vis;
-                if(vis<1.0f) {
-                    BUFFER.fadingSlots.add(slot);
-                    BUFFER.fadingSections.add(section);
-                }
+                BUFFER.capturedSections[slot]=section;
+                BUFFER.uploadedAt[slot]=section.uploadedTime;
                 elementMask[slot]=mask;
             }
         } finally { dispatcher.unlock(); }
+        for(int slot=0;slot<count;slot++) {
+            var payload=BUFFER.payloads[slot];
+            if(payload.uploadedEpoch!=residencyEpoch || BUFFER.indices[slot]!=payload.uploadedIndices)
+                BUFFER.addCandidate(slot);
+            long elapsed=now-BUFFER.uploadedAt[slot];
+            float visibility=fade<=0 || elapsed>=fade?1f:(float)elapsed/fade;
+            BUFFER.visibility[slot]=visibility;
+            if(visibility<1f) BUFFER.addFading(slot,BUFFER.capturedSections[slot]);
+            BUFFER.capturedSections[slot]=null;
+        }
         BUFFER.finish(count); BUFFER.epoch=epoch;
         BUFFER.checkedResidencyEpoch=residencyEpoch;
         updateCameraState(camera,options,improvedTransparency);
@@ -257,19 +290,20 @@ public final class TerrainCapture {
         hasSnapshot=true;
         capturedSinceBeginFrame=true;
     }
-    private static boolean refreshDirty(long epoch,long fade) {
+    static boolean refreshDirty(long epoch,long fade) {
         long now=fade<=0?0:Util.getMillis();
-        BUFFER.uploadCandidates.clear();
+        BUFFER.resetCandidates();
+        int limit=Math.max(256,BUFFER.count>>>2);
         for(int changed=0;;++changed) {
             var section=DIRTY_SECTIONS.poll();
             if(section==null) {
                 var indices=DIRTY_INDICES.poll();
                 if(indices==null) return true;
-                if(changed>=64) return false;
+                if(changed>=limit) return false;
                 BUFFER.refreshIndexCandidate(indices);
                 continue;
             }
-            if(changed>=64) return false;
+            if(changed>=limit) return false;
             var access=(SectionStateAccess)(Object)section;
             if(access.raynium$captureGen()!=captureGeneration) continue;
             int slot=access.raynium$captureSlot();
@@ -289,11 +323,8 @@ public final class TerrainCapture {
             BUFFER.originZ[slot]=origin.getZ();
             float visibility=fade<=0?1:section.getVisibility(now,fade);
             BUFFER.visibility[slot]=visibility;
-            if(visibility<1 && !BUFFER.fadingSlots.contains(slot)) {
-                BUFFER.fadingSlots.add(slot);
-                BUFFER.fadingSections.add(section);
-            }
-            if(!BUFFER.uploadCandidates.contains(slot)) BUFFER.uploadCandidates.add(slot);
+            if(visibility<1) BUFFER.addFading(slot,section);
+            BUFFER.addCandidate(slot);
         }
     }
 

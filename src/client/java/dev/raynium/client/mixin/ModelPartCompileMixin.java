@@ -11,9 +11,8 @@ import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
-import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 
 @Mixin(ModelPart.class)
 abstract class ModelPartCompileMixin implements RetainedModelManager.PartHandle {
@@ -48,39 +47,36 @@ abstract class ModelPartCompileMixin implements RetainedModelManager.PartHandle 
     }
     @Override public List<ModelPart.Cube> raynium$getCubes() { return cubes; }
 
-    @Inject(method = "render(Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;III)V",
-            at = @At("HEAD"), cancellable = true)
+    @WrapMethod(method = "render(Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;III)V")
     private void raynium$fastLeafRender(PoseStack poseStack, VertexConsumer buffer,
-            int lightCoords, int overlayCoords, int color, CallbackInfo ci) {
+            int lightCoords, int overlayCoords, int color, Operation<Void> original) {
         if (!this.visible) {
-            ci.cancel();
             return;
         }
         if (this.children.isEmpty()) {
             if (this.skipDraw || this.cubes.isEmpty()) {
-                ci.cancel();
                 return;
             }
             if (this.xRot == 0.0F && this.yRot == 0.0F && this.zRot == 0.0F
                     && this.xScale == 1.0F && this.yScale == 1.0F && this.zScale == 1.0F) {
                 if (this.x == 0.0F && this.y == 0.0F && this.z == 0.0F) {
                     this.compile(poseStack.last(), buffer, lightCoords, overlayCoords, color);
-                    ci.cancel();
                     return;
                 }
                 if (ModelFastTrack.tryCompileTranslatedLeaf((ModelPart) (Object) this, poseStack.last(), buffer,
                         this.x / 16.0F, this.y / 16.0F, this.z / 16.0F, lightCoords, overlayCoords, color)) {
-                    ci.cancel();
+                    return;
                 }
             }
         }
+        original.call(poseStack,buffer,lightCoords,overlayCoords,color);
     }
 
-    @Inject(method = "compile", at = @At("HEAD"), cancellable = true)
+    @WrapMethod(method = "compile")
     private void raynium$fastCompile(PoseStack.Pose pose, VertexConsumer builder,
-            int lightCoords, int overlayCoords, int color, CallbackInfo ci) {
-        if (ModelFastTrack.tryCompilePart((ModelPart) (Object) this, pose, builder, lightCoords, overlayCoords, color)) {
-            ci.cancel();
+            int lightCoords, int overlayCoords, int color, Operation<Void> original) {
+        if (!ModelFastTrack.tryCompilePart((ModelPart) (Object) this, pose, builder, lightCoords, overlayCoords, color)) {
+            original.call(pose,builder,lightCoords,overlayCoords,color);
         }
     }
 }

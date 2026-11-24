@@ -9,7 +9,7 @@ Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 2
 
 ## 当前 C ABI
 
-`rn_get_abi_version` 在解析其余导出前校验版本。`rn_query_abi` 核对 build ID、指针宽度和编译配置。入口签名以 `bridge.h` 为准，FFM 按固定宽度和 8 字节对齐构建命令记录。设备与资源句柄只在所属 renderer 和所属线程使用。
+`rn_get_abi_version` 在解析其余导出前校验版本。`rn_query_abi` 核对 build ID、指针宽度和编译配置。入口签名以 `bridge.h` 为准，FFM 按固定宽度和 8 字节对齐构建命令记录。设备与资源句柄只在所属 renderer 和所属线程使用。运行时 downcall 按具体签名使用 `invokeExact`。renderer 复用提交、等待和缓冲创建的描述符及输出槽，先取出返回值，再发布完成回调。地形视图和映射脏区间的暂存按需扩缩。
 `rn_upsert_model_mesh` 在调用期间复制 24 B/顶点的四边形网格，向 `out_page_id` 写入所在顶点页号。Java 分配从 16 开始的用户句柄，使用 `rn_remove_model_mesh` 退役网格。1 和 2 分别标识内建粒子和阴影单位四边形，3 至 15 保留。
 
 ## 提交布局
