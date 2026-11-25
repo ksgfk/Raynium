@@ -1,6 +1,8 @@
 """Run isolated vanilla/native scene captures sequentially and retain local image differences."""
 import argparse
+from contextlib import ExitStack
 import json
+import os
 import re
 from pathlib import Path
 import shutil
@@ -17,12 +19,40 @@ def check_capture_log(text):
         raise RuntimeError('GPU validation or native abort in capture; inspect game.log')
 
 
-def capture(world, options, scenes, output, mode, configuration, validation, tracy_images=False):
+def link_region_storage(world, save, cleanup):
+    import _winapi
+
+    cleanup.enter_context(locked_world(world))
+    for directory, folders, files in os.walk(world):
+        source = Path(directory)
+        target = save / source.relative_to(world)
+        target.mkdir(parents=True, exist_ok=True)
+        for folder in tuple(folders):
+            if folder in {'region', 'poi', 'entities'}:
+                link = target / folder
+                _winapi.CreateJunction(str(source / folder), str(link))
+                cleanup.callback(link.rmdir)
+                folders.remove(folder)
+        for name in files:
+            if name not in {'session.lock', 'level.dat_old'}:
+                shutil.copy2(source / name, target / name)
+
+
+def capture(world, options, scenes, output, mode, configuration, validation, tracy_images=False, in_place_world=False):
+    with ExitStack() as cleanup:
+        return capture_session(world, options, scenes, output, mode, configuration, validation, tracy_images, in_place_world, cleanup)
+
+
+def capture_session(world, options, scenes, output, mode, configuration, validation, tracy_images, in_place_world, cleanup):
     session = output / mode
     session.mkdir(parents=True, exist_ok=False)
     game = session / 'game'
-    with locked_world(world):
-        shutil.copytree(world, game / 'saves/validation', ignore=shutil.ignore_patterns('session.lock'))
+    save = game / 'saves/validation'
+    if in_place_world:
+        link_region_storage(world, save, cleanup)
+    else:
+        with locked_world(world):
+            shutil.copytree(world, save, ignore=shutil.ignore_patterns('session.lock'))
     shutil.copyfile(options, game / 'options.txt')
     packs = options.parent / 'resourcepacks'
     if packs.is_dir():
@@ -34,6 +64,8 @@ def capture(world, options, scenes, output, mode, configuration, validation, tra
                             '-PrhiValidation=' + str(validation).lower(), '-PnativeProfiler=false',
                             '-PcaptureTracyImages=' + str(tracy_images).lower(),
                             '-PrhiBackend=' + ('vulkan' if mode == 'reference' else mode))
+    if in_place_world:
+        command.append('-PvalidationReadOnlyRegions=true')
     write_json(session / 'command.json', command)
     print(f'Capturing {mode}: {session}', flush=True)
     count = len(json.loads(scenes.read_text(encoding='utf-8-sig'))['scenes'])
@@ -120,6 +152,7 @@ def main():
     parser.add_argument('--no-validation', action='store_true')
     parser.add_argument('--tracy-images', action='store_true', help='Exercise explicit Minecraft Tracy image capture')
     parser.add_argument('--compare-only', action='store_true')
+    parser.add_argument('--in-place-world', action='store_true', help='Link original region data read-only and isolate session metadata on Windows')
     args = parser.parse_args()
     output = args.output.resolve()
     if not args.compare_only:
@@ -129,7 +162,7 @@ def main():
             parser.error('--output must be outside the source world')
         output.mkdir(parents=True, exist_ok=True)
         for mode in args.modes:
-            capture(args.world.resolve(), args.options.resolve(), args.scenes.resolve(), output, mode, args.configuration, not args.no_validation, args.tracy_images)
+            capture(args.world.resolve(), args.options.resolve(), args.scenes.resolve(), output, mode, args.configuration, not args.no_validation, args.tracy_images, args.in_place_world)
     compare(output, args.modes)
 
 

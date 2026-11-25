@@ -9,32 +9,38 @@
 #include <utility>
 
 namespace raynium {
+struct FrameExecution {
+    uint64_t sequence{};
+    rn_present_outcome outcome{RN_PRESENT_NONE};
+    uint32_t flags{};
+    uint64_t gpu_sequence{}, gpu_ns{}, wait_ns{}, prepare_ns{}, rdg_ns{}, present_ns{};
+    rn_frame_metrics metrics{};
+};
 class Renderer final {
 public:
     ~Renderer() noexcept;
     static bool Create(radray::DeviceContext&,std::span<const radray::byte>,uint32_t flags,radray::unique_ptr<Renderer>&);
     bool RegisterPipeline(const rn_pipeline_desc& desc,uint32_t& id) { return !IsTerminal() && _pipelines.Register(_device.GetDevice(),_pipeline->Programs(),desc,id,_device.GetPipelineCache()); }
     bool DestroyPipeline(uint32_t id) { return _pipelines.Destroy(id); }
-    bool CreateBuffer(const rn_buffer_desc& desc,rn_buffer_result& result) { return !IsTerminal() && _buffers.Create(_device.GetDevice(),desc,result); }
     bool DestroyBuffer(uint32_t id) { return _buffers.Destroy(id); }
-    bool CreateQueryPool(uint32_t count,uint32_t& id);
+    void RegisterQueryPool(uint32_t id,uint32_t count) { _queries.Register(id,count); }
     bool DestroyQueryPool(uint32_t id) { return _queries.Destroy(id); }
-    bool SyncQueries(uint32_t pool,uint32_t first,std::span<rn_query_sample> samples,rn_wait_result&);
-    bool SubmitFrame(const rn_batch_desc&,Swapchain*,rn_submit_result&);
+    rn_query_sample Query(uint32_t pool, uint32_t slot) const;
+    ModularFramePipeline& Pipeline() { return *_pipeline; }
+    BufferRegistry& Buffers() { return _buffers; }
+    bool SubmitFrame(const rn_batch_desc&,Swapchain*,FrameExecution&,const std::function<void(uint64_t)>& submitted, const std::function<bool()>& collect);
     bool IsTerminal() const { return _poisoned || _device.GetDevice().IsDeviceLost(); }
     bool PrepareOutput(radray::gpu::TextureFormat format) {
         return _pipeline->PrepareOutput(format,_device.GetDevice());
     }
     void Finish();
-    bool WaitSubmit(uint64_t sequence,int64_t timeoutNs,rn_wait_result& result);
     bool CreateTexture(const rn_uploaded_texture_desc& desc) { return _uploaded.Create(_device,desc); }
-    bool UploadTexture(const rn_texture_upload_desc& desc) { return _uploaded.Upload(desc); }
+    void UploadTexture(TextureRegistry::Upload upload) { _uploaded.Enqueue(std::move(upload)); }
     bool DestroyTexture(uint32_t id) { return _uploaded.Destroy(id); }
     bool UpsertModelMesh(int32_t meshId,std::span<const radray::byte> vertices,uint32_t vertexCount,uint32_t indexCount,uint32_t& pageId) {
         return !IsTerminal() && _staticGeometry->Upsert(meshId,vertices,vertexCount,indexCount,pageId);
     }
     bool RemoveModelMesh(int32_t meshId) { return _staticGeometry->Remove(meshId); }
-    bool PollCapture(uint64_t sequence,rn_capture_info& info,void* pixels,uint64_t capacity) { return _pipeline->PollCapture(sequence,info,pixels,capacity); }
     bool SupportsWireframe() const { return _pipeline->Resources().SupportsWireframe(); }
     radray::DeviceContext& Runtime() { return _device; }
 private:

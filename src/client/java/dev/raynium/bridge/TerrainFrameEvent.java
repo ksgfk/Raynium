@@ -2,7 +2,7 @@ package dev.raynium.bridge;
 
 import jdk.jfr.*;
 
-/** Frame-associated Java preparation and FFM envelope; the latter includes native Render. */
+/** Java terrain preparation and owner-thread submission time for one batch sequence. */
 @Name("dev.raynium.TerrainFrame")
 @Label("Terrain frame")
 @Category("Raynium")

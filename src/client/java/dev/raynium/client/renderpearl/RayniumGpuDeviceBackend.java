@@ -74,8 +74,8 @@ final class RayniumGpuDeviceBackend implements GpuDeviceBackend {
         throw new UnsupportedOperationException("RenderPearl pipelines are compiled through GpuDevice.compilePipeline");
     }
     @Override public void close() {
-        encoder.close();
-        renderer.close();
-        runtime.close();
+        try (runtime; renderer) {
+            encoder.close();
+        }
     }
 }

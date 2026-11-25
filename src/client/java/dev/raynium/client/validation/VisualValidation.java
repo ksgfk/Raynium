@@ -25,6 +25,7 @@ public final class VisualValidation {
     private JsonObject scene;
     private boolean particlesPrepared,buildingParticles,texturesPrepared;
     private long particleSeed;
+    private Runnable resumeWorldClock; // Accessed on the integrated server thread.
     private final java.util.ArrayList<Path> captureFiles=new java.util.ArrayList<>();
     private final java.util.Set<com.mojang.renderpearl.api.pipeline.RenderPipeline> selectedPipelines=
         java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
@@ -143,9 +144,10 @@ public final class VisualValidation {
                         net.minecraft.client.gui.components.debug.DebugScreenEntryStatus.ALWAYS_ON);
                 client.level.destroyBlockProgress(Integer.MAX_VALUE,net.minecraft.core.BlockPos.ZERO,-1);
                 var server=client.getSingleplayerServer();
-                if(server==null) throw new IllegalStateException("Visual validation requires a copied local world");
+                if(server==null) throw new IllegalStateException("Visual validation requires an integrated server");
                 var playerId=client.player.getUUID();
                 work=server.submit(()->{
+                    restoreWorldClock();
                     var player=server.getPlayerList().getPlayer(playerId);
                     var source=server.createCommandSourceStack().withEntity(player).withLevel(player.level()).withPosition(player.position()).withSuppressedOutput();
                     if(scene.has("commands")) for(var command:scene.getAsJsonArray("commands")) {
@@ -168,7 +170,18 @@ public final class VisualValidation {
                         if(packet==null) throw new IllegalStateException("Map fixture has no update packet");
                         player.connection.send(packet);
                     }
-                    if(scene.has("gameTime")) server.getWorldData().overworldData().setGameTime(scene.get("gameTime").getAsLong());
+                    if(scene.has("gameTime")) {
+                        long time=scene.get("gameTime").getAsLong();
+                        server.getWorldData().overworldData().setGameTime(time);
+                        player.level().dimensionType().defaultClock().ifPresent(clock -> {
+                            var clocks=server.clockManager();
+                            if(!clocks.getInstance(clock).isPaused()) {
+                                clocks.setPaused(clock,true);
+                                resumeWorldClock=()->clocks.setPaused(clock,false);
+                            }
+                            clocks.setTotalTicks(clock,time);
+                        });
+                    }
                     if(scene.has("camera")) {
                         var camera=scene.getAsJsonObject("camera");
                         if(!player.teleportTo(player.level(),number(camera,"x"),number(camera,"y"),number(camera,"z"),Set.of(),
@@ -325,6 +338,12 @@ public final class VisualValidation {
             if(scene.has("requiredPictureInPicture")) for(var requiredType:scene.getAsJsonArray("requiredPictureInPicture"))
                 if(!pictureInPictureTypes.contains(requiredType.getAsString())) throw new IllegalStateException("Missing picture-in-picture fixture: "+requiredType.getAsString());
             var result=new JsonObject(); String name=scene.get("name").getAsString(); result.addProperty("name",name);
+            if(scene.has("gameTime")) client.level.dimensionType().defaultClock().ifPresent(clock -> {
+                var observed=client.level.clockManager().getInstance(clock);
+                if(!observed.isPaused() || observed.totalTicks()!=scene.get("gameTime").getAsLong())
+                    throw new IllegalStateException("Fixture world clock did not settle at the requested time");
+                result.addProperty("worldClockTicks",observed.totalTicks());
+            });
             result.add("entities",new Gson().toJsonTree(entities));
             result.addProperty("width",client.getWindow().getWidth()); result.addProperty("height",client.getWindow().getHeight());
             result.addProperty("oit",client.options.improvedTransparency().get()); results.add(result);
@@ -345,7 +364,15 @@ public final class VisualValidation {
             export(client,result,name);
         } catch(Exception failure) { finish(client,failure); }
     }
+    private void restoreWorldClock() {
+        if(resumeWorldClock!=null) {
+            resumeWorldClock.run();
+            resumeWorldClock=null;
+        }
+    }
     private void finish(Minecraft client,Exception failure) {
+        var server=client.getSingleplayerServer();
+        if(server!=null) server.execute(this::restoreWorldClock);
         var result=new JsonObject(); result.addProperty("status",failure==null?"completed":"failed");
         result.addProperty("renderer",RenderMode.REFERENCE?"vanilla":"raynium"); result.addProperty("phase",phase); result.addProperty("index",index);
         result.addProperty("backend",RenderMode.REFERENCE?"vulkan":System.getProperty("raynium.rhi.backend","d3d12"));

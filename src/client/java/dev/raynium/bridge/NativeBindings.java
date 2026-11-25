@@ -27,7 +27,8 @@ final class NativeBindings {
     private final MethodHandle destroyEnvironment;
     private final MethodHandle create;
     private final MethodHandle destroy;
-    final MethodHandle createRenderer, destroyRenderer;
+    static final int WAIT_BYTES=48, SUBMIT_BYTES=56, TELEMETRY_BYTES=152;
+    final MethodHandle createRenderer, destroyRenderer, flushRenderer, drainTelemetry;
     final MethodHandle queryDeviceInfo,createSwapchain,resizeSwapchain,destroySwapchain;
     final MethodHandle createBuffer,destroyBuffer,registerPipeline,destroyPipeline;
     final MethodHandle createQueryPool,destroyQueryPool,syncQueryPool;
@@ -46,7 +47,7 @@ final class NativeBindings {
                 scalar);
         create = bind(linker, library, "rn_create_runtime", FunctionDescriptor.of(ValueLayout.JAVA_INT,
                 ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-        destroy = bind(linker, library, "rn_destroy_runtime", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
+        destroy = bind(linker, library, "rn_destroy_runtime", signature(1));
         createRenderer = bind(linker,library,"rn_create_renderer", signature(3));
         destroyRenderer = bind(linker,library,"rn_destroy_renderer", signature(1));
         queryDeviceInfo=bind(linker,library,"rn_query_device_info",FunctionDescriptor.of(ValueLayout.JAVA_INT,
@@ -74,6 +75,9 @@ final class NativeBindings {
             ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
         syncQueryPool=bind(linker,library,"rn_sync_query_pool",FunctionDescriptor.of(ValueLayout.JAVA_INT,
             ValueLayout.ADDRESS,ValueLayout.JAVA_INT,ValueLayout.JAVA_INT,ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.ADDRESS));
+        flushRenderer=bind(linker,library,"rn_flush_renderer",signature(2));
+        drainTelemetry=bind(linker,library,"rn_drain_telemetry",FunctionDescriptor.of(ValueLayout.JAVA_INT,
+                ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_INT,ValueLayout.ADDRESS));
         submitFrame=bind(linker,library,"rn_submit_frame",signature(3));
         waitSubmit=bind(linker,library,"rn_wait_submit",FunctionDescriptor.of(ValueLayout.JAVA_INT,
             ValueLayout.ADDRESS,ValueLayout.JAVA_LONG,ValueLayout.JAVA_LONG,ValueLayout.ADDRESS));
@@ -164,13 +168,7 @@ final class NativeBindings {
     }
 
     void destroyRuntime(MemorySegment handle) {
-        try {
-            destroy.invokeExact(handle);
-        } catch (RuntimeException | Error failure) {
-            throw failure;
-        } catch (Throwable failure) {
-            throw new IllegalStateException("Cannot destroy the Raynium runtime", failure);
-        }
+        call(destroy,"rn_destroy_runtime",handle);
     }
 
     private static FunctionDescriptor signature(int pointers) {
@@ -208,6 +206,11 @@ final class NativeBindings {
     }
     static void call(MethodHandle method,String operation,MemorySegment handle,MemorySegment info,int size) {
         try { checkStatus(operation,(int)method.invokeExact(handle,info,size)); }
+        catch(RuntimeException | Error failure) { throw failure; }
+        catch(Throwable failure) { throw new IllegalStateException(operation,failure); }
+    }
+    static void call(MethodHandle method,String operation,MemorySegment handle,MemorySegment entries,int capacity,MemorySegment count) {
+        try { checkStatus(operation,(int)method.invokeExact(handle,entries,capacity,count)); }
         catch(RuntimeException | Error failure) { throw failure; }
         catch(Throwable failure) { throw new IllegalStateException(operation,failure); }
     }

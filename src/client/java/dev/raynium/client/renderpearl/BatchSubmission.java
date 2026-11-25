@@ -8,7 +8,7 @@ final class BatchSubmission {
         boolean awaitAndPublish(long sequence, long timeoutNs);
     }
 
-    private enum State { RECORDING, SUBMITTED, FAILED }
+    private enum State { RECORDING, ENQUEUED, FAILED }
 
     private final Waiter waiter;
     private State state = State.RECORDING;
@@ -18,14 +18,14 @@ final class BatchSubmission {
         this.waiter = waiter;
     }
 
-    void submitted(long sequence) {
+    void enqueued(long sequence) {
         if (sequence <= 0 || state != State.RECORDING) throw new IllegalStateException("Invalid submission transition");
         this.sequence = sequence;
-        state = State.SUBMITTED;
+        state = State.ENQUEUED;
     }
 
     void failed() {
-        if (state != State.RECORDING) throw new IllegalStateException("Batch already finalized");
+        sequence=0;
         state = State.FAILED;
     }
 
@@ -37,7 +37,7 @@ final class BatchSubmission {
 
             @Override public boolean awaitCompletion(long timeoutNs) {
                 if (closed) throw new IllegalStateException("Fence is closed");
-                if (state == State.SUBMITTED) return waiter.awaitAndPublish(sequence, timeoutNs);
+                if (state == State.ENQUEUED) return waiter.awaitAndPublish(sequence, timeoutNs);
                 if (timeoutNs == 0) return false;
                 throw new IllegalStateException("Cannot wait for a " + state + " batch");
             }

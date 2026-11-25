@@ -5,11 +5,21 @@ import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
 import static java.lang.foreign.ValueLayout.*;
 
-/** Persistent terrain residency owner. All frame arrays are borrowed only until present returns. */
+/** Owner-thread frontend for the renderer and its asynchronous submission stream. */
 public final class NativeRenderer implements AutoCloseable {
     public static final int RGSS=1, IMPROVED_TRANSPARENCY=4, WIREFRAME=128, REUSE_VISIBLE=256, REUSE_INSTANCES=512;
     public record Capture(int width,int height,byte[] rgba) {}
-    public record SubmitResult(long sequence,int outcome,boolean success,boolean deviceLost,long[] measurements) {}
+    public record Progress(long consumed,long submitted,long completed,long presented,int generation,int recovery,int outcome,int flags) {
+        static Progress read(MemorySegment memory,long offset) {
+            return new Progress(memory.get(JAVA_LONG,offset),memory.get(JAVA_LONG,offset+8),memory.get(JAVA_LONG,offset+16),
+                    memory.get(JAVA_LONG,offset+24),memory.get(JAVA_INT,offset+32),memory.get(JAVA_INT,offset+36),
+                    memory.get(JAVA_INT,offset+40),memory.get(JAVA_INT,offset+44));
+        }
+    }
+    public record SubmitResult(long sequence,boolean success,Progress progress) {
+        public boolean deviceLost() { return (progress.flags()&1)!=0; }
+        public int outcome() { return progress.outcome(); }
+    }
     public record WaitResult(long completedSequence,boolean success,boolean deviceLost) {}
     public record Index(long meshId,int[] values) {}
     public record Mesh(long id,byte[] vertices,int vertexCount,int layer) {}
@@ -33,12 +43,19 @@ public final class NativeRenderer implements AutoCloseable {
     final NativeBindings bindings;
     private MemorySegment handle=MemorySegment.NULL;
     private long completedSequence;
-    private boolean poisoned;
+    private boolean poisoned,terminalSettling;
+    private long observedPresented;
+    private int surfaceGeneration,recovery;
+    private java.util.function.IntConsumer updateRecovery;
+    private final ArrayDeque<Completion> consumedCallbacks=new ArrayDeque<>(), submittedCallbacks=new ArrayDeque<>(), pendingBatches=new ArrayDeque<>();
+
     private Runnable releaseAcquiredSurface;
     private final Set<NativeBuffer> buffers=new HashSet<>();
     private final List<NativeBuffer> writableBuffers=new ArrayList<>();
     private final Arena scratch=Arena.ofConfined();
-    private final MemorySegment waitResult=scratch.allocate(16,8),batchDesc=scratch.allocate(96,8),submitResult=scratch.allocate(160,8);
+    private final MemorySegment waitResult=scratch.allocate(NativeBindings.WAIT_BYTES,8),batchDesc=scratch.allocate(96,8),submitResult=scratch.allocate(NativeBindings.SUBMIT_BYTES,8);
+    private static final int TELEMETRY_CAPACITY=32;
+    private final MemorySegment telemetry=scratch.allocate(NativeBindings.TELEMETRY_BYTES*TELEMETRY_CAPACITY,8),telemetryCount=scratch.allocate(JAVA_INT);
     final MemorySegment bufferDesc=scratch.allocate(24,8),bufferResult=scratch.allocate(16,8);
     private final Records viewRecords=new Records(NativeFrameBuffer.BYTE_SIZE),dirtyRanges=new Records(24);
 
@@ -87,7 +104,7 @@ public final class NativeRenderer implements AutoCloseable {
         try(var arena=Arena.ofConfined()) {
             var output=arena.allocate(ADDRESS);
             NativeBindings.call(bindings.createSwapchain,"create swapchain",handle,NativeSwapchain.descriptor(arena,hwnd,width,height,mode),output);
-            value.handle=output.get(ADDRESS,0); swapchain=value; return value;
+            value.handle=output.get(ADDRESS,0); swapchain=value; configuredSurface(); return value;
         }
     }
     public NativeTexture createTexture(int width,int height,int mips,NativeTexture.Format format) {
@@ -149,7 +166,7 @@ public final class NativeRenderer implements AutoCloseable {
         if(!isClosed()) NativeBindings.call(bindings.removeModelMesh,"remove model mesh",handle,meshId);
     }
     public Optional<Capture> pollCapture(long sequence) {
-        checkOpen();
+        checkAlive();
         try(var arena=Arena.ofConfined()) {
             var info=arena.allocate(32,8); info.set(JAVA_INT,0,32);
             NativeBindings.call(bindings.pollCapture,"query capture",handle,sequence,info,MemorySegment.NULL,0L);
@@ -182,7 +199,17 @@ public final class NativeRenderer implements AutoCloseable {
     }
     public NativeBuffer createBuffer(int usage,long size,java.nio.ByteBuffer initial,java.util.function.Supplier<dev.raynium.client.renderpearl.CommandTape> currentBatch) {
         checkOpen();
-        var buffer=NativeBuffer.create(this,handle,usage,size,initial,currentBatch);
+        if((usage&~1023)!=0) throw new IllegalArgumentException("Invalid public buffer usage");
+        return allocateBuffer(usage,size,initial,currentBatch,NativeBuffer.WriteSource.HOST_SHADOW);
+    }
+    public NativeBuffer createFenceRotatedBuffer(int usage,long size,java.util.function.Supplier<dev.raynium.client.renderpearl.CommandTape> batch,NativeBuffer.WriteSource source) {
+        checkOpen();
+        if((usage&~1023)!=0) throw new IllegalArgumentException("Invalid rotating buffer usage");
+        if((usage&(NativeBuffer.USAGE_MAP_WRITE|NativeBuffer.USAGE_COPY_DST))==NativeBuffer.USAGE_MAP_WRITE) usage|=1024;
+        return allocateBuffer(usage,size,null,batch,source);
+    }
+    private NativeBuffer allocateBuffer(int usage,long size,java.nio.ByteBuffer initial,java.util.function.Supplier<dev.raynium.client.renderpearl.CommandTape> currentBatch,NativeBuffer.WriteSource source) {
+        var buffer=NativeBuffer.create(this,handle,usage,size,initial,currentBatch,source);
         buffers.add(buffer);
         return buffer;
     }
@@ -192,19 +219,57 @@ public final class NativeRenderer implements AutoCloseable {
         if(!isClosed()) NativeBindings.call(bindings.destroyBuffer,"destroy buffer",handle,id);
     }
     void trackWritable(NativeBuffer buffer) { writableBuffers.add(buffer); }
-    public void onCompleted(long sequence,List<Runnable> callbacks) {
-        for(var callback:callbacks) completions.addLast(new Completion(sequence,callback));
+    public void trackBatch(long sequence,List<Runnable> submitted,List<Runnable> completed,Runnable release,Runnable fail) {
+        consumedCallbacks.addLast(new Completion(sequence,release));
+        for(var callback:submitted) submittedCallbacks.addLast(new Completion(sequence,callback));
+        for(var callback:completed) completions.addLast(new Completion(sequence,callback));
+        pendingBatches.addLast(new Completion(sequence,fail));
     }
-    private void publishCompleted(long sequence) {
-        completedSequence=Math.max(completedSequence,sequence);
-        while(!completions.isEmpty() && completions.getFirst().sequence()<=completedSequence)
-            completions.removeFirst().callback().run();
+    private static Throwable collectFailure(Throwable first,Throwable next) {
+        if(first==null) return next;
+        if(first!=next) first.addSuppressed(next);
+        return first;
     }
-    public void pollCompleted() {
-        var result=waitSubmit(0,0);
-        if(!result.success()) terminalFailure(result.deviceLost());
-        publishCompleted(result.completedSequence());
+    private static Throwable dispatch(ArrayDeque<Completion> queue,long through,Throwable failure) {
+        while(!queue.isEmpty() && queue.getFirst().sequence()<=through) {
+            var callback=queue.removeFirst().callback();
+            try { callback.run(); } catch(Throwable next) { failure=collectFailure(failure,next); }
+        }
+        return failure;
     }
+    public void syncWorkerState(Progress p) {
+        if(terminalSettling || poisoned) return;
+        boolean terminal=p.flags()!=0;
+        terminalSettling=terminal;
+        completedSequence=Math.max(completedSequence,p.completed());
+        if(p.generation()==surfaceGeneration && p.recovery()!=0 && p.recovery()!=recovery) {
+            recovery=p.recovery();
+            if(updateRecovery!=null) updateRecovery.accept(recovery);
+        }
+        if(p.presented()>observedPresented) {
+            dev.raynium.client.benchmark.BenchmarkSession.nativeFrames(p.presented()-observedPresented);
+            observedPresented=p.presented();
+        }
+        Throwable failure=dispatch(consumedCallbacks,p.consumed(),null);
+        failure=dispatch(submittedCallbacks,p.submitted(),failure);
+        failure=dispatch(completions,p.completed(),failure);
+        while(!pendingBatches.isEmpty() && pendingBatches.getFirst().sequence()<=completedSequence) pendingBatches.removeFirst();
+        if(terminal) {
+            poisoned=true;
+            terminalSettling=false;
+            failure=dispatch(pendingBatches,Long.MAX_VALUE,failure);
+            failure=dispatch(consumedCallbacks,Long.MAX_VALUE,failure);
+            completions.clear(); submittedCallbacks.clear();
+            if(releaseAcquiredSurface!=null) releaseAcquiredSurface.run();
+            Throwable cause=(p.flags()&1)!=0?new com.mojang.renderpearl.api.device.GpuDeviceLossException("Graphics device lost"):
+                    new IllegalStateException("Renderer submission failed");
+            failure=collectFailure(failure,cause);
+        }
+        if(failure instanceof Error e) throw e;
+        if(failure instanceof RuntimeException e) throw e;
+        if(failure!=null) throw new IllegalStateException("Completion callback failed",failure);
+    }
+    public void pollCompleted() { waitSubmit(0,0); }
     public int createQueryPool(int count) {
         checkOpen();
         if(count<=0) throw new IllegalArgumentException("Query pool must have a positive size");
@@ -219,28 +284,30 @@ public final class NativeRenderer implements AutoCloseable {
         if(!isClosed()) NativeBindings.call(bindings.destroyQueryPool,"destroy query pool",handle,id);
     }
     public void syncQueryPool(int id,int first,int count,MemorySegment samples) {
-        checkOpen();
+        checkAlive();
         if(first<0 || count<0 || !samples.isNative() || samples.byteSize()<(long)count*16) throw new IllegalArgumentException("Invalid query result slice");
         try {
             var result=waitResult;
             int status=(int)bindings.syncQueryPool.invokeExact(handle,id,first,count,samples,result);
-            long completed=result.get(JAVA_LONG,0);
-            boolean lost=(result.get(JAVA_INT,8)&1)!=0;
-            if(status!=0) terminalFailure(lost);
-            publishCompleted(completed);
+            if(status!=0) throw new IllegalStateException("Invalid query pool or range");
+            syncWorkerState(Progress.read(result,0));
         } catch(RuntimeException | Error failure) { throw failure; }
         catch(Throwable failure) { throw new IllegalStateException("Cannot sync query pool",failure); }
     }
     public SubmitResult submitFrame(MemorySegment commands,MemorySegment uploads,NativeSwapchain surface) {
-        checkOpen();
         return submitFrame(commands,uploads,MemorySegment.NULL,surface,List.of(),false);
     }
     public SubmitResult submitFrame(MemorySegment commands,MemorySegment uploads,MemorySegment instanceUploads,NativeSwapchain surface,List<MemorySegment> views,boolean measure) {
+        var result=submitFrame(commands,uploads,instanceUploads,surface,views,measure,null);
+        syncWorkerState(result.progress());
+        return result;
+    }
+    public SubmitResult submitFrame(MemorySegment commands,MemorySegment uploads,MemorySegment instanceUploads,NativeSwapchain surface,List<MemorySegment> views,boolean measure,dev.raynium.client.renderpearl.CommandTape.BorrowPermit permit) {
         checkOpen();
         if(surface!=null && surface!=swapchain) throw new IllegalArgumentException("Invalid submit surface");
         try {
             var desc=batchDesc;
-            desc.set(JAVA_INT,0,96); desc.set(JAVA_INT,4,measure?1:0);
+            desc.set(JAVA_INT,0,96); desc.set(JAVA_INT,4,(measure?1:0)|(permit!=null?2:0));
             var records=viewRecords.reserve(views.size());
             desc.set(ADDRESS,80,records); desc.set(JAVA_INT,88,views.size());
             if(!views.isEmpty()) {
@@ -260,27 +327,43 @@ public final class NativeRenderer implements AutoCloseable {
             desc.set(ADDRESS,64,dirty); desc.set(JAVA_INT,72,count);
             var result=submitResult;
             int status=(int)bindings.submitFrame.invokeExact(handle,desc,result);
-            var batch=new SubmitResult(result.get(JAVA_LONG,0),result.get(JAVA_INT,8),status==0,(result.get(JAVA_INT,12)&1)!=0,measure?result.asSlice(16,144).toArray(JAVA_LONG):null);
-            writableBuffers.removeIf(NativeBuffer::afterSubmit);
+            var batch=new SubmitResult(result.get(JAVA_LONG,0),status==0,Progress.read(result,8));
+            if(batch.sequence()>0) {
+                if(measure) writableBuffers.forEach(NativeBuffer::measureWrites);
+                writableBuffers.removeIf(NativeBuffer::afterSubmit);
+            }
             return batch;
         } catch(RuntimeException | Error failure) { throw failure; }
         catch(Throwable failure) { throw new IllegalStateException("Cannot submit command tape",failure); }
     }
     public boolean awaitSubmission(long sequence,long timeoutNs) {
         checkOpen();
-        if(completedSequence<sequence) {
-            var wait=waitSubmit(sequence,timeoutNs);
-            if(!wait.success()) terminalFailure(wait.deviceLost());
-            publishCompleted(wait.completedSequence());
-        }
+        if(completedSequence<sequence) waitSubmit(sequence,timeoutNs);
         return completedSequence>=sequence;
     }
-    public void onTerminalSurface(Runnable reset) { releaseAcquiredSurface=reset; }
-    public void terminalFailure(boolean deviceLost) {
-        poisoned=true;
-        if(releaseAcquiredSurface!=null) releaseAcquiredSurface.run();
-        if(deviceLost) throw new com.mojang.renderpearl.api.device.GpuDeviceLossException("Graphics device lost");
-        throw new IllegalStateException("Renderer submission failed");
+    public void onSurface(Runnable reset,java.util.function.IntConsumer receiver) {
+        releaseAcquiredSurface=reset; updateRecovery=receiver;
+    }
+    void configuredSurface() { ++surfaceGeneration; recovery=0; }
+    public int flush() {
+        checkOpen();
+        try {
+            int status=(int)bindings.flushRenderer.invokeExact(handle,waitResult);
+            var progress=Progress.read(waitResult,0);
+            syncWorkerState(progress);
+            if(status!=0) throw new IllegalStateException("Renderer flush failed");
+            return progress.outcome();
+        } catch(RuntimeException | Error e) { throw e; }
+        catch(Throwable e) { throw new IllegalStateException("Cannot flush renderer",e); }
+    }
+    public void drainTelemetry(java.util.function.Consumer<MemorySegment> consumer) {
+        checkAlive();
+        int count;
+        do {
+            NativeBindings.call(bindings.drainTelemetry,"drain telemetry",handle,telemetry,TELEMETRY_CAPACITY,telemetryCount);
+            count=telemetryCount.get(JAVA_INT,0);
+            for(int i=0;i<count;i++) consumer.accept(telemetry.asSlice((long)i*NativeBindings.TELEMETRY_BYTES,NativeBindings.TELEMETRY_BYTES));
+        } while(count==TELEMETRY_CAPACITY);
     }
     public WaitResult waitSubmit(long sequence,long timeoutNs) {
         checkOpen();
@@ -289,23 +372,32 @@ public final class NativeRenderer implements AutoCloseable {
             var result=waitResult;
             long start=dev.raynium.client.benchmark.BenchmarkSession.syncWaitStart();
             int status=(int)bindings.waitSubmit.invokeExact(handle,sequence,timeoutNs,result);
-            var wait=new WaitResult(result.get(JAVA_LONG,0),status==0,(result.get(JAVA_INT,8)&1)!=0);
+            var p=Progress.read(result,0);
+            var wait=new WaitResult(p.completed(),status==0,(p.flags()&1)!=0);
             if(start!=0) dev.raynium.client.benchmark.BenchmarkSession.syncWaitEnd(start);
+            syncWorkerState(p);
             return wait;
         } catch(RuntimeException | Error failure) { throw failure; }
         catch(Throwable failure) { throw new IllegalStateException("Cannot wait for renderer submission",failure); }
     }
-    public void checkOpen() { owner.checkOpen(); if(poisoned) throw new IllegalStateException("Renderer in terminal failure"); if(handle.equals(MemorySegment.NULL)) throw new IllegalStateException("Renderer is closed"); }
+    public boolean isPoisoned() { return poisoned || terminalSettling; }
+    public void checkAlive() { owner.checkOpen(); if(isClosed()) throw new IllegalStateException("Renderer is closed"); }
+    public void checkOpen() { checkAlive(); if(isPoisoned()) throw new IllegalStateException("Renderer in terminal failure"); }
     void checkThread() { owner.checkThread(); }
-    boolean isClosed() { return handle.equals(MemorySegment.NULL); }
+    public boolean isClosed() { return handle.equals(MemorySegment.NULL); }
     @Override public void close() {
         checkThread(); if(handle.equals(MemorySegment.NULL)) return;
         if(swapchain!=null) throw new IllegalStateException("Close outputs before renderer");
-        for(var buffer:buffers) buffer.endRenderer();
-        buffers.clear();
-        writableBuffers.clear();
-        viewRecords.close(); dirtyRanges.close(); scratch.close();
-        completions.clear();
-        NativeBindings.call(bindings.destroyRenderer,"destroy renderer",handle); handle=MemorySegment.NULL; owner.releasedRenderer(this);
+        try {
+            if(!isPoisoned() && !pendingBatches.isEmpty()) flush();
+        } finally {
+            NativeBindings.call(bindings.destroyRenderer,"destroy renderer",handle);
+            handle=MemorySegment.NULL;
+            for(var buffer:buffers) buffer.endRenderer();
+            buffers.clear(); writableBuffers.clear();
+            viewRecords.close(); dirtyRanges.close(); scratch.close();
+            consumedCallbacks.clear(); submittedCallbacks.clear(); completions.clear(); pendingBatches.clear();
+            owner.releasedRenderer(this);
+        }
     }
 }

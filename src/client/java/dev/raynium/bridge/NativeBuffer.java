@@ -13,6 +13,8 @@ import java.util.function.Supplier;
 import static java.lang.foreign.ValueLayout.*;
 
 public final class NativeBuffer implements GpuBuffer {
+    public enum WriteSource { HOST_SHADOW, TRANSIENT, MAPPABLE_RING, STAGED_VERTEX }
+    private final WriteSource writeSource;
     private final NativeRenderer owner;
     private final Supplier<CommandTape> batch;
     private final int id,usage;
@@ -28,8 +30,8 @@ public final class NativeBuffer implements GpuBuffer {
     private int references;
     private long lastRetainedTapeId;
 
-    static NativeBuffer create(NativeRenderer owner,MemorySegment renderer,int usage,long size,ByteBuffer initial,Supplier<CommandTape> batch) {
-        if(size<=0 || (usage&~1023)!=0 || (usage&~USAGE_HINT_CLIENT_STORAGE)==0 || (initial!=null && initial.remaining()!=size))
+    static NativeBuffer create(NativeRenderer owner,MemorySegment renderer,int usage,long size,ByteBuffer initial,Supplier<CommandTape> batch,WriteSource source) {
+        if(size<=0 || (usage&~2047)!=0 || (usage&~USAGE_HINT_CLIENT_STORAGE)==0 || (initial!=null && initial.remaining()!=size))
             throw new IllegalArgumentException("Invalid buffer descriptor");
         if((usage&USAGE_MAP_READ)!=0 && (usage&~(USAGE_MAP_READ|USAGE_COPY_DST|USAGE_HINT_CLIENT_STORAGE))!=0)
             throw new UnsupportedOperationException("MAP_READ buffer cannot have GPU read or write mapping usages");
@@ -37,21 +39,22 @@ public final class NativeBuffer implements GpuBuffer {
             try(var scratch=Arena.ofConfined()) {
                 var copied=scratch.allocate(size,1);
                 copied.copyFrom(MemorySegment.ofBuffer(initial));
-                return create(owner,renderer,usage,size,copied,batch);
+                return create(owner,renderer,usage,size,copied,batch,source);
             }
         }
-        return create(owner,renderer,usage,size,initial==null?MemorySegment.NULL:MemorySegment.ofBuffer(initial),batch);
+        return create(owner,renderer,usage,size,initial==null?MemorySegment.NULL:MemorySegment.ofBuffer(initial),batch,source);
     }
-    private static NativeBuffer create(NativeRenderer owner,MemorySegment renderer,int usage,long size,MemorySegment initial,Supplier<CommandTape> batch) {
+    private static NativeBuffer create(NativeRenderer owner,MemorySegment renderer,int usage,long size,MemorySegment initial,Supplier<CommandTape> batch,WriteSource source) {
         var desc=owner.bufferDesc;
         desc.set(JAVA_INT,0,24); desc.set(JAVA_INT,4,usage);
         desc.set(JAVA_LONG,8,size); desc.set(ADDRESS,16,initial);
         var result=owner.bufferResult;
         NativeBindings.call(owner.bindings.createBuffer,"create buffer",renderer,desc,result);
-        return new NativeBuffer(owner,batch,result.get(JAVA_INT,0),usage,size,result.get(ADDRESS,8).address());
+        return new NativeBuffer(owner,batch,result.get(JAVA_INT,0),usage,size,result.get(ADDRESS,8).address(),source);
     }
-    private NativeBuffer(NativeRenderer owner,Supplier<CommandTape> batch,int id,int usage,long size,long address) {
-        this.owner=owner; this.batch=batch; this.id=id; this.usage=usage; this.size=size; this.address=address;
+    private NativeBuffer(NativeRenderer owner,Supplier<CommandTape> batch,int id,int usage,long size,long address,WriteSource source) {
+        this.writeSource=source;
+        this.owner=owner; this.batch=batch; this.id=id; this.usage=usage&1023; this.size=size; this.address=address;
         bufferArena=address==0?null:Arena.ofConfined();
         base=address==0?null:MemorySegment.ofAddress(address).reinterpret(size,bufferArena,null);
     }
@@ -61,6 +64,9 @@ public final class NativeBuffer implements GpuBuffer {
     public int id() { return id; }
     public void checkRange(NativeRenderer renderer,long offset,long length,int requiredUsage) {
         owner.checkOpen();
+        checkLiveRange(renderer,offset,length,requiredUsage);
+    }
+    private void checkLiveRange(NativeRenderer renderer,long offset,long length,int requiredUsage) {
         if(closed || owner!=renderer) throw new IllegalStateException("Buffer is closed or belongs to another device");
         if((usage&requiredUsage)!=requiredUsage) throw new IllegalArgumentException("Missing buffer usage");
         if(offset<0 || offset>size || length<=0 || length>size-offset) throw new IllegalArgumentException("Invalid buffer range");
@@ -94,8 +100,11 @@ public final class NativeBuffer implements GpuBuffer {
     }
     @Override public GpuBufferSlice.MappedView map(long offset,long length,boolean read,boolean write) {
         if(read==write || length>Integer.MAX_VALUE) throw new IllegalArgumentException("Invalid buffer mapping");
-        checkRange(owner,offset,length,read?USAGE_MAP_READ:USAGE_MAP_WRITE);
-        if(read) owner.pollCompleted();
+        if(read) {
+            owner.checkAlive();
+            checkLiveRange(owner,offset,length,USAGE_MAP_READ);
+            if(!owner.isPoisoned()) owner.pollCompleted();
+        } else checkRange(owner,offset,length,USAGE_MAP_WRITE);
         boolean persistent=write && base!=null;
         Mapping mapping;
         if(persistent && cachedWrite==null) cachedWrite=new Mapping();
@@ -140,6 +149,11 @@ public final class NativeBuffer implements GpuBuffer {
             dirty.set(JAVA_LONG,at+16,ranges[2*i+1]-ranges[2*i]);
         }
         return at;
+    }
+    void measureWrites() {
+        long bytes=0;
+        for(int i=0;i<rangeCount;++i) bytes+=ranges[2*i+1]-ranges[2*i];
+        dev.raynium.client.benchmark.BenchmarkSession.mappedWrites(writeSource,bytes);
     }
     boolean afterSubmit() {
         rangeCount=0;

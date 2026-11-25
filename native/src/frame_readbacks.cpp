@@ -35,12 +35,15 @@ void FrameReadbacks::Submitted(uint64_t sequence) {
     if(!_entries.empty()) _sequence=sequence;
     if(_size) _state=BufferState::HostRead;
 }
-void FrameReadbacks::Publish(uint64_t completed) {
+void FrameReadbacks::Collect(uint64_t completed, radray::vector<HostBufferWrite>& output) {
     if(!_sequence || _sequence>completed) return;
     if(_size) _storage->buffer->InvalidateMappedRange({0,_size});
-    for(const auto& entry:_entries) {
-        const auto* source=entry.bytes.empty()?_storage->mapped+entry.offset:entry.bytes.data();
-        auto* destination=entry.target->mapped+entry.destination;
+    for(auto& entry:_entries) {
+        auto& write=output.emplace_back(HostBufferWrite{entry.target->id,entry.destination,std::move(entry.bytes)});
+        if(!write.bytes.empty()) continue;
+        write.bytes.resize(entry.rowBytes * entry.rows);
+        const auto* source=_storage->mapped+entry.offset;
+        auto* destination=write.bytes.data();
         for(uint32_t row=0;row<entry.rows;++row)
             std::memcpy(destination+row*entry.rowBytes,source+row*entry.pitch,entry.rowBytes);
     }

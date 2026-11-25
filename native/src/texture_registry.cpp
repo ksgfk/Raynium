@@ -161,23 +161,27 @@ bool TextureRegistry::Create(radray::DeviceContext& runtime,const rn_uploaded_te
 const UploadedTexture* TextureRegistry::Find(uint32_t id) const {
     auto found=_textures.find(id); return found==_textures.end()?nullptr:&found->second;
 }
-bool TextureRegistry::Upload(const rn_texture_upload_desc& desc) {
-    const auto* owner=Find(desc.id);
-    if(!owner || desc.struct_size!=sizeof(desc) || !desc.pixels || desc.reserved || desc.array_layer>=owner->desc.array_layers || desc.mip_level>=owner->desc.mip_levels || !desc.width || !desc.height) {
+bool TextureRegistry::PrepareUpload(const rn_uploaded_texture_desc& texture,const rn_texture_upload_desc& desc,Upload& pending) {
+    if(desc.struct_size!=sizeof(desc) || !desc.pixels || desc.reserved || desc.array_layer>=texture.array_layers || desc.mip_level>=texture.mip_levels || !desc.width || !desc.height) {
         RADRAY_ERR_LOG("Invalid upload descriptor or missing texture: id={} mip={}",desc.id,desc.mip_level); return false;
     }
-    const uint32_t width=std::max(1u,owner->desc.width>>desc.mip_level),height=std::max(1u,owner->desc.height>>desc.mip_level);
-    if(IsDepthStencilFormat(owner->texture->GetDesc().Format)) { RADRAY_ERR_LOG("CPU depth texture upload is unsupported: id={}",desc.id); return false; }
-    const uint64_t rowBytes=uint64_t(desc.width)*GetTextureFormatBytesPerPixel(ToTextureFormat(owner->desc.format));
+    const uint32_t width=std::max(1u,texture.width>>desc.mip_level),height=std::max(1u,texture.height>>desc.mip_level);
+    if(IsDepthStencilFormat(ToTextureFormat(texture.format))) { RADRAY_ERR_LOG("CPU depth texture upload is unsupported: id={}",desc.id); return false; }
+    const uint64_t rowBytes=uint64_t(desc.width)*GetTextureFormatBytesPerPixel(ToTextureFormat(texture.format));
     const uint64_t pitch=desc.row_pitch?desc.row_pitch:rowBytes;
     if(uint64_t(desc.x)+desc.width>width || uint64_t(desc.y)+desc.height>height || pitch<rowBytes ||
        desc.byte_size<pitch*(desc.height-1)+rowBytes) { RADRAY_ERR_LOG("Texture upload region, row pitch or byte size is invalid: id={} mip={} region={},{},{}x{} row_pitch={} byte_size={}",desc.id,desc.mip_level,desc.x,desc.y,desc.width,desc.height,pitch,desc.byte_size); return false; }
-    Pending pending{owner->texture,desc,{}};
+    pending.desc=desc;
     pending.bytes.resize(size_t(rowBytes*desc.height));
     for(uint32_t row=0;row<desc.height;++row)
         std::memcpy(pending.bytes.data()+rowBytes*row,static_cast<const radray::byte*>(desc.pixels)+pitch*row,size_t(rowBytes));
     pending.desc.pixels=nullptr; pending.desc.row_pitch=uint32_t(rowBytes); pending.desc.byte_size=pending.bytes.size();
-    _pending.push_back(std::move(pending)); return true;
+    return true;
+}
+void TextureRegistry::Enqueue(Upload upload) {
+    const auto* texture=Find(upload.desc.id);
+    if(!texture) RADRAY_ABORT("FIFO upload lost texture {}",upload.desc.id);
+    _pending.push_back({texture->texture,upload.desc,std::move(upload.bytes)});
 }
 bool TextureRegistry::Destroy(uint32_t id) {
     if(!_textures.erase(id)) { RADRAY_ERR_LOG("Texture ID is missing or already destroyed: {}",id); return false; }

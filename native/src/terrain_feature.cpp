@@ -1,4 +1,5 @@
 #include <raynium/terrain_feature.h>
+#include <raynium/raster_records.h>
 #include <radray/inline_vector.h>
 #include <radray/profiler.h>
 #include <algorithm>
@@ -47,8 +48,7 @@ void TerrainView::Import(radray::RDGBuilder& graph,GpuBackend backend) {
 }
 
 bool TerrainFeature::Decode(std::span<const radray::byte> bytes,std::span<TerrainView> views,const TextureRegistry& textures,const radray::Rect& area) {
-    struct Material { uint32_t id,flags; rn_texture_sampling sampling; };
-    struct Wire { uint32_t opcode,size,view,stage; radray::Rect scissor; uint32_t ids[3],mips[3]; Material materials[2]; } w{};
+    wire::Terrain w{};
     if(bytes.size()!=sizeof(w)) return false;
     std::memcpy(&w,bytes.data(),sizeof(w));
     if(w.view>=views.size() || w.stage>OitAccumulate || w.scissor.X<area.X || w.scissor.Y<area.Y ||

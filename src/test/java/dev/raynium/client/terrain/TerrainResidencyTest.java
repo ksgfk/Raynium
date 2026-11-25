@@ -60,6 +60,27 @@ class TerrainResidencyTest {
             assertEquals(epoch,huge.uploadedEpoch);
         }
     }
+    @Test void discardedSecondViewRestoresNewMeshForSameCamera() {
+        try(var frame=new NativeFrameBuffer()) {
+            var residency=new TerrainResidency();
+            long epoch=NativeRenderer.nextFrameId(); residency.reset(epoch);
+            var c=capture(); var a=mesh(112); var b=mesh(112);
+            put(c,0,a,0,1,1);
+            residency.prepare(c,frame,16,17,true); residency.commit();
+            put(c,1,b,16,2,1); c.checkedResidencyEpoch=epoch; c.uploadCandidates.add(1);
+            residency.prepare(c,frame,16,17,true);
+            assertEquals(1,count(frame,1));
+            var transition=residency.stageCommit();
+            transition.rollback().run();
+            assertEquals(0,b.layers[0].slotId);
+            assertEquals(0,c.checkedResidencyEpoch);
+            assertEquals(epoch,a.uploadedEpoch);
+            residency.prepare(c,frame,16,17,true);
+            assertEquals(1,count(frame,1));
+            assertEquals(b.layers[0].slotId,id(frame,1,0,32));
+        }
+    }
+
     @Test void capturedUploadCandidatesAreConsumedOnceAndInvalidatedByEpochChanges() {
         try(var frame=new NativeFrameBuffer()) {
             var residency=new TerrainResidency(); long epoch=NativeRenderer.nextFrameId(); residency.reset(epoch);
@@ -133,6 +154,8 @@ class TerrainResidencyTest {
             var fresh=new SectionPayload(2,new MeshPayload(2,ByteBuffer.allocate(112)));
             put(c,0,fresh,0,1,1); residency.prepare(c,frame,16,17);
             assertEquals(1,count(frame,1)); assertEquals(1,fresh.layers[0].slotId); assertTrue(fresh.layers[0].hasVertices()); residency.commit();
+            assertTrue(fresh.layers[0].hasVertices());
+            frame.clearBorrowed();
             assertFalse(fresh.layers[0].hasVertices()); assertEquals(nextEpoch,fresh.uploadedEpoch);
         }
     }
@@ -269,14 +292,18 @@ class TerrainResidencyTest {
             var c=capture();
             put(c,0,section,0,1,0x010000);
             residency.prepare(c,frame,16,17,true);
-            residency.stageCommit().run();
+            residency.stageCommit().submitted().run();
+            assertTrue(first.hasData());
+            frame.clearBorrowed();
             assertFalse(first.hasData());
             var next=water.indices=water.copyIndices(values,4);
             TerrainCapture.recordDirtyIndices(section);
             c.fastReused=true;
             residency.prepare(c,frame,16,17,true);
-            residency.stageCommit().run();
+            residency.stageCommit().submitted().run();
             assertSame(next,c.indices[0]);
+            assertTrue(next.hasData());
+            frame.clearBorrowed();
             assertFalse(next.hasData());
             c.fastReused=false;
             c.partialRefresh=true;

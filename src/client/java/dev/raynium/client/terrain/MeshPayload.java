@@ -29,6 +29,29 @@ public final class MeshPayload {
     public byte[] originalQuadGroups;
     public volatile IndexSnapshot indices;
 
+    /** Holds one immutable byte range until the consumer has finished reading it. */
+    public static final class UploadLease implements AutoCloseable {
+        private final MemorySegment bytes;
+        private Runnable release;
+
+        private UploadLease(ByteBuffer buffer, int length, Runnable release) {
+            bytes = MemorySegment.ofBuffer(buffer).asSlice(0, length).asReadOnly();
+            this.release = release;
+        }
+
+        public MemorySegment bytes() { return bytes; }
+
+        @Override public synchronized void close() {
+            if (release == null) return;
+            release.run();
+            release = null;
+        }
+    }
+
+    private static ByteBuffer readable(ByteBuffer buffer, int size) {
+        return buffer == null ? null : buffer.slice(0, size).asReadOnlyBuffer().order(ByteOrder.nativeOrder());
+    }
+
     public static final class IndexSnapshot {
         private static final AtomicReferenceFieldUpdater<IndexSnapshot, ByteBuffer> DIRECT_BUF_UPDATER =
                 AtomicReferenceFieldUpdater.newUpdater(IndexSnapshot.class, ByteBuffer.class, "directBuffer");
@@ -54,8 +77,10 @@ public final class MeshPayload {
             return count * 4;
         }
 
+        boolean hasDirectBuffer() { return directBuffer != null; }
+
         public ByteBuffer directBuffer() {
-            return directBuffer;
+            return readable(directBuffer, byteSize());
         }
 
         public int[] values() {
@@ -67,7 +92,20 @@ public final class MeshPayload {
             return out;
         }
 
-        public void releaseBuffer() {
+        private int pins;
+        private boolean releaseRequested;
+        public synchronized UploadLease pinIndices() {
+            if(directBuffer==null) throw new IllegalStateException("Terrain upload was released");
+            var lease = new UploadLease(directBuffer, byteSize(), this::unpinIndices);
+            ++pins;
+            return lease;
+        }
+        private synchronized void unpinIndices() {
+            if(pins<=0) throw new IllegalStateException("Unbalanced terrain upload pin");
+            if(--pins==0 && releaseRequested) releaseBuffer();
+        }
+        public synchronized void releaseBuffer() {
+            if(pins!=0) { releaseRequested=true; return; }
             ByteBuffer buf = DIRECT_BUF_UPDATER.getAndSet(this, null);
             if (buf != null) DirectUploadPool.release(buf);
         }
@@ -249,14 +287,27 @@ public final class MeshPayload {
     }
 
     public ByteBuffer directVertices() {
-        return directVertices;
+        return readable(directVertices, vertexCount * 28);
     }
 
     public boolean hasVertices() {
         return directVertices != null;
     }
 
-    public void releaseVertices() {
+    private int pins;
+    private boolean releaseRequested;
+    public synchronized UploadLease pinVertices() {
+        if(directVertices==null) throw new IllegalStateException("Terrain upload was released");
+        var lease = new UploadLease(directVertices, vertexCount * 28, this::unpinVertices);
+        ++pins;
+        return lease;
+    }
+    private synchronized void unpinVertices() {
+        if(pins<=0) throw new IllegalStateException("Unbalanced terrain upload pin");
+        if(--pins==0 && releaseRequested) releaseVertices();
+    }
+    public synchronized void releaseVertices() {
+        if(pins!=0) { releaseRequested=true; return; }
         ByteBuffer buf = DIRECT_VERTICES_UPDATER.getAndSet(this, null);
         if (buf != null) DirectUploadPool.release(buf);
         originalQuadGroups = null;

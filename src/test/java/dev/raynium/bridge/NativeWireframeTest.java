@@ -185,17 +185,19 @@ class NativeWireframeTest {
             int colored=0; for(int i=0;i<expected.length;i+=4) if(expected[i]!=0 || expected[i+1]!=0) colored++;
             assertTrue(colored>100,"Solid corner must be visible");
 
-            // Epoch 2: upload preanalyzed MeshPayload via zero-copy meshDirect + render frame 2.
+            // The caller can release its preanalyzed vertex storage immediately after submission.
             var payload=new dev.raynium.client.terrain.MeshPayload(2,ByteBuffer.wrap(rawCorner),0);
             try(var color=renderer.createTexture(128,128,1,1,NativeTexture.Format.RGBA8,NativeTexture.ATTACHMENT|NativeTexture.READBACK);
                 var depth=renderer.createTexture(128,128,1,1,NativeTexture.Format.DEPTH32F,NativeTexture.ATTACHMENT)) {
                 var f2=frame(2,2,atlas.id(),light.id(),1,-1); f2.flags=0;
-                try(var storage=new NativeFrameBuffer(); var tape=new dev.raynium.client.renderpearl.CommandTape(renderer)) {
+                try(var source=java.lang.foreign.Arena.ofConfined(); var storage=new NativeFrameBuffer();
+                    var tape=new dev.raynium.client.renderpearl.CommandTape(renderer)) {
                     var wf=payload.originalQuadGroups;
                     storage.begin(1,0,1,0,wf==null?0:NativeFrameBuffer.alignedBytes(wf.length));
                     storage.terrain(atlas.id(),light.id(),1);
-                    storage.meshDirect(1L,java.lang.foreign.MemorySegment.ofBuffer(payload.directVertices()),
-                        payload.vertexCount,0,payload.directVertices(),payload.groupQuadCounts,payload.layoutFlags,
+                    var vertices=source.allocate(rawCorner.length,4);
+                    vertices.copyFrom(java.lang.foreign.MemorySegment.ofBuffer(payload.directVertices()));
+                    storage.meshDirect(1L,vertices,payload.vertexCount,0,source,payload.groupQuadCounts,payload.layoutFlags,
                         payload.minBounds,payload.maxBounds,wf);
                     storage.instance(0,0,0,1f);
                     storage.visible(1L,-1,0,0,1);

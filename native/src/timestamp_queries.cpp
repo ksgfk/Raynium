@@ -4,11 +4,8 @@
 
 namespace raynium {
 using namespace radray::gpu;
-bool QueryRegistry::Create(uint32_t count,uint32_t& id) {
-    if(!count || !_next) return false;
-    id=_next++;
+void QueryRegistry::Register(uint32_t id,uint32_t count) {
     _pools.emplace(id,radray::make_shared<Pool>(count));
-    return true;
 }
 bool QueryRegistry::Destroy(uint32_t id) { return _pools.erase(id)!=0; }
 radray::shared_ptr<QueryRegistry::Pool> QueryRegistry::Find(uint32_t id) const {

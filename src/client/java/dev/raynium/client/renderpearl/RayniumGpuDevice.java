@@ -78,6 +78,7 @@ public final class RayniumGpuDevice implements GpuDevice,AutoCloseable {
     }
     @Override public GpuTextureView createTextureView(GpuTexture texture) { return createTextureView(texture,0,texture.getMipLevels()); }
     @Override public GpuTextureView createTextureView(GpuTexture texture,int base,int count) { return backend.createTextureView(texture,base,count); }
+    public GpuBuffer createFenceRotatedBuffer(int usage,long size,dev.raynium.bridge.NativeBuffer.WriteSource source) { return backend.renderer.createFenceRotatedBuffer(usage,size,backend.encoder::tape,source); }
     @Override public GpuBuffer createBuffer(Supplier<String> label,int usage,long size) { return backend.createBuffer(label,usage,size); }
     @Override public GpuBuffer createBuffer(Supplier<String> label,int usage,ByteBuffer data) { return backend.createBuffer(label,usage,data); }
     @Override public List<String> getLastDebugMessages() { return backend.getLastDebugMessages(); }

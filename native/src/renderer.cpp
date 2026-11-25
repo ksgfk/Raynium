@@ -43,7 +43,11 @@ bool Renderer::Create(radray::DeviceContext& device,std::span<const radray::byte
     auto* borrowed=pipeline.get();
     auto scheduler=radray::FrameScheduler::Create(device,std::move(pipeline),2).Release();
     if(!scheduler) return false;
-    out=radray::unique_ptr<Renderer>(new Renderer(device,std::move(scheduler),std::move(vertices),std::move(translucentVertices),std::move(quadPool),std::move(indices),std::move(staticGeometry),borrowed)); return true;
+    auto renderer=radray::unique_ptr<Renderer>(new Renderer(device,std::move(scheduler),std::move(vertices),
+        std::move(translucentVertices),std::move(quadPool),std::move(indices),std::move(staticGeometry),borrowed));
+    if(!renderer->_buffers.Prewarm(device.GetDevice())) return false;
+    out=std::move(renderer);
+    return true;
 }
 Renderer::~Renderer() noexcept try {
     _scheduler->WaitIdle();
@@ -56,32 +60,15 @@ void Renderer::Finish() {
     RADRAY_PROFILE_SCOPE_N("Raynium.Renderer.Finish");
     _pipeline->Finish(_device.GetDevice());
     _scheduler->WaitIdle();
+    for(uint32_t i=0;i<_scheduler->GetSlotCount();++i) _pipeline->RetireSlot(i);
 }
-bool Renderer::WaitSubmit(uint64_t sequence,int64_t timeoutNs,rn_wait_result& result) {
-    if(_poisoned) {
-        result={};
-        if(_device.GetDevice().IsDeviceLost()) result.flags=RN_SUBMIT_FLAG_DEVICE_LOST;
-        return false;
-    }
-    bool success=_pipeline->WaitSubmit(_device.GetDevice(),sequence,timeoutNs,result);
-    if(result.flags&RN_SUBMIT_FLAG_DEVICE_LOST) _poisoned=true;
-    return success;
-}
-bool Renderer::CreateQueryPool(uint32_t count,uint32_t& id) {
-    return !IsTerminal() && _device.GetDevice().GetCapabilities().Features.TimestampQueries &&
-        _device.GetQueue().GetTimestampValidBits() && _queries.Create(count,id);
-}
-bool Renderer::SyncQueries(uint32_t id,uint32_t first,std::span<rn_query_sample> samples,rn_wait_result& result) {
+rn_query_sample Renderer::Query(uint32_t id, uint32_t index) const {
     auto pool=_queries.Find(id);
-    if(!pool || first>pool->slots.size() || samples.size()>pool->slots.size()-first) return false;
-    if(!WaitSubmit(0,0,result)) return false;
-    for(size_t i=0;i<samples.size();++i) {
-        const auto& slot=pool->slots[first+i];
-        samples[i]={slot.available?slot.sequence:0,slot.ticks};
-    }
-    return true;
+    if(!pool || index>=pool->slots.size()) return {};
+    const auto& slot=pool->slots[index];
+    return {slot.available?slot.sequence:0,slot.ticks};
 }
-bool Renderer::SubmitFrame(const rn_batch_desc& batch,Swapchain* target,rn_submit_result& result) {
+bool Renderer::SubmitFrame(const rn_batch_desc& batch,Swapchain* target,FrameExecution& result,const std::function<void(uint64_t)>& notifySubmitted,const std::function<bool()>& collect) {
     using namespace radray::gpu;
     auto& device=_device.GetDevice();
     const auto fail=[&] {
@@ -98,7 +85,8 @@ bool Renderer::SubmitFrame(const rn_batch_desc& batch,Swapchain* target,rn_submi
     auto& slot=_scheduler->BeginFrame();
     const auto waited=now();
     if(device.IsDeviceLost()) return fail();
-    _pipeline->MeasureBatch(slot,measure,target!=nullptr);
+    if (!collect()) return fail();
+    _pipeline->MeasureBatch(slot,measure);
     auto& tape=*slot.Emplace<CommandTape>();
     _staticGeometry->BeginSlot();
     if(!_staticGeometry->PrepareQuadIndices(_terrain,slot,tape.WorldUploads()) ||
@@ -155,6 +143,8 @@ bool Renderer::SubmitFrame(const rn_batch_desc& batch,Swapchain* target,rn_submi
     }
     const auto submitted=now();
     result.sequence=_pipeline->SubmittedSequence();
+    _pipeline->ClearInput();
+    notifySubmitted(result.sequence);
     _buffers.Advance(result.sequence,_pipeline->CompletedSequence());
     if(acquired.Frame) {
         RADRAY_PROFILE_SCOPE_N("Raynium.Frame.Present");
@@ -165,9 +155,9 @@ bool Renderer::SubmitFrame(const rn_batch_desc& batch,Swapchain* target,rn_submi
         result.outcome=*outcome;
     }
     if(measure) {
-        result.gpu_sequence=_pipeline->GpuSequence(); result.gpu_ns=_pipeline->GpuNanoseconds();
         result.wait_ns=waited-start; result.prepare_ns=prepared-waited;
         result.rdg_ns=submitted-prepared; result.present_ns=now()-submitted;
+        _pipeline->RecordTelemetry({result.sequence,0,0,0,result.wait_ns,result.prepare_ns,result.rdg_ns,result.present_ns,result.metrics});
     }
     return true;
 }

@@ -104,40 +104,68 @@ public:
 TEST(BufferRegistry, ReuseRequiresCompletedSubmissionAndLastSlotReference) {
     radray::test::FakeDevice device;
     device.EnableHostBuffers=true;
-    device.Capabilities.Limits.MaxBufferSize=64u<<20;
     BufferRegistry registry;
-    const rn_buffer_desc desc{sizeof(rn_buffer_desc),RN_BUFFER_MAP_WRITE|RN_BUFFER_COPY_SRC,256,nullptr};
-    rn_buffer_result first{},next{};
-    ASSERT_TRUE(registry.Create(device,desc,first));
-    auto retained=registry.Find(first.id);
+    const uint32_t usage=RN_BUFFER_MAP_WRITE|RN_BUFFER_COPY_SRC;
+    auto allocation=BufferRegistry::Allocate(device,usage,256);
+    ASSERT_TRUE(allocation);
+    auto* original=allocation.get();
+    registry.Register(1,std::move(allocation),{},false);
+    auto retained=registry.Find(1);
     registry.Advance(5,3);
-    ASSERT_TRUE(registry.Destroy(first.id));
-    EXPECT_FALSE(registry.Find(first.id));
-    device.BuffersUntilFailure=0;
-    EXPECT_FALSE(registry.Create(device,desc,next));
-    registry.Advance(5,5);
-    EXPECT_FALSE(registry.Create(device,desc,next));
+    ASSERT_TRUE(registry.Destroy(1));
+    EXPECT_FALSE(registry.Find(1));
+    EXPECT_FALSE(registry.Take(usage,256,3));
+    EXPECT_FALSE(registry.Take(usage,256,5));
     retained.reset();
-    ASSERT_TRUE(registry.Create(device,desc,next));
-    EXPECT_NE(first.id,next.id);
-    EXPECT_EQ(first.mapped,next.mapped);
-    ASSERT_TRUE(registry.Destroy(next.id));
+    EXPECT_FALSE(registry.Take(usage,256,3));
+    auto reused=registry.Take(usage,256,5);
+    ASSERT_EQ(reused.get(),original);
+    registry.Register(2,std::move(reused),{},false);
+    ASSERT_TRUE(registry.Destroy(2));
     registry.Advance(125,125);
-    EXPECT_FALSE(registry.Create(device,desc,next));
+    EXPECT_FALSE(registry.Take(usage,256,125));
 }
 
 TEST(BufferRegistry, IdleBudgetCapsExactSizeBuckets) {
     radray::test::FakeDevice device;
     device.EnableHostBuffers=true;
-    device.Capabilities.Limits.MaxBufferSize=64u<<20;
     BufferRegistry registry;
-    rn_buffer_desc desc{sizeof(rn_buffer_desc),RN_BUFFER_MAP_WRITE|RN_BUFFER_COPY_SRC,16u<<20,nullptr};
-    radray::array<rn_buffer_result,5> outputs{};
-    for(auto& out:outputs) ASSERT_TRUE(registry.Create(device,desc,out));
-    for(auto& out:outputs) ASSERT_TRUE(registry.Destroy(out.id));
-    device.BuffersUntilFailure=0;
-    for(unsigned i=0;i<4;++i) EXPECT_TRUE(registry.Create(device,desc,outputs[i]));
-    EXPECT_FALSE(registry.Create(device,desc,outputs[4]));
+    constexpr uint32_t usage=RN_BUFFER_MAP_WRITE|RN_BUFFER_COPY_SRC;
+    constexpr uint64_t size=16u<<20;
+    for(uint32_t id=1;id<=5;++id) {
+        auto allocation=BufferRegistry::Allocate(device,usage,size);
+        ASSERT_TRUE(allocation);
+        registry.Register(id,std::move(allocation),{},false);
+    }
+    for(uint32_t id=1;id<=5;++id) ASSERT_TRUE(registry.Destroy(id));
+    for(unsigned i=0;i<4;++i) EXPECT_TRUE(registry.Take(usage,size,0));
+    EXPECT_FALSE(registry.Take(usage,size,0));
+}
+
+TEST(BufferRegistry, FlushesInitialAndDirtyRangesOnPooledMappedStorage) {
+    radray::test::FakeDevice device;
+    device.EnableHostBuffers=true;
+    radray::vector<BufferRange> flushes;
+    device.OnFlush=[&](BufferRange range) { flushes.push_back(range); };
+    BufferRegistry registry;
+    constexpr uint32_t usage=RN_BUFFER_MAP_WRITE|RN_BUFFER_COPY_SRC|RN_BUFFER_FENCE_ROTATED;
+    constexpr uint64_t size=512u<<10;
+    ASSERT_TRUE(registry.Prewarm(device));
+    ASSERT_TRUE(flushes.empty());
+    auto pooled=registry.Take(usage,size,0);
+    ASSERT_TRUE(pooled);
+    ASSERT_NE(pooled->mapped,nullptr);
+    registry.Register(7,std::move(pooled),{},true);
+    ASSERT_EQ(flushes.size(),1u);
+    EXPECT_EQ(flushes[0].Offset,0u);
+    EXPECT_EQ(flushes[0].Size,size);
+    const radray::array dirty{rn_mapped_range{7,0,37,19},rn_mapped_range{7,0,201,54}};
+    ASSERT_TRUE(registry.Flush(dirty));
+    ASSERT_EQ(flushes.size(),3u);
+    for(size_t i=0;i<dirty.size();++i) {
+        EXPECT_EQ(flushes[i+1].Offset,dirty[i].offset);
+        EXPECT_EQ(flushes[i+1].Size,dirty[i].length);
+    }
 }
 
 TEST(TerrainBounds, OnlyStrictlySeparatedScreenBoundsCanCross) {

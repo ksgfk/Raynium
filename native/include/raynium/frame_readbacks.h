@@ -3,6 +3,11 @@
 #include <raynium/buffer_registry.h>
 
 namespace raynium {
+struct HostBufferWrite {
+    uint32_t id;
+    uint64_t offset;
+    radray::vector<radray::byte> bytes;
+};
 class FrameReadbacks final {
 public:
     void AddInline(const radray::shared_ptr<BufferEntry>&,uint64_t destination,radray::vector<radray::byte>&&);
@@ -12,7 +17,7 @@ public:
     radray::RDGBufferHandle Import(radray::RDGBuilder&) const;
     void Submitted(uint64_t sequence);
     uint64_t Sequence() const { return _sequence; }
-    void Publish(uint64_t completed);
+    void Collect(uint64_t completed, radray::vector<HostBufferWrite>& output);
 private:
     struct Publication {
         radray::shared_ptr<BufferEntry> target;

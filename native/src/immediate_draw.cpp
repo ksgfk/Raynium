@@ -1,4 +1,5 @@
 #include <raynium/immediate_draw.h>
+#include <raynium/raster_records.h>
 #include <algorithm>
 #include <cstring>
 
@@ -6,18 +7,9 @@ namespace raynium {
 using namespace radray::gpu;
 bool ImmediateDraw::Decode(std::span<const radray::byte> bytes,const ImmediatePipelineRegistry& pipelines,
     const BufferRegistry& buffers,const TextureRegistry& textures,std::span<const TextureFormat> colors,const radray::Rect& area) {
-    struct Header {
-        uint32_t opcode,size,pipeline,kind,count,instances,first,firstInstance;
-        int32_t base;
-        radray::Rect scissor;
-        uint32_t bindings,push,reserved;
-    };
-    static_assert(sizeof(Header)==64 && sizeof(Binding)==48);
-    Header h{};
-    if(bytes.size()<sizeof(h)) return false;
-    std::memcpy(&h,bytes.data(),sizeof(h));
-    if(h.kind>4 || h.reserved || h.bindings>256 || h.push%4 ||
-       bytes.size()!=sizeof(h)+h.bindings*sizeof(Binding)+((uint64_t(h.push)+7)&~uint64_t(7)) || h.scissor.X<area.X || h.scissor.Y<area.Y ||
+    static_assert(sizeof(Binding)==48);
+    wire::Draw h{};
+    if(!wire::ReadRasterHeader(bytes,h) || h.scissor.X<area.X || h.scissor.Y<area.Y ||
        uint64_t(h.scissor.X)+h.scissor.Width>uint64_t(area.X)+area.Width || uint64_t(h.scissor.Y)+h.scissor.Height>uint64_t(area.Y)+area.Height) return false;
     _pipeline=pipelines.Find(h.pipeline);
     if(!_pipeline || colors.size()!=_pipeline->state.colors.size()) return false;

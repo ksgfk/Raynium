@@ -7,6 +7,8 @@ import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 
 public final class RetainedTerrain {
+    public static final class ViewAccess { private ViewAccess() {} }
+    private static final ViewAccess ACCESS=new ViewAccess();
     private final TerrainResidency residency=new TerrainResidency();
     private final NativeRenderer.Frame frameScratch=new NativeRenderer.Frame();
     private long captureEpoch;
@@ -29,7 +31,7 @@ public final class RetainedTerrain {
         }
         var atlas=(NativeTexture)client.getTextureManager().getTexture(TextureAtlas.LOCATION_BLOCKS).getTexture();
         var light=(NativeTexture)game.lightmap().texture();
-        var storage=batch.acquireViewStorage();
+        var storage=batch.acquireViewStorage(ACCESS);
         CommandTape.TerrainView view;
         try {
             TerrainCapture.drainRemoved(residency.pendingRemovals);
@@ -41,10 +43,11 @@ public final class RetainedTerrain {
                 (state.levelRenderState.renderWireframeTerrain?NativeRenderer.WIREFRAME:0)|residency.reuseFlags();
             f.projection=snapshot.projection; f.view=snapshot.view; f.cameraBlock=snapshot.block; f.cameraFraction=snapshot.fraction;
             f.fogColor=snapshot.fog; f.fogDistances=snapshot.distances;
-            view=batch.addView(storage,storage.finish(f),atlas,light);
+            view=batch.addPooledView(storage,f,atlas,light);
         } catch(RuntimeException | Error failure) { storage.close(); throw failure; }
-        var onSubmit=residency.stageCommit();
-        if(onSubmit!=TerrainResidency.NOOP) batch.onSubmitted(onSubmit);
+        var transition=residency.stageCommit();
+        batch.onDiscard(transition.rollback());
+        if(transition.submitted()!=TerrainResidency.NOOP) batch.onSubmitted(transition.submitted());
         if(event!=null) {
             event.inputPreparation+=captured-start;
             event.preparation+=System.nanoTime()-captured;

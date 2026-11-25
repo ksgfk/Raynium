@@ -56,6 +56,18 @@ class NativeRuntimeTest {
     }
 
     @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void destroyRuntimeWithLiveRendererReturnsFailureAndKeepsRuntimeUsable(NativeEnvironment.Backend backend) throws Exception {
+        try (var environment=new NativeEnvironment(payload,backend,logger); var runtime=environment.createRuntime();
+             var renderer=runtime.createRenderer(NativeTestSupport.shaders())) {
+            var runtimeHandle=java.lang.invoke.MethodHandles.privateLookupIn(NativeRuntime.class,java.lang.invoke.MethodHandles.lookup())
+                .findVarHandle(NativeRuntime.class,"handle",MemorySegment.class);
+            assertThrows(IllegalStateException.class,()->renderer.bindings.destroyRuntime((MemorySegment)runtimeHandle.get(runtime)));
+            assertTrue(runtime.deviceInfo().maxTextureSize()>0);
+            renderer.flush();
+        }
+    }
+
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
     void runtimeRecreationKeepsEnvironmentAlive(NativeEnvironment.Backend backend) {
         try (var environment = new NativeEnvironment(payload, backend, logger)) {
             for (int iteration = 0; iteration < 2; iteration++) {

@@ -29,10 +29,10 @@ payload、ABI、缓存和关闭顺序见[互操作与加载](../architecture/int
 该入口保留测试驱动 Mixin，使用原版渲染并以 `--graphicsBackend VULKAN` 选择后端；检查日志中的 `Using graphics backend`，原版回退不算 Vulkan 对照。
 存档、资源包及 options 由指定游戏目录提供。`benchmarkConfig`/`benchmarkRunDir` 接入路线驱动，`tools/benchmark.py` 支持原版 Vulkan 与 Raynium 两个后端的独立采样。
 
-视觉驱动通过 `-PvalidationConfig=<JSON 路径>` 显式开启，不能与 benchmarkConfig 同时使用。将存档复制到独立游戏目录的 `saves/validation/`，选择 `-PquickPlayWorld=validation -PgameUsername=RayniumTest`；用户名限制为 1–16 个字母、数字或下划线。参考场景配置见 [vanilla-scenes.json](../../tools/validation/vanilla-scenes.json)，包含平台布置、实体、物品、普通透明/OIT、GUI、重载、线框与雨天。配置中的命令会修改测试存档，须使用副本。
-两种启动入口均使用 VisualValidation：服务端命令完成后设置相机，等待指定帧数、时长和区块编译，再经原版截图入口保存 PNG。可指定 gameTime、animationMillis、partialTick、rain/thunder、vignetteBrightness、wireframe、reload、postEffect 和 screen，并支持顶层 defaults。视觉模式固定 GUI 鼠标位置及光照闪烁；动画时钟作用于附魔、sprite、世界边界、实体 tickCount 及末地水晶，gameTime 同步末地闪光状态。产物在配置目录，包括各场景 PNG、设置和 visual-result.json；每场景五分钟超时，结束后正常关闭游戏。测试驱动完成不代表图像差异已获接受。
+视觉驱动通过 `-PvalidationConfig=<JSON 路径>` 显式开启，不能与 benchmarkConfig 同时使用。将存档复制到独立游戏目录的 `saves/validation/`，选择 `-PquickPlayWorld=validation -PgameUsername=RayniumTest`；用户名限制为 1–16 个字母、数字或下划线。参考场景配置见 [vanilla-scenes.json](../../tools/validation/vanilla-scenes.json)，包含平台布置、实体、物品、普通透明/OIT、GUI、重载、线框与雨天。配置中的命令会修改测试存档，须使用专用测试存档。
+两种启动入口均使用 VisualValidation：服务端命令完成后设置相机，等待指定帧数、时长和区块编译，再经原版截图入口保存 PNG。可指定 gameTime、animationMillis、partialTick、rain/thunder、vignetteBrightness、wireframe、reload、postEffect 和 screen，并支持顶层 defaults。视觉模式固定 GUI 鼠标位置及光照闪烁；动画时钟作用于附魔、sprite、世界边界、实体 tickCount 及末地水晶，gameTime 固定世界年龄与末地闪光状态。维度有默认世界时钟时，服务端将它暂停在同一刻，截图时核对客户端读数并写入 worldClockTicks；切换场景或结束验证时恢复该时钟先前的运行状态。产物在配置目录，包括各场景 PNG、设置和 visual-result.json；每场景五分钟超时，结束后正常关闭游戏。测试驱动完成不代表图像差异已获接受。
 设置 animationMillis 的场景在命令和资源重载完成后显式调用一次原版纹理 tick，使冻结世界也应用目标 sprite 帧与插值时刻；正常游戏与性能路线不启用此行为。
-[validate_visual.py](../../tools/validate_visual.py) 依次复制存档、运行 reference/d3d12/vulkan，输出原图和放大差分图，并按 64 像素区域统计差异；差分步骤依赖 Pillow 和 NumPy，可用 `--compare-only` 重建差分。[vanilla-effects.json](../../tools/validation/vanilla-effects.json) 包含特殊材质、内置后处理、屏幕覆盖与维度切换。
+[validate_visual.py](../../tools/validate_visual.py) 默认复制存档并依次运行 reference/d3d12/vulkan，输出原图和放大差分图，并按 64 像素区域统计差异；差分步骤依赖 Pillow 和 NumPy，可用 `--compare-only` 重建差分。在 Windows 上指定 `--in-place-world` 时，各会话独立保存世界和玩家元数据，通过目录联接读取原存档的区块、实体和 POI 文件。此模式在验证 JVM 启用 MC 的 DONT_SAVE_WORLD 开关，运行期间锁住所选原存档。[vanilla-effects.json](../../tools/validation/vanilla-effects.json) 包含特殊材质、内置后处理、屏幕覆盖与维度切换。
 `particles` 显式列出原版 ParticleOptions codec 数据、位置、速度及数量；配合 particleSeed/particleTicks，在场景稳定后通过原版粒子工厂和 tick 生成固定状态，并停用该场景的自动粒子添加与推进。种子覆盖粒子实例、引擎以及 SpellParticle 的静态随机源。未指定 particles 时保留原版粒子行为。blockAnimations 按方块位置设置附魔台 time/flip/open/rotation 或折跃门 age/cooldown，原版渲染器继续提取这些固定输入。panorama 和 textureExports 调用原版全景截图及纹理导出入口，等待 PNG 写完后推进场景；差分工具同时比较这些导出图像。结果中的 selectedVanillaPipelines 记录场景选择过的目录管线，供覆盖核对，不代表每个像素或管线变体已获验收。
 
 [vanilla-interactions.json](../../tools/validation/vanilla-interactions.json) 固定物品使用、图腾激活、调试线、地图和方块裂纹输入。useItemTicks/useItemHand 设置原版当前物品的使用时刻与手；activationTicks 固定图腾激活的 0–39 tick；debugEntries 指定原版调试项，breakingBlock 指定位置和阶段。mapPattern 创建并锁定原版地图保存数据、固定颜色并通过原版更新包交给客户端；screen=title 打开标题全景。clearNotifications 仅在显式配置的视觉场景中清除异步聊天和 toast，避免它们的实际到达时间干扰世界像素比较。
@@ -139,7 +139,7 @@ Debug 默认启用 RadRay RHI 检查。`rhiValidation=true`（JVM 属性 `rayniu
 D3D12 在此创建 factory 并启用调试层，早于窗口创建；createDevice 复用环境创建 runtime。
 也可通过独立 `nativeTest -PrhiValidation=true` 验证。
 启动日志中的 `Raynium native manifest=` 与 `Raynium native library loaded:` 记录内容缓存和 ABI/build ID、RadRay 身份、dirty、配置、CRT 与工具链。
-Debug CRT 为 MTd，Release 为 MT；静态分配器随 bridge 加载与卸载。当前要求 ABI 22，导出清单见 `tools/native.py`。
+Debug CRT 为 MTd，Release 为 MT；静态分配器随 bridge 加载与卸载。当前要求 ABI 23，导出清单见 `tools/native.py`。
 `Raynium runtime created` 表示设备与队列完成。GUI 和世界的实际显示须通过窗口观察；F2 使用原版文件写入保存 native 主颜色目标，全景入口通过独立尺寸离屏帧输出，纹理导出使用按子资源请求读回。
 
 ## 自动跑图与性能采样
@@ -189,11 +189,11 @@ tracy-capture.exe -a 127.0.0.1 -o C:/captures/session.tracy
 
 所有 benchmark 客户端关闭 Java 断言和 LWJGL 的参数与函数指针检查。启动器在子进程环境中禁用 Vulkan 附加层，采样结束后核对客户端记录的 Java Tracy、JFR、LWJGL 和断言状态，以及日志中的实际后端。Raynium 须报告 RHI 和驱动校验均已关闭。
 Release 默认关闭 RadRay RHI wrapper 检查；rhiValidation=false 关闭 native 驱动诊断。
-ABI 参数检查及资源寿命保护始终执行。benchmark 记录每批 GPU 时间，在窗口输出边界归并。
+ABI 参数检查及资源寿命保护始终执行。benchmark 将每个测量批次按提交序号归入录制它的 Java 帧，全部批次都返回有效计时时才记入该帧的 GPU 样本。
 该数值覆盖 native 命令的 timestamp 区间，在回收槽时发布，不是 MC 全帧 GPU 耗时，也不是发布时那一帧的即时耗时。
 
 `Raynium.Frame.AcquireNext` 标出取得交换链图像的调用，`Raynium.Frame.Present` 覆盖提交呈现与结果检查。测量批次的统计工作记为 `Raynium.Benchmark.BatchMetrics`，可通过首末标记定位正式路线。
-`Raynium.Frame.QueueSubmit` 覆盖队列提交，并随槽回收发布 `Raynium.GpuMilliseconds`。
+`Raynium.Frame.QueueSubmit` 覆盖队列提交。槽回收时由 `RadRay.RDG.GpuNanoseconds` 发布单批 GPU 时间。`Raynium.Frontend.Freeze` 包含主线程冻结输入与入队，其中 `Raynium.Frontend.QueueCapacity` 记录等待队列腾位的区间。
 `Raynium.Terrain.Prepare` 覆盖驻留更新、可见解析及参数构建；`Raynium.Terrain.Sort`、`BuildArguments` 分别记录排序和参数构建，`Raynium.Terrain.Record` 记录几何 pass 的内联录制；没有逐 draw profiling scope。上传字节的复制与生成计入 `RadRay.RDG.FillUploads`。
 锁定 RadRay 的 `CompiledRDG::Record` 按 Upload execution group 记录一个 `RDG UploadBatch` GPU 计时区，逐上传节点保留 CPU zone。D3D12 的光栅 GPU 区间覆盖整个原生 render pass，合并组使用首个 RDG 光栅 pass 名。该上传 GPU 区间包含组内拷贝和重叠写屏障，不包含组入口屏障；完整 native GPU 耗时仍读取上述帧外围 timestamp，不能用上传子区间之和替代。实现来源为 RadRay `modules/runtime/src/rdg.cpp`。
 `Raynium.Visible.Solid/Cutout/Translucent` 记录各层输入项；`Raynium.Terrain.<层>.SelectedGroups/Records/Batches` 记录各层选中面组、参数记录及批次。
@@ -204,7 +204,7 @@ ABI 参数检查及资源寿命保护始终执行。benchmark 记录每批 GPU �
 客户端是 on-demand，因此 native 库加载前、采集器连接前的工作不在 Tracy 中；它也不提供 Java 调用栈。
 
 `-PjfrFile=<路径>` 在游戏 JVM 启动时启用 `profile` JFR，正常退出时保存，磁盘缓冲上限 1 GiB；超出上限会淘汰较早数据。
-JFR 包含 JVM 执行采样、GC 等事件；`dev.raynium.TerrainFrame` 按实际提交序号汇总批内各视图的采集、驻留准备及 rn_submit_frame 的 FFM 时长。FFM 包络包含 native Present，不能再次与 native 时间相加。`dev.raynium.ClientFrame` 记录每次正常返回的 `Minecraft.renderFrame` 耗时及是否加载世界。
+JFR 包含 JVM 执行采样、GC 等事件；`dev.raynium.TerrainFrame` 按实际提交序号汇总批内各视图的采集、驻留准备及 rn_submit_frame 的 FFM 时长。该 FFM 区间包含冻结输入和队列回压，工作线程的 RDG 执行与 Present 在 Tracy 中单独计时。`dev.raynium.ClientFrame` 记录每次正常返回的 `Minecraft.renderFrame` 耗时及是否加载世界。
 未启用 JFR 事件时不创建逐帧 event。异常退出的未完成帧不会提交该 event；强制结束进程也不保证完成最终文件保存。
 完整游戏的 Java 与 native 分析分别读取 JFR 和 Tracy，不能将采样次数直接当作精确函数耗时。
 

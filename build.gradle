@@ -57,6 +57,10 @@ loom {
             property 'raynium.terrain.submission', providers.gradleProperty('terrainSubmission').getOrElse('auto')
             if (providers.gradleProperty('validationConfig').isPresent()) {
                 property 'raynium.validation.config', file(providers.gradleProperty('validationConfig').get()).absolutePath
+                if (providers.gradleProperty('validationReadOnlyRegions').getOrElse('false').toBoolean()) {
+                    property 'MC_DEBUG_ENABLED', 'true'
+                    property 'MC_DEBUG_DONT_SAVE_WORLD', 'true'
+                }
             }
         }
         clientNative {

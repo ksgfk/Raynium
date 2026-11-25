@@ -15,7 +15,7 @@ class BatchSubmissionTest {
             batch.failed();
             assertFalse(fence.awaitCompletion(0));
             assertThrows(IllegalStateException.class, () -> fence.awaitCompletion(1));
-            assertThrows(IllegalStateException.class, () -> batch.submitted(1));
+            assertThrows(IllegalStateException.class, () -> batch.enqueued(1));
         }
     }
 
@@ -25,8 +25,8 @@ class BatchSubmissionTest {
         var first = new BatchSubmission(wait);
         var next = new BatchSubmission(wait);
         try (var fence = first.createFence(); var later = next.createFence()) {
-            first.submitted(2);
-            next.submitted(7);
+            first.enqueued(2);
+            next.enqueued(7);
             assertTrue(later.awaitCompletion(Long.MAX_VALUE));
             assertTrue(fence.awaitCompletion(0));
             assertEquals(List.of(7L, Long.MAX_VALUE, 2L, 0L), calls);

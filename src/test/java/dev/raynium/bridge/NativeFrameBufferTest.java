@@ -63,27 +63,29 @@ class NativeFrameBufferTest {
             assertEquals(address,mesh.get(ADDRESS,8).address());
         }
     }
-    @Test void directMeshAndIndexKeepNativePointersAndPreanalyzedLayout() {
+    @Test void publicDirectMeshAndIndexOwnBytesAndKeepPreanalyzedLayout() {
         try(var buffer=new NativeFrameBuffer()) {
-            var directVerts=java.nio.ByteBuffer.allocateDirect(224).order(java.nio.ByteOrder.nativeOrder());
-            var directIdx=java.nio.ByteBuffer.allocateDirect(24).order(java.nio.ByteOrder.nativeOrder());
-            var vertSeg=MemorySegment.ofBuffer(directVerts);
-            var idxSeg=MemorySegment.ofBuffer(directIdx);
             int[] counts={1,0,0,0,0,0,1};
             float[] min={0f,1f,2f},max={3f,4f,5f};
             byte[] wf={0x30};
             buffer.begin(1,0,1,1,NativeFrameBuffer.alignedBytes(wf.length));
-            buffer.meshDirect(7L,vertSeg,8,0,directVerts,counts,
-                NativeFrameBuffer.LAYOUT_FLAG_FINITE_BOUNDS|NativeFrameBuffer.LAYOUT_FLAG_WIREFRAME_GROUPS,min,max,wf);
-            buffer.indexDirect(9L,idxSeg,6,directIdx);
+            try(var source=java.lang.foreign.Arena.ofConfined()) {
+                var vertices=source.allocate(224,8);
+                var indices=source.allocate(24,8);
+                vertices.set(JAVA_INT,0,76); indices.set(JAVA_INT,0,39);
+                buffer.meshDirect(7L,vertices,8,0,source,counts,
+                    NativeFrameBuffer.LAYOUT_FLAG_FINITE_BOUNDS|NativeFrameBuffer.LAYOUT_FLAG_WIREFRAME_GROUPS,min,max,wf);
+                buffer.indexDirect(9L,indices,6,source);
+                vertices.fill((byte)0); indices.fill((byte)0);
+            }
             var descriptor=buffer.finish(new NativeRenderer.Frame());
             var idxUpdate=descriptor.get(ADDRESS,24).reinterpret(24);
             assertEquals(9L,idxUpdate.get(JAVA_LONG,0));
-            assertEquals(idxSeg.address(),idxUpdate.get(ADDRESS,8).address());
+            assertEquals(39,idxUpdate.get(ADDRESS,8).reinterpret(4).get(JAVA_INT,0));
             assertEquals(6,idxUpdate.get(JAVA_INT,16));
             var meshUpdate=descriptor.get(ADDRESS,32).reinterpret(32);
             assertEquals(7L,meshUpdate.get(JAVA_LONG,0));
-            assertEquals(vertSeg.address(),meshUpdate.get(ADDRESS,8).address());
+            assertEquals(76,meshUpdate.get(ADDRESS,8).reinterpret(4).get(JAVA_INT,0));
             assertEquals(8,meshUpdate.get(JAVA_INT,16));
             assertEquals(0,meshUpdate.get(JAVA_INT,20));
             var layout=meshUpdate.get(ADDRESS,24).reinterpret(72);

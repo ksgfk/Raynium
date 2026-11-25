@@ -40,7 +40,7 @@ final class RayniumTransientMemory implements TransientMemory,AutoCloseable {
     @Override public GpuBufferSlice allocateGpu(long size,long alignment,int usage,long minimum,long element) {
         validate(size,alignment,minimum,element);
         var allocator=gpu.computeIfAbsent(usage,key->new TransientBlockAllocator<>(524288,Long.highestOneBit(Long.MAX_VALUE),
-            Allocator.create(bytes->new Block(renderer.createBuffer(key,bytes,null,batch)),block->block.buffer().close())));
+            Allocator.create(bytes->new Block(renderer.createFenceRotatedBuffer(key,bytes,batch,NativeBuffer.WriteSource.TRANSIENT)),block->block.buffer().close())));
         var a=allocator.allocate(size,alignment,minimum,element);
         return a.block().buffer().slice(a.offset(),a.size());
     }

@@ -7,10 +7,13 @@
 #else
 #define RAYNIUM_API __declspec(dllimport)
 #endif
-#define RN_ABI_VERSION 22u
+#define RN_ABI_VERSION 23u
 
-enum rn_submit_flags : uint32_t { RN_SUBMIT_FLAG_DEVICE_LOST = 1u };
-struct rn_wait_result { uint64_t completed_sequence; uint32_t flags, reserved; };
+enum rn_submit_flags : uint32_t { RN_SUBMIT_FLAG_DEVICE_LOST = 1u, RN_SUBMIT_FLAG_TERMINAL_ERROR = 2u };
+struct rn_wait_result {
+    uint64_t consumed_sequence, submitted_sequence, completed_sequence, presented_frames;
+    uint32_t surface_generation, surface_recovery_state, last_present_outcome, flags;
+};
 
 struct rn_runtime;
 struct rn_renderer;
@@ -115,7 +118,7 @@ struct rn_texture_upload_desc {
     const void* pixels; uint64_t byte_size;
     uint32_t array_layer, reserved;
 };
-// IDs are nonzero and scoped to the frame epoch. Input pointers are borrowed for one call.
+// IDs are nonzero and scoped to the frame epoch.
 enum rn_material_mode : uint32_t { RN_MATERIAL_OPAQUE = 0, RN_MATERIAL_CUTOUT = 1, RN_MATERIAL_TRANSLUCENT = 2 };
 enum rn_terrain_mesh_layout_flags : uint32_t {
     RN_TERRAIN_LAYOUT_FINITE_BOUNDS = 1u,
@@ -181,7 +184,7 @@ RAYNIUM_API rn_status rn_create_runtime(const rn_runtime_desc* desc, rn_runtime*
 // NULL is a no-op. A live pointer must be destroyed exactly once, before DLL unload.
 // All renderers must already have been successfully destroyed.
 // Wrong owner/thread or a live renderer logs and aborts.
-RAYNIUM_API void rn_destroy_runtime(rn_runtime* runtime) noexcept;
+RAYNIUM_API rn_status rn_destroy_runtime(rn_runtime* runtime) noexcept;
 
 
 // Calls are serialized on the runtime owner thread. Failed creation clears the output handle.
@@ -192,10 +195,10 @@ RAYNIUM_API rn_status rn_query_device_info(rn_runtime*, rn_device_info*, uint32_
 RAYNIUM_API rn_status rn_create_swapchain(rn_renderer*, const rn_swapchain_desc*, rn_swapchain**) noexcept;
 RAYNIUM_API rn_status rn_resize_swapchain(rn_swapchain*, const rn_swapchain_desc*) noexcept;
 RAYNIUM_API rn_status rn_destroy_swapchain(rn_swapchain*) noexcept;
-// All command and upload bytes are borrowed until this call returns. Records are eight-byte aligned.
 enum rn_buffer_usage : uint32_t {
     RN_BUFFER_MAP_READ=1, RN_BUFFER_MAP_WRITE=2, RN_BUFFER_CLIENT_STORAGE=4, RN_BUFFER_COPY_DST=8,
-    RN_BUFFER_COPY_SRC=16, RN_BUFFER_VERTEX=32, RN_BUFFER_INDEX=64, RN_BUFFER_UNIFORM=128, RN_BUFFER_TEXEL=256, RN_BUFFER_INDIRECT=512
+    RN_BUFFER_COPY_SRC=16, RN_BUFFER_VERTEX=32, RN_BUFFER_INDEX=64, RN_BUFFER_UNIFORM=128, RN_BUFFER_TEXEL=256, RN_BUFFER_INDIRECT=512,
+    RN_BUFFER_FENCE_ROTATED=1024
 };
 struct rn_buffer_desc { uint32_t struct_size,usage; uint64_t size; const void* initial; };
 struct rn_buffer_result { uint32_t id,reserved; void* mapped; };
@@ -225,12 +228,23 @@ struct rn_batch_desc {
     const rn_terrain_view_desc* views;
     uint32_t view_count,view_reserved;
 };
-enum rn_batch_flags : uint32_t { RN_BATCH_MEASURE=1 };
+enum rn_batch_flags : uint32_t { RN_BATCH_MEASURE=1, RN_BATCH_BORROW_POOLED=2 };
 struct rn_submit_result {
-    uint64_t sequence; rn_present_outcome outcome; uint32_t flags;
-    uint64_t gpu_sequence,gpu_ns,wait_ns,prepare_ns,rdg_ns,present_ns;
+    uint64_t sequence;
+    rn_wait_result progress;
+};
+enum rn_telemetry_flags : uint32_t { RN_TELEMETRY_HAS_GPU_NS=1 };
+struct rn_batch_telemetry {
+    uint64_t sequence;
+    uint32_t flags, reserved;
+    uint64_t gpu_ns,wait_ns,prepare_ns,rdg_ns,present_ns;
     rn_frame_metrics metrics;
 };
+RAYNIUM_API rn_status rn_flush_renderer(rn_renderer*, rn_wait_result*) noexcept;
+RAYNIUM_API rn_status rn_drain_telemetry(rn_renderer*, rn_batch_telemetry*, uint32_t capacity, uint32_t* out_count) noexcept;
+// Command records are eight-byte aligned. Batch, view and dirty-range descriptors are copied on submission.
+// Payloads are copied by default. With RN_BATCH_BORROW_POOLED, keep commands, uploads, instance uploads,
+// and all arrays and bytes referenced by views alive and unchanged until consumed_sequence reaches the returned sequence.
 RAYNIUM_API rn_status rn_submit_frame(rn_renderer*, const rn_batch_desc*, rn_submit_result*) noexcept;
 struct rn_query_sample { uint64_t sequence,ticks; }; // Zero sequence denotes an unavailable slot.
 RAYNIUM_API rn_status rn_create_query_pool(rn_renderer*,uint32_t count,uint32_t* id) noexcept;

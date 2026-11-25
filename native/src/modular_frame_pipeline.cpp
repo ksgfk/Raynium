@@ -30,47 +30,20 @@ bool ModularFramePipeline::Create(radray::DeviceContext& device,std::span<const 
         std::move(output),std::move(scene),std::move(completion),indirect));
     return true;
 }
-void ModularFramePipeline::PublishCompleted(uint64_t sequence) {
-    _completed=std::max(_completed,sequence);
-    for(auto& slot:_slots) slot.timestamps.Publish(sequence);
-    // Two in-flight batches may target overlapping host bytes; publish them in submission order.
-    size_t first=_slots[1].readbacks.Sequence()<_slots[0].readbacks.Sequence()?1:0;
-    _slots[first].readbacks.Publish(sequence);
-    _slots[1-first].readbacks.Publish(sequence);
-}
-bool ModularFramePipeline::WaitSubmit(Device& device,uint64_t sequence,int64_t timeoutNs,rn_wait_result& result) {
-    result={};
-    if(sequence>_submitted) {
-        RADRAY_ERR_LOG("Unknown submission sequence {}",sequence);
-        return false;
+void ModularFramePipeline::Collect(uint64_t sequence, radray::vector<HostBufferWrite>& writes) {
+    for(auto& slot:_slots) {
+        slot.timestamps.Publish(sequence);
+        slot.readbacks.Collect(sequence,writes);
     }
-    using Clock=std::chrono::steady_clock;
-    const auto start=Clock::now();
-    const uint64_t limitMs=timeoutNs>0 ? uint64_t((timeoutNs-1)/1000000)+1 : 0;
-    for(;;) {
-        result.completed_sequence=_completion->GetCompletedValue();
-        if(device.IsDeviceLost()) {
-            result.flags=RN_SUBMIT_FLAG_DEVICE_LOST;
-            return false;
-        }
-        PublishCompleted(result.completed_sequence);
-        if(result.completed_sequence>=sequence || timeoutNs==0) return true;
-        uint64_t sliceMs=1000;
-        if(timeoutNs>0) {
-            const auto elapsed=uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-start).count());
-            if(elapsed>=limitMs) return true;
-            sliceMs=std::min(sliceMs,limitMs-elapsed);
-        }
-        _completion->WaitFor(sequence,sliceMs);
-    }
+    _completed=sequence;
 }
 
 void ModularFramePipeline::Finish(Device& device) {
     while(_submitted && !device.IsDeviceLost() && !_completion->WaitFor(_submitted,1000)) {}
 }
-bool ModularFramePipeline::PollCapture(uint64_t sequence,rn_capture_info& info,void* pixels,uint64_t capacity) {
+bool ModularFramePipeline::PollCapture(uint64_t sequence,uint64_t completed,rn_capture_info& info,void* pixels,uint64_t capacity) {
     radray::ReadbackResultInfo result{};
-    if(!_readback.Poll(sequence,_completion->GetCompletedValue(),result,static_cast<radray::byte*>(pixels),capacity)) {
+    if(!_readback.Poll(sequence,completed,result,static_cast<radray::byte*>(pixels),capacity)) {
         RADRAY_ERR_LOG("Cannot poll capture: id={} capacity={}",sequence,capacity); return false;
     }
     info={sizeof(info),result.Ready?1u:0u,result.Texture.Width,result.Texture.Height,result.PackedByteSize,uint32_t(result.PackedRowPitch),0};
@@ -109,14 +82,35 @@ void ModularFramePipeline::Wait(radray::FrameSlot& slot) noexcept {
     auto& sequence=_inFlight[slot.GetIndex()];
     if(!sequence) return;
     _completion->Wait(sequence);
-    if(!slot.GetDevice().IsDeviceLost()) PublishCompleted(sequence);
     sequence=0;
 }
-void ModularFramePipeline::OnGpuTimingCompleted(radray::FrameSlot& slot,const radray::RDGGpuTimingSnapshot& snapshot) noexcept {
-    _pendingGpuNs+=snapshot.TotalNanoseconds;
-    if(!_slots[slot.GetIndex()].endsFrame) return;
-    _gpuSequence=snapshot.UserSequence;
-    _gpuNanoseconds=std::exchange(_pendingGpuNs,0);
-    RADRAY_PROFILE_PLOT("Raynium.GpuMilliseconds",double(_gpuNanoseconds)/1e6);
+void ModularFramePipeline::MeasureBatch(radray::FrameSlot& slot, bool enabled) {
+    RetireSlot(slot.GetIndex());
+    if(enabled) {
+        const auto seq=_submitted+1;
+        _slots[slot.GetIndex()].measuredSequence=seq;
+        _measurements.try_emplace(seq);
+    }
+    SetGpuProfiling(slot,enabled?radray::RDGGpuProfilingMode::FrameOnly:radray::RDGGpuProfilingMode::Off,_submitted+1);
+}
+void ModularFramePipeline::OnGpuTimingCompleted(radray::FrameSlot&,const radray::RDGGpuTimingSnapshot& snapshot) noexcept {
+    auto it=_measurements.find(snapshot.UserSequence);
+    if(it==_measurements.end()) return;
+    it->second.report.gpu_ns=snapshot.TotalNanoseconds;
+    it->second.report.flags=RN_TELEMETRY_HAS_GPU_NS;
+}
+void ModularFramePipeline::RecordTelemetry(rn_batch_telemetry report) {
+    _measurements.at(report.sequence).report=report;
+}
+void ModularFramePipeline::RetireSlot(uint32_t index) {
+    auto seq=std::exchange(_slots[index].measuredSequence,0);
+    if(auto it=_measurements.find(seq); it!=_measurements.end()) it->second.retired=true;
+}
+bool ModularFramePipeline::PopTelemetry(rn_batch_telemetry& report) {
+    auto it=_measurements.begin();
+    if(it==_measurements.end() || !it->second.retired) return false;
+    report=it->second.report;
+    _measurements.erase(it);
+    return report.sequence!=0;
 }
 }

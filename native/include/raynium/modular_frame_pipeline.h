@@ -25,15 +25,14 @@ public:
         return tape.PrepareReadbacks(slot.GetDevice(),_slots[slot.GetIndex()].readbacks) && tape.ReserveReadbacks(_readback) && _slots[slot.GetIndex()].timestamps.Prepare(slot.GetDevice(),slot.GetQueue(),tape.Timestamps());
     }
     void Finish(radray::gpu::Device& device);
-    bool WaitSubmit(radray::gpu::Device& device,uint64_t sequence,int64_t timeoutNs,rn_wait_result& result);
-    void MeasureBatch(radray::FrameSlot& slot,bool enabled,bool endsFrame) {
-        _slots[slot.GetIndex()].endsFrame=endsFrame;
-        if(!enabled) _pendingGpuNs=0;
-        SetGpuProfiling(slot,enabled?radray::RDGGpuProfilingMode::FrameOnly:radray::RDGGpuProfilingMode::Off,_submitted+1);
-    }
-    uint64_t GpuSequence() const noexcept { return _gpuSequence; }
-    uint64_t GpuNanoseconds() const noexcept { return _gpuNanoseconds; }
-    bool PollCapture(uint64_t sequence,rn_capture_info&,void*,uint64_t capacity);
+    void WaitForFence(uint64_t sequence,uint64_t timeoutMs) { _completion->WaitFor(sequence,timeoutMs); }
+    uint64_t SampleFence() const { return _completion->GetCompletedValue(); }
+    void Collect(uint64_t sequence, radray::vector<HostBufferWrite>& writes);
+    bool PollCapture(uint64_t id, uint64_t completed, rn_capture_info&, void*, uint64_t capacity);
+    void MeasureBatch(radray::FrameSlot& slot, bool enabled);
+    void RecordTelemetry(rn_batch_telemetry report);
+    void RetireSlot(uint32_t index);
+    bool PopTelemetry(rn_batch_telemetry&);
     bool PrepareOutput(radray::gpu::TextureFormat format,radray::gpu::Device&) const {
         return format==radray::gpu::TextureFormat::BGRA8_UNORM;
     }
@@ -47,7 +46,7 @@ private:
     struct SlotResources {
         FrameTimestamps timestamps;
         FrameReadbacks readbacks;
-        bool endsFrame{};
+        uint64_t measuredSequence{};
     };
     ModularFramePipeline(radray::DeviceContext& device,radray::unique_ptr<MeshPassResources> resources,
         radray::unique_ptr<OutputPassResources> output,radray::unique_ptr<RenderProgramLibrary> programs,
@@ -64,8 +63,9 @@ private:
     const TerrainFrame* _pending{};
     CommandTape* _tape{};
     BufferRegistry* _buffers{};
-    void PublishCompleted(uint64_t sequence);
+    struct Measurement { rn_batch_telemetry report{}; bool retired{}; };
+    radray::map<uint64_t, Measurement> _measurements;
     radray::array<uint64_t,2> _inFlight{};
-    uint64_t _submitted{},_completed{},_gpuSequence{},_gpuNanoseconds{},_pendingGpuNs{};
+    uint64_t _submitted{},_completed{};
 };
 }

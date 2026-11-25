@@ -22,6 +22,115 @@ class NativeCommandTapeTest {
     @TempDir Path directory;
 
     @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void offscreenAndPresentedBatchesRetireSeparatelyAtAbiStride(NativeEnvironment.Backend backend) throws Throwable {
+        try(var env=new NativeEnvironment(NativeTestSupport.locate(directory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var runtime=env.createRuntime(); var renderer=runtime.createRenderer(NativeTestSupport.shaders()); var arena=Arena.ofConfined();
+            var window=new NativeSwapchainTest.Window(); var chain=renderer.createSwapchain(window.hwnd,64,32,NativeSwapchain.PresentMode.IMMEDIATE);
+            var color=renderer.createTexture(8,4,1,1,NativeTexture.Format.RGBA8,NativeTexture.READBACK | NativeTexture.ATTACHMENT)) {
+            var handle=NativeTestSupport.handle(renderer);
+            var batch=arena.allocate(96,8); var result=arena.allocate(56,8);
+            batch.set(ValueLayout.JAVA_INT,0,96);
+            assertEquals(0,(int)renderer.bindings.submitFrame.invokeExact(handle,batch,result)); // Unmeasured warmup.
+            var clear=arena.allocate(56,8);
+            clear.set(ValueLayout.JAVA_INT,0,1);
+            clear.set(ValueLayout.JAVA_INT,4,56);
+            clear.set(ValueLayout.JAVA_INT,8,color.id());
+            clear.set(ValueLayout.JAVA_INT,28,8);
+            clear.set(ValueLayout.JAVA_INT,32,4);
+            clear.set(ValueLayout.JAVA_FLOAT,48,1);
+            var empty=MemorySegment.NULL;
+            assertEquals(2,renderer.submitFrame(clear,empty,empty,null,java.util.List.of(),true).sequence());
+            var blit=arena.allocateFrom(ValueLayout.JAVA_INT,6,16,color.id(),0);
+            assertEquals(3,renderer.submitFrame(blit,empty,empty,chain,java.util.List.of(),true).sequence());
+            renderer.flush();
+            var records=arena.allocate(2L*152,8); var count=arena.allocate(ValueLayout.JAVA_INT);
+            assertEquals(0,(int)renderer.bindings.drainTelemetry.invokeExact(handle,records,2,count));
+            assertEquals(2,count.get(ValueLayout.JAVA_INT,0));
+            for(int i=0;i<2;i++) {
+                var record=records.asSlice(i*152L,152);
+                assertEquals(2+i,record.get(ValueLayout.JAVA_LONG,0));
+                assertEquals(0,record.get(ValueLayout.JAVA_INT,8)&~1);
+                assertEquals(0,record.get(ValueLayout.JAVA_INT,12));
+                assertTrue(record.get(ValueLayout.JAVA_LONG,40)>0);
+                if(runtime.deviceInfo().timestamps().validBits()>0) {
+                    assertEquals(1,record.get(ValueLayout.JAVA_INT,8));
+                    assertTrue(record.get(ValueLayout.JAVA_LONG,16)>0);
+                } else if(record.get(ValueLayout.JAVA_INT,8)==0) assertEquals(0,record.get(ValueLayout.JAVA_LONG,16));
+            }
+            assertEquals(0,(int)renderer.bindings.drainTelemetry.invokeExact(handle,records,2,count));
+            assertEquals(0,count.get(ValueLayout.JAVA_INT,0));
+        }
+    }
+
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void rawEntryErrorsLeaveRendererOpenAndMalformedContentsSealIt(NativeEnvironment.Backend backend) throws Throwable {
+        try(var env=new NativeEnvironment(NativeTestSupport.locate(directory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var runtime=env.createRuntime(); var renderer=runtime.createRenderer(NativeTestSupport.shaders()); var arena=Arena.ofConfined()) {
+            var raw=renderer.bindings.submitFrame;
+            var handle=NativeTestSupport.handle(renderer);
+            var batch=arena.allocate(96,8); var result=arena.allocate(56,8);
+            assertEquals(1,(int)raw.invokeExact(handle,batch,result));
+            batch.set(ValueLayout.JAVA_INT,0,96); batch.set(ValueLayout.ADDRESS,8,handle);
+            assertEquals(1,(int)raw.invokeExact(handle,batch,result));
+            batch.set(ValueLayout.ADDRESS,8,MemorySegment.NULL);
+            assertEquals(0,(int)raw.invokeExact(handle,batch,result));
+            assertEquals(1,result.get(ValueLayout.JAVA_LONG,0));
+            var bad=arena.allocate(8,8);
+            bad.set(ValueLayout.JAVA_INT,0,-1); bad.set(ValueLayout.JAVA_INT,4,8);
+            batch.set(ValueLayout.ADDRESS,16,bad); batch.set(ValueLayout.JAVA_LONG,24,8);
+            assertEquals(1,(int)raw.invokeExact(handle,batch,result));
+            assertEquals(0,result.get(ValueLayout.JAVA_LONG,0));
+            assertEquals(2,result.get(ValueLayout.JAVA_INT,52));
+            batch.set(ValueLayout.ADDRESS,16,MemorySegment.NULL); batch.set(ValueLayout.JAVA_LONG,24,0);
+            assertEquals(1,(int)raw.invokeExact(handle,batch,result));
+            assertEquals(0,result.get(ValueLayout.JAVA_LONG,0));
+        }
+    }
+
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void reusedAndColdBuffersPublishInitialDataBeforeAnyMap(NativeEnvironment.Backend backend) throws Throwable {
+        try(var env=new NativeEnvironment(NativeTestSupport.locate(directory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var runtime=env.createRuntime(); var renderer=runtime.createRenderer(NativeTestSupport.shaders());
+            var read=renderer.createBuffer(GpuBuffer.USAGE_MAP_READ|GpuBuffer.USAGE_COPY_DST,4,null,null)) {
+            var handle=NativeTestSupport.handle(renderer);
+            int write=GpuBuffer.USAGE_MAP_WRITE, src=GpuBuffer.USAGE_COPY_SRC, dst=GpuBuffer.USAGE_COPY_DST;
+            for(int usage:new int[]{src|write|1024,src|write,src,src|dst|write}) {
+                for(int attempt=0;attempt<2;++attempt) {
+                    int expected=0x10203000+usage+attempt;
+                    var bytes=java.nio.ByteBuffer.allocate(4).order(java.nio.ByteOrder.nativeOrder()).putInt(0,expected);
+                    try(var buffer=NativeBuffer.create(renderer,handle,usage,4,bytes,null,NativeBuffer.WriteSource.HOST_SHADOW);
+                        var tape=new CommandTape(renderer)) {
+                        boolean mapped=(usage&write)!=0 && (usage&dst)==0;
+                        assertEquals(mapped,renderer.bufferResult.get(ValueLayout.ADDRESS,8).address()!=0);
+                        tape.copyBuffer(buffer,0,read,0,4);
+                        tape.submit();
+                        renderer.flush();
+                        try(var view=read.slice().map(true,false)) { assertEquals(expected,view.data().getInt(0)); }
+                    }
+                    for(int i=0;i<2;i++) try(var recycle=new CommandTape(renderer)) { recycle.submit(); }
+                    renderer.flush();
+                }
+            }
+        }
+    }
+
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void repeatedCallbacksSurviveExceptionsAndNestedPolling(NativeEnvironment.Backend backend) throws Throwable {
+        try(var env=new NativeEnvironment(NativeTestSupport.locate(directory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var runtime=env.createRuntime(); var renderer=runtime.createRenderer(NativeTestSupport.shaders());
+            var tape=new CommandTape(renderer)) {
+            var calls=new ArrayList<Integer>();
+            var error=new AssertionError("completion");
+            tape.onCompleted(()->{calls.add(1); renderer.pollCompleted(); throw error;});
+            tape.onCompleted(()->calls.add(2));
+            tape.submit();
+            assertSame(error,assertThrows(AssertionError.class,renderer::flush));
+            renderer.pollCompleted();
+            assertEquals(java.util.List.of(1,2),calls);
+        }
+    }
+
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
     void headlessReplayPreservesSubresourceOrderAndRecordingLifetimes(NativeEnvironment.Backend backend) throws Exception {
         try(var env=new NativeEnvironment(NativeTestSupport.locate(directory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var runtime=env.createRuntime(); var renderer=runtime.createRenderer(NativeTestSupport.shaders());
@@ -63,17 +172,27 @@ class NativeCommandTapeTest {
         }
     }
     @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
-    void malformedTapePoisonsRendererWithoutPublishingASequence(NativeEnvironment.Backend backend) throws Exception {
+    void missingColorAttachmentInBalancedPassFailsBeforeEnqueue(NativeEnvironment.Backend backend) throws Throwable {
         try(var env=new NativeEnvironment(NativeTestSupport.locate(directory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var runtime=env.createRuntime(); var renderer=runtime.createRenderer(NativeTestSupport.shaders()); var arena=Arena.ofConfined()) {
-            var command=arena.allocate(8,8);
-            command.set(ValueLayout.JAVA_INT,0,-1);
-            command.set(ValueLayout.JAVA_INT,4,8);
-            var result=renderer.submitFrame(command,MemorySegment.NULL,null);
-            assertFalse(result.success());
-            assertFalse(result.deviceLost());
-            assertEquals(0,result.sequence());
-            assertFalse(renderer.submitFrame(MemorySegment.NULL,MemorySegment.NULL,null).success());
+            var commands=arena.allocate(40,8);
+            commands.set(ValueLayout.JAVA_INT,0,12);
+            commands.set(ValueLayout.JAVA_INT,4,32);
+            commands.set(ValueLayout.JAVA_INT,8,1);
+            commands.set(ValueLayout.JAVA_INT,24,8);
+            commands.set(ValueLayout.JAVA_INT,28,8);
+            commands.set(ValueLayout.JAVA_INT,32,13);
+            commands.set(ValueLayout.JAVA_INT,36,8);
+            var desc=arena.allocate(96,8);
+            desc.set(ValueLayout.JAVA_INT,0,96);
+            desc.set(ValueLayout.ADDRESS,16,commands);
+            desc.set(ValueLayout.JAVA_LONG,24,commands.byteSize());
+            var result=arena.allocate(56,8);
+            var handle=NativeTestSupport.handle(renderer);
+            assertEquals(1,(int)renderer.bindings.submitFrame.invokeExact(handle,desc,result));
+            assertEquals(0,result.get(ValueLayout.JAVA_LONG,0));
+            assertEquals(2,result.get(ValueLayout.JAVA_INT,52));
+            assertThrows(IllegalStateException.class,()->renderer.submitFrame(MemorySegment.NULL,MemorySegment.NULL,null));
         }
     }
     @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
@@ -89,11 +208,12 @@ class NativeCommandTapeTest {
             var shown=display.submit();
             assertTrue(shown.success());
             assertEquals(2,shown.sequence());
-            assertTrue(shown.outcome()==0 || shown.outcome()==4,"surface outcome "+shown.outcome());
+            int outcome=renderer.flush();
+            assertTrue(outcome==0 || outcome==4,"surface outcome "+outcome);
             post.captureColor(new Region(texture,1,0,0,0,1,1),103);
             var after=post.submit();
             assertEquals(3,after.sequence());
-            assertEquals(3,after.outcome());
+            assertEquals(outcome,renderer.flush());
             assertTrue(renderer.awaitSubmission(after.sequence(),-1));
             assertArrayEquals(new byte[]{-1,0,0,-1},renderer.pollCapture(103).orElseThrow().rgba());
         }
@@ -193,7 +313,7 @@ class NativeCommandTapeTest {
              var runtime = env.createRuntime(); var renderer = runtime.createRenderer(NativeTestSupport.shaders());
              var device = new dev.raynium.client.renderpearl.RayniumGpuDevice(runtime, renderer, true);
              var gpu = (NativeBuffer)device.createBuffer(null, GpuBuffer.USAGE_MAP_WRITE | GpuBuffer.USAGE_COPY_DST | GpuBuffer.USAGE_COPY_SRC, 8);
-             var host = (NativeBuffer)device.createBuffer(null, GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, 8);
+             var host = (NativeBuffer)device.createBuffer(null, GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, 16);
              var mapped = host.map(true, false)) {
             var encoder = device.createCommandEncoder();
             try (var slice = gpu.map(0, 4, false, true)) {
@@ -203,6 +323,11 @@ class NativeCommandTapeTest {
                 for (int index = 0; index < 2; ++index) {
                     var temporary = encoder.transientMemory().allocateCpu(32, 4, 32, 1);
                     temporary.putInt(0, index);
+                    try(var staging=encoder.transientMemory().allocateStaging(4,4,0,4,4)) {
+                        staging.data().putInt(0,0x12340000+index);
+                        var range=staging.slice();
+                        device.currentBatch().copyBuffer((NativeBuffer)range.buffer(),range.offset(),host,8L+4L*index,4);
+                    }
                     encoder.submit();
                 }
                 assertEquals(33, slice.data().getInt(0));
@@ -215,6 +340,8 @@ class NativeCommandTapeTest {
             }
             assertEquals(33, mapped.data().getInt(0));
             assertEquals(22, mapped.data().getInt(4));
+            assertEquals(0x12340000,mapped.data().getInt(8));
+            assertEquals(0x12340001,mapped.data().getInt(12));
         }
     }
     @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)

@@ -6,7 +6,6 @@ import com.mojang.renderpearl.api.textures.GpuTexture;
 import com.mojang.renderpearl.backend.api.CommandEncoderBackend;
 import com.mojang.renderpearl.backend.api.RenderPassBackend;
 import dev.raynium.bridge.NativeBuffer;
-import dev.raynium.bridge.NativeFrameBuffer;
 import dev.raynium.bridge.NativeRenderer;
 import dev.raynium.bridge.NativeTexture;
 import java.lang.foreign.MemorySegment;
@@ -19,7 +18,7 @@ final class RayniumCommandEncoderBackend implements CommandEncoderBackend, AutoC
     private final NativeRenderer renderer;
     private final RayniumTransientMemory memory;
     private final RayniumRenderPassBackend recorder=new RayniumRenderPassBackend();
-    private final ArrayDeque<NativeFrameBuffer> freeViews = new ArrayDeque<>();
+    private final CommandTape.ViewPool freeViews = new CommandTape.ViewPool();
     private final ArrayDeque<CommandTape.Storage> freeStorage = new ArrayDeque<>();
     private CommandTape tape;
     private RayniumRenderPassBackend.Lease activePass;
@@ -36,11 +35,12 @@ final class RayniumCommandEncoderBackend implements CommandEncoderBackend, AutoC
         if(activePass!=null) throw new IllegalStateException("Close the render pass before submission");
         boolean measuring=dev.raynium.client.benchmark.BenchmarkSession.isMeasuring();
         long start=measuring?System.nanoTime():0;
-        memory.seal(tape);
-        long sealed=measuring?System.nanoTime():0;
-        var result=tape.submit(measuring);
-        if(measuring) dev.raynium.client.benchmark.BenchmarkSession.nativeBatch(result,sealed-start,System.nanoTime()-sealed);
+        var submitting=tape;
+        memory.seal(submitting);
         tape=new CommandTape(renderer,freeViews,freeStorage);
+        long sealed=measuring?System.nanoTime():0;
+        var result=submitting.submit(measuring);
+        if(measuring) dev.raynium.client.benchmark.BenchmarkSession.nativeBatch(renderer,result,sealed-start,System.nanoTime()-sealed);
         renderer.pollCompleted();
     }
 
@@ -156,12 +156,13 @@ final class RayniumCommandEncoderBackend implements CommandEncoderBackend, AutoC
     }
 
     @Override public void close() {
-        if(activePass!=null) { activePass.close(); activePass=null; }
-        memory.close();
-        tape.close();
-        freeViews.forEach(NativeFrameBuffer::close);
-        freeViews.clear();
-        freeStorage.forEach(CommandTape.Storage::close);
-        freeStorage.clear();
+        try (var currentTape=tape; memory) {
+            if(activePass!=null) { activePass.close(); activePass=null; }
+            if(!renderer.isPoisoned()) renderer.flush();
+        } finally {
+            freeViews.close();
+            freeStorage.forEach(CommandTape.Storage::close);
+            freeStorage.clear();
+        }
     }
 }

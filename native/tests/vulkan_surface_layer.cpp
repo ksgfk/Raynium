@@ -2,6 +2,10 @@
 #define VK_NO_PROTOTYPES
 #include <vulkan/vk_layer.h>
 #include <cstring>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 
 namespace {
 PFN_vkGetInstanceProcAddr instanceProc{};
@@ -10,16 +14,31 @@ PFN_GetPhysicalDeviceProcAddr physicalProc{};
 VkInstance currentInstance{};
 VkDevice currentDevice{};
 VkSemaphore batchGate{};
-bool armGate{};
+std::atomic<bool> armGate{}, maskCounter{}, dedicatedBuffers{};
 
-enum Operation { None, Timeline, Image, Submit, Present, Acquire };
-Operation armed{};
-VkResult injected{};
-int hits{}, acquisitions{}, presentations{}, idleCalls{};
+enum Operation { None, Timeline, Image, Submit, Present, Acquire, MaskTimeline, CreateSwapchain, MapMemory, DedicatedBuffers };
+std::mutex gateMutex;
+std::condition_variable gateChanged;
+std::atomic<int> pauseSite{};
+bool atGate{}, gateExpired{};
+void checkpoint(Operation site) {
+    std::unique_lock lock(gateMutex);
+    if (pauseSite != site) return;
+    atGate = true;
+    gateChanged.notify_all();
+    if (!gateChanged.wait_for(lock, std::chrono::seconds(10), [] { return pauseSite == None; })) {
+        pauseSite = None;
+        gateExpired = true;
+    }
+    atGate = false;
+    gateChanged.notify_all();
+}
+std::atomic<Operation> armed{};
+std::atomic<VkResult> injected{}, createError{};
+std::atomic<int> hits{}, acquisitions{}, presentations{}, idleCalls{}, failedCreates{};
 
 bool take(Operation operation) {
-    if (armed != operation) return false;
-    armed = None;
+    if (!armed.compare_exchange_strong(operation, None)) return false;
     ++hits;
     return true;
 }
@@ -67,7 +86,23 @@ template<class F> F downstream(const char* name) {
 
 VKAPI_ATTR VkResult VKAPI_CALL counter(VkDevice device, VkSemaphore semaphore, uint64_t* value) {
     if (take(Timeline)) return injected;
+    if(maskCounter.load()) { *value=0; return VK_SUCCESS; }
     return downstream<PFN_vkGetSemaphoreCounterValue>("vkGetSemaphoreCounterValue")(device, semaphore, value);
+}
+VKAPI_ATTR VkResult VKAPI_CALL mapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset,
+        VkDeviceSize size, VkMemoryMapFlags flags, void** output) {
+    if (take(MapMemory)) return injected;
+    return downstream<PFN_vkMapMemory>("vkMapMemory")(device, memory, offset, size, flags, output);
+}
+VKAPI_ATTR void VKAPI_CALL bufferRequirements(VkDevice device, const VkBufferMemoryRequirementsInfo2* info,
+        VkMemoryRequirements2* requirements) {
+    downstream<PFN_vkGetBufferMemoryRequirements2>("vkGetBufferMemoryRequirements2")(device, info, requirements);
+    if (!dedicatedBuffers) return;
+    // A VMA suballocation could otherwise reuse a block already mapped by the upload pool.
+    for (auto* item = static_cast<VkBaseOutStructure*>(requirements->pNext); item; item = item->pNext) {
+        if (item->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS)
+            reinterpret_cast<VkMemoryDedicatedRequirements*>(item)->requiresDedicatedAllocation = VK_TRUE;
+    }
 }
 VKAPI_ATTR VkResult VKAPI_CALL image(VkDevice device, const VkImageCreateInfo* info,
         const VkAllocationCallbacks* allocator, VkImage* output) {
@@ -77,8 +112,7 @@ VKAPI_ATTR VkResult VKAPI_CALL image(VkDevice device, const VkImageCreateInfo* i
 VKAPI_ATTR VkResult VKAPI_CALL submit(VkQueue queue, uint32_t count, const VkSubmitInfo* submits, VkFence fence) {
     if (take(Submit)) return injected;
     auto next = downstream<PFN_vkQueueSubmit>("vkQueueSubmit");
-    if (armGate) {
-        armGate = false;
+    if (armGate.exchange(false)) {
         const uint64_t value = 1;
         VkTimelineSemaphoreSubmitInfo times{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
         times.waitSemaphoreValueCount = 1;
@@ -96,14 +130,26 @@ VKAPI_ATTR VkResult VKAPI_CALL present(VkQueue queue, const VkPresentInfoKHR* in
     ++presentations;
     // Complete the real presentation and its semaphore wait before substituting WSI status.
     auto status = downstream<PFN_vkQueuePresentKHR>("vkQueuePresentKHR")(queue, info);
-    return status == VK_SUCCESS && take(Present) ? injected : status;
+    if(pauseSite==Present && status==VK_SUCCESS)
+        downstream<PFN_vkQueueWaitIdle>("vkQueueWaitIdle")(queue);
+    checkpoint(Present);
+    return status == VK_SUCCESS && take(Present) ? injected.load() : status;
 }
 VKAPI_ATTR VkResult VKAPI_CALL acquire(VkDevice device, VkSwapchainKHR chain, uint64_t timeout,
         VkSemaphore semaphore, VkFence fence, uint32_t* index) {
     ++acquisitions;
+    checkpoint(Acquire);
     if (armed == Acquire && injected < 0 && take(Acquire)) return injected;
     auto status = downstream<PFN_vkAcquireNextImageKHR>("vkAcquireNextImageKHR")(device, chain, timeout, semaphore, fence, index);
-    return status == VK_SUCCESS && take(Acquire) ? injected : status;
+    return status == VK_SUCCESS && take(Acquire) ? injected.load() : status;
+}
+VKAPI_ATTR VkResult VKAPI_CALL swapchain(VkDevice device,const VkSwapchainCreateInfoKHR* info,
+        const VkAllocationCallbacks* allocator,VkSwapchainKHR* result) {
+    if(auto error=createError.load(); error!=VK_SUCCESS) {
+        ++failedCreates;
+        return error;
+    }
+    return downstream<PFN_vkCreateSwapchainKHR>("vkCreateSwapchainKHR")(device,info,allocator,result);
 }
 VKAPI_ATTR VkResult VKAPI_CALL idle(VkDevice device) {
     ++idleCalls;
@@ -121,6 +167,10 @@ PFN_vkVoidFunction intercepted(const char* name) {
         {"vkGetInstanceProcAddr", reinterpret_cast<PFN_vkVoidFunction>(getInstanceProc)},
         {"vkGetDeviceProcAddr", reinterpret_cast<PFN_vkVoidFunction>(getDeviceProc)},
         {"vkGetSemaphoreCounterValue", reinterpret_cast<PFN_vkVoidFunction>(counter)},
+        {"vkCreateSwapchainKHR", reinterpret_cast<PFN_vkVoidFunction>(swapchain)},
+        {"vkMapMemory", reinterpret_cast<PFN_vkVoidFunction>(mapMemory)},
+        {"vkGetBufferMemoryRequirements2", reinterpret_cast<PFN_vkVoidFunction>(bufferRequirements)},
+        {"vkGetBufferMemoryRequirements2KHR", reinterpret_cast<PFN_vkVoidFunction>(bufferRequirements)},
         {"vkCreateImage", reinterpret_cast<PFN_vkVoidFunction>(image)},
         {"vkQueueSubmit", reinterpret_cast<PFN_vkVoidFunction>(submit)},
         {"vkQueuePresentKHR", reinterpret_cast<PFN_vkVoidFunction>(present)},
@@ -152,10 +202,28 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion
     return VK_SUCCESS;
 }
 
+extern "C" __declspec(dllexport) int pauseWorker(int operation) {
+    std::unique_lock lock(gateMutex);
+    if(operation<0)
+        return gateChanged.wait_for(lock,std::chrono::seconds(5),[] { return atGate; });
+    if(operation==None) {
+        pauseSite=None;
+        gateChanged.notify_all();
+        return !gateExpired;
+    }
+    if(pauseSite || atGate) return 0;
+    pauseSite=operation;
+    gateExpired=false;
+    return 1;
+}
+
 extern "C" __declspec(dllexport) void armSurfaceFault(int operation, int result) {
-    armed = static_cast<Operation>(operation);
+    if(operation==DedicatedBuffers) { dedicatedBuffers=result!=0; return; }
+    if(operation==MaskTimeline) { maskCounter=result!=0; return; }
+    if(operation==CreateSwapchain) { if(result) failedCreates=0; createError=static_cast<VkResult>(result); return; }
     injected = static_cast<VkResult>(result);
     hits = acquisitions = presentations = idleCalls = 0;
+    armed = static_cast<Operation>(operation);
 }
 // Hold the next batch on a real GPU timeline until Java has observed the previous batch.
 extern "C" __declspec(dllexport) int gateGpuBatch(int hold) {
@@ -185,6 +253,7 @@ extern "C" __declspec(dllexport) int surfaceFaultCounter(int kind) {
         case 1: return acquisitions;
         case 2: return presentations;
         case 3: return idleCalls;
+        case 4: return failedCreates;
         default: return -1;
     }
 }

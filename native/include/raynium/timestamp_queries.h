@@ -11,11 +11,10 @@ public:
     struct Slot { uint64_t sequence{},ticks{}; bool available{}; };
     struct Pool { explicit Pool(uint32_t count):slots(count) {} radray::vector<Slot> slots; };
     struct Write { radray::shared_ptr<Pool> pool; uint32_t slot; };
-    bool Create(uint32_t count,uint32_t& id);
+    void Register(uint32_t id,uint32_t count);
     bool Destroy(uint32_t id);
     radray::shared_ptr<Pool> Find(uint32_t id) const;
 private:
-    uint32_t _next{1};
     radray::unordered_map<uint32_t,radray::shared_ptr<Pool>> _pools;
 };
 

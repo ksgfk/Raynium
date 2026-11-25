@@ -8,6 +8,8 @@
   },
   "client": [
     "MinecraftBenchmarkMixin",
+    "MappableRingBufferMixin",
+    "StagedBufferPoolMixin",
     "BenchmarkReferenceTimerMixin",
     "VisualValidationClockMixin",
     "VisualValidationSpriteMixin",

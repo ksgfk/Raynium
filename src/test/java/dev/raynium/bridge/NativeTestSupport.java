@@ -16,6 +16,11 @@ import org.slf4j.Logger;
 
 /** Owns raw C ABI handles so assertion failures cannot unload a DLL with live runtimes. */
 final class NativeTestSupport implements AutoCloseable {
+    static MemorySegment handle(NativeRenderer renderer) throws ReflectiveOperationException {
+        return (MemorySegment)java.lang.invoke.MethodHandles.privateLookupIn(NativeRenderer.class,java.lang.invoke.MethodHandles.lookup())
+            .findVarHandle(NativeRenderer.class,"handle",MemorySegment.class).get(renderer);
+    }
+
     static NativeShaderPack shaders() {
         try(var input=NativeTestSupport.class.getResourceAsStream("/assets/raynium/shaderpacks/default.rnsp")) {
             if(input==null) throw new IllegalStateException("Missing test shader pack");
@@ -34,7 +39,8 @@ final class NativeTestSupport implements AutoCloseable {
             var tape=new dev.raynium.client.renderpearl.CommandTape(renderer)) {
             tape.clearColor(new dev.raynium.client.renderpearl.CommandTape.Region(texture,0,0,0,0,16,16),1,0,0,1);
             tape.blitToSurface(texture,0,chain);
-            return tape.submit().outcome();
+            tape.submit();
+            return renderer.flush();
         }
     }
     private final Arena arena = Arena.ofConfined();
@@ -66,7 +72,7 @@ final class NativeTestSupport implements AutoCloseable {
             create = linker.downcallHandle(symbols.find("rn_create_runtime").orElseThrow(),
                     FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             destroy = linker.downcallHandle(symbols.find("rn_destroy_runtime").orElseThrow(),
-                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
+                    FunctionDescriptor.of(ValueLayout.JAVA_INT,ValueLayout.ADDRESS));
             createRenderer = linker.downcallHandle(symbols.find("rn_create_renderer").orElseThrow(),
                     FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             envDesc = arena.allocate(12, 4);
@@ -135,7 +141,7 @@ final class NativeTestSupport implements AutoCloseable {
 
     void destroy(MemorySegment handle) {
         try {
-            destroy.invokeExact(handle);
+            if((int)destroy.invokeExact(handle)!=0) throw new IllegalStateException("Runtime destruction failed");
             runtimes.remove(handle);
         } catch (RuntimeException | Error failure) {
             throw failure;

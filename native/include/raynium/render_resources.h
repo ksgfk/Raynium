@@ -14,6 +14,7 @@ RenderBuffer CreateBuffer(radray::gpu::Device&, uint64_t, radray::gpu::MemoryTyp
 void TextureBarrier(radray::gpu::CommandBuffer&, radray::gpu::Texture*, radray::gpu::TextureStates,
                     radray::gpu::TextureStates);
 void BufferBarrier(radray::gpu::CommandBuffer&, radray::gpu::Buffer*, radray::gpu::BufferStates, radray::gpu::BufferStates);
+bool ValidSwapchainDesc(const rn_swapchain_desc& desc);
 class Swapchain final {
 public:
     static bool Create(radray::DeviceContext&,const rn_swapchain_desc&,radray::unique_ptr<Swapchain>&);

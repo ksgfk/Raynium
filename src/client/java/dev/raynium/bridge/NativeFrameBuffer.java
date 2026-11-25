@@ -40,6 +40,8 @@ public final class NativeFrameBuffer implements AutoCloseable {
     private final Storage upload=new Storage();
     private final int[] counts=new int[5];
     private final ArrayList<Object> borrowed=new ArrayList<>();
+    private Arena externalCopies;
+    private final ArrayList<dev.raynium.client.terrain.MeshPayload.UploadLease> uploads=new ArrayList<>();
     private int layoutCount;
     private long uploadCursor;
     private boolean closed;
@@ -50,11 +52,18 @@ public final class NativeFrameBuffer implements AutoCloseable {
     public static final int LAYOUT_FLAG_FINITE_BOUNDS=1;
     public static final int LAYOUT_FLAG_WIREFRAME_GROUPS=2;
 
-    public NativeFrameBuffer() { for(int i=0;i<arrays.length;i++) arrays[i]=new Storage(); }
+    private final boolean pooledTerrain;
+    public NativeFrameBuffer() { this(null); }
+    public NativeFrameBuffer(dev.raynium.client.terrain.RetainedTerrain.ViewAccess access) {
+        pooledTerrain=access!=null;
+        for(int i=0;i<arrays.length;i++) arrays[i]=new Storage();
+    }
+    public boolean isTerrainStorage() { return pooledTerrain; }
+    public boolean isClosed() { return closed; }
 
     public void begin(int visibleCapacity,int removedCapacity,int meshCapacity,int indexCapacity,long uploadBytes) {
         if(closed) throw new IllegalStateException("Frame buffer is closed");
-        borrowed.clear();
+        clearBorrowed();
         arrays[0].reserve(24L*indexCapacity);
         arrays[1].reserve((long)MESH_UPDATE_STRIDE*meshCapacity);
         arrays[2].reserve(8L*Math.max(256,removedCapacity));
@@ -71,7 +80,10 @@ public final class NativeFrameBuffer implements AutoCloseable {
         if(owner!=null) borrowed.add(owner);
     }
     public void clearBorrowed() {
+        for(var upload:uploads) upload.close();
+        uploads.clear();
         borrowed.clear();
+        if(externalCopies!=null) { externalCopies.close(); externalCopies=null; }
     }
     public void terrain(int albedo,int light,int anisotropy) {
         descriptor.set(JAVA_INT,84,albedo); descriptor.set(JAVA_INT,88,light); descriptor.set(JAVA_INT,92,anisotropy);
@@ -93,12 +105,28 @@ public final class NativeFrameBuffer implements AutoCloseable {
         MemorySegment.copy(MemorySegment.ofArray(values),0,upload.segment,offset,values.length*4L);
         indexHeader(id,upload.segment.asSlice(offset),values.length);
     }
+    private MemorySegment own(MemorySegment source,long bytes) {
+        if(externalCopies==null) externalCopies=Arena.ofConfined();
+        var copy=externalCopies.allocate(bytes,8);
+        copy.copyFrom(source.asSlice(0,bytes));
+        return copy;
+    }
+    public void indexPooled(long id,dev.raynium.client.terrain.MeshPayload.IndexSnapshot snapshot) {
+        var lease=snapshot.pinIndices();
+        uploads.add(lease);
+        indexHeader(id,lease.bytes(),snapshot.count);
+    }
+    public void meshPooled(long id,dev.raynium.client.terrain.MeshPayload mesh) {
+        var lease=mesh.pinVertices();
+        uploads.add(lease);
+        meshRecord(id,lease.bytes(),mesh.vertexCount,mesh.mode,mesh.groupQuadCounts,mesh.layoutFlags,
+                mesh.minBounds,mesh.maxBounds,mesh.originalQuadGroups);
+    }
     public void indexDirect(long id,MemorySegment nativeIndices,int count,Object owner) {
         long bytes=count*4L;
         if(nativeIndices==null || !nativeIndices.isNative() || nativeIndices.byteSize()<bytes)
             throw new IllegalArgumentException("Direct terrain indices must be a native segment covering count*4 bytes");
-        retainBorrowed(owner);
-        indexHeader(id,nativeIndices,count);
+        indexHeader(id,own(nativeIndices,bytes),count);
     }
     public void mesh(long id,byte[] vertices,int vertexCount,int layer) {
         if(vertexCount*28L!=vertices.length) throw new IllegalArgumentException("Vertex byte count mismatch");
@@ -114,6 +142,10 @@ public final class NativeFrameBuffer implements AutoCloseable {
         long bytes=vertexCount*28L;
         if(nativeVertices==null || !nativeVertices.isNative() || nativeVertices.byteSize()<bytes)
             throw new IllegalArgumentException("Direct terrain vertices must be a native segment covering vertexCount*28 bytes");
+        meshRecord(id,own(nativeVertices,bytes),vertexCount,layer,groupQuadCounts,layoutFlags,minBounds,maxBounds,wireframeGroups);
+    }
+    private void meshRecord(long id,MemorySegment nativeVertices,int vertexCount,int layer,
+            int[] groupQuadCounts,int layoutFlags,float[] minBounds,float[] maxBounds,byte[] wireframeGroups) {
         if(groupQuadCounts==null || groupQuadCounts.length!=7 || minBounds==null || minBounds.length!=3 || maxBounds==null || maxBounds.length!=3)
             throw new IllegalArgumentException("Invalid preanalyzed terrain layout arrays");
         MemorySegment wfPtr=MemorySegment.NULL;
@@ -136,7 +168,6 @@ public final class NativeFrameBuffer implements AutoCloseable {
         ls.set(JAVA_INT,lo+64,wfLen);
         ls.set(JAVA_INT,lo+68,0);
 
-        retainBorrowed(owner);
         var s=arrays[1].segment; long o=counts[1]++*(long)MESH_UPDATE_STRIDE;
         s.set(JAVA_LONG,o,id); s.set(ADDRESS,o+8,nativeVertices);
         s.set(JAVA_INT,o+16,vertexCount); s.set(JAVA_INT,o+20,layer);
@@ -196,7 +227,7 @@ public final class NativeFrameBuffer implements AutoCloseable {
     }
     @Override public void close() {
         if(closed) return;
-        borrowed.clear();
+        clearBorrowed();
         for(var storage:arrays) storage.close();
         layouts.close();
         upload.close();

@@ -9,6 +9,7 @@ import org.joml.Vector4f;
 
 public final class TerrainTestPass {
     private TerrainTestPass() {}
+    public static int queryPoolId(RayniumQueryPool pool) { return pool.id(); }
     public static CommandTape batch(RayniumGpuDevice device) { return device.currentBatch(); }
     public static void record(CommandTape tape,CommandTape.TerrainView view,NativeTexture color,NativeTexture depth,
                               NativeTexture atlas,NativeTexture light) {

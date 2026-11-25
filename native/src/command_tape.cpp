@@ -1,4 +1,6 @@
 #include <raynium/command_tape.h>
+#include <raynium/raster_records.h>
+#include <raynium/frame_packet.h>
 #include <radray/logger.h>
 #include <raynium/output_pass.h>
 #include <algorithm>
@@ -17,6 +19,7 @@ struct WireRegion { uint32_t id,mip,layer,x,y,width,height; };
 struct WireClear { Header header; WireRegion target; float value[4]; uint32_t reserved; };
 struct WireCapture { Header header; WireRegion source; uint32_t reserved; uint64_t id; };
 struct WireUpload { Header header; WireRegion target; uint32_t pitch; uint64_t offset; };
+struct WireWriteBuffer { Header header; uint32_t id,reserved; uint64_t offset,size,uploadOffset; };
 struct WireBlit { Header header; uint32_t texture,mip; };
 struct WireCopy { Header header; WireRegion source,destination; };
 static_assert(sizeof(WireClear)==56 && sizeof(WireCapture)==48 && sizeof(WireUpload)==48 && sizeof(WireCopy)==64);
@@ -56,6 +59,80 @@ void CopyRegion(radray::RDGBuilder& graph,radray::RDGTextureHandle source,const 
             return true;
         }).ReadTexture(source).WriteTexture(destination);
 }
+}
+
+bool InspectCommandStream(const rn_batch_desc& batch, radray::vector<uint64_t>& captures, radray::vector<PacketQuery>& queries) {
+    std::span remaining(static_cast<const radray::byte*>(batch.commands), size_t(batch.command_bytes));
+    bool pass = false, blit = false;
+    while (!remaining.empty()) {
+        Header h{};
+        if (remaining.size() < sizeof(h)) return false;
+        std::memcpy(&h, remaining.data(), sizeof(h));
+        if (h.size < sizeof(h) || h.size > remaining.size() || h.size % 8) return false;
+        const auto bytes = remaining.first(h.size);
+        remaining = remaining.subspan(h.size);
+        if (pass && h.opcode != Opcode::EndPass && h.opcode != Opcode::Draw && h.opcode != Opcode::RetainedTerrain &&
+            h.opcode != Opcode::InstancedGeometry && h.opcode != Opcode::WriteTimestamp) return false;
+        switch (h.opcode) {
+        case Opcode::BeginPass: {
+            wire::Pass header{};
+            if (!wire::ReadRasterHeader(bytes,header)) return false;
+            pass=true;
+            break;
+        }
+        case Opcode::EndPass: if (!pass || h.size != sizeof(h)) return false; pass = false; break;
+        case Opcode::Draw: {
+            wire::Draw header{};
+            if (!pass || !wire::ReadRasterHeader(bytes,header)) return false;
+            break;
+        }
+        case Opcode::InstancedGeometry: {
+            wire::Geometry header{};
+            if (!pass || !wire::ReadRasterHeader(bytes,header) || header.uploadOffset>batch.instance_upload_bytes ||
+                uint64_t(header.instanceCount)*header.instanceStride>batch.instance_upload_bytes-header.uploadOffset) return false;
+            break;
+        }
+        case Opcode::RetainedTerrain: {
+            wire::Terrain terrain{};
+            if (!pass || !Read(bytes,terrain) || terrain.view>=batch.view_count || terrain.stage>OitAccumulate) return false;
+            break;
+        }
+        case Opcode::BlitToSurface:
+            if (blit || !batch.surface || h.size != sizeof(WireBlit)) return false;
+            blit = true;
+            break;
+        case Opcode::CaptureColor: {
+            WireCapture capture{};
+            if (!Read(bytes, capture) || !capture.id || capture.reserved) return false;
+            captures.push_back(capture.id);
+            break;
+        }
+        case Opcode::WriteTimestamp: {
+            PacketQuery query{};
+            if (!Read(bytes.subspan(sizeof(h)), query)) return false;
+            queries.push_back(query);
+            break;
+        }
+        case Opcode::ClearColor: case Opcode::ClearDepth: {
+            WireClear clear{};
+            if (!Read(bytes,clear) || clear.reserved ||
+                (h.opcode==Opcode::ClearDepth && !(clear.value[0]>=0 && clear.value[0]<=1))) return false;
+            break;
+        }
+        case Opcode::UploadTexture: if (h.size != sizeof(WireUpload)) return false; break;
+        case Opcode::CopyTexture: if (h.size != sizeof(WireCopy)) return false; break;
+        case Opcode::WriteBufferBytes: {
+            WireWriteBuffer write{};
+            if (!Read(bytes,write) || write.reserved || !write.size || write.uploadOffset>batch.upload_bytes ||
+                write.size>batch.upload_bytes-write.uploadOffset) return false;
+            break;
+        }
+        case Opcode::CopyBufferBytes: if (h.size != 40) return false; break;
+        case Opcode::BufferToTexture: case Opcode::TextureToBuffer: if (h.size != 56) return false; break;
+        default: return false;
+        }
+    }
+    return !pass && blit == (batch.surface != nullptr);
 }
 
 void CommandTape::Measure(rn_frame_metrics& metrics) const {
@@ -195,7 +272,7 @@ bool CommandTape::Decode(const rn_batch_desc& batch,const TextureRegistry& textu
             break;
         }
         case Opcode::WriteBufferBytes: {
-            struct Wire { Header header; uint32_t id,reserved; uint64_t offset,size,uploadOffset; } wire{};
+            WireWriteBuffer wire{};
             if(!Read(bytes,wire) || wire.reserved) return false;
             auto target=buffers.Find(wire.id);
             if(!target || !(target->usage&RN_BUFFER_COPY_DST) || !target->Contains(wire.offset,wire.size) ||
@@ -268,12 +345,12 @@ bool CommandTape::PrepareReadbacks(Device& device,FrameReadbacks& frame) {
             image->alignedPitch=uint32_t(pitch);
             image->direct=image->offset%placement==0 && image->pitch%alignment==0 &&
                 image->buffer->Contains(image->offset,image->pitch*area.Height);
-            if(!image->buffer->host.empty() && !frame.Reserve(image->buffer,image->offset,row,area.Height,pitch,placement,image->stagingOffset))
+            if(image->buffer->IsReadback() && !frame.Reserve(image->buffer,image->offset,row,area.Height,pitch,placement,image->stagingOffset))
                 return false;
         }
-        if(auto* write=std::get_if<WriteBuffer>(&command); write && !write->target->host.empty())
+        if(auto* write=std::get_if<WriteBuffer>(&command); write && write->target->IsReadback())
             frame.AddInline(write->target,write->offset,{write->borrowed.begin(),write->borrowed.end()});
-        if(auto* copy=std::get_if<CopyBuffer>(&command); copy && !copy->destination->host.empty()) {
+        if(auto* copy=std::get_if<CopyBuffer>(&command); copy && copy->destination->IsReadback()) {
             if(!frame.Reserve(copy->destination,copy->dstOffset,copy->size,1,copy->size,
                               std::max<uint64_t>(1,device.GetDetail().BufferCopyOffsetAlignment),copy->stagingOffset)) return false;
         }
@@ -294,7 +371,7 @@ void CommandTape::ReplayTextureBuffer(radray::RDGBuilder& graph,FrameTextureImpo
     auto texture=imports.Import(op.image.texture,op.toImage && op.image.full);
     const auto& region=op.image.area;
     const uint64_t row=uint64_t(region.Width)*GetTextureFormatBytesPerPixel(op.image.texture->GetDesc().Format);
-    const bool host=!op.buffer->host.empty();
+    const bool host=op.buffer->IsReadback();
     if(op.toImage && !op.direct && op.buffer->upload) {
         radray::vector<radray::byte> packed(row*region.Height);
         for(uint32_t y=0;y<region.Height;++y)
@@ -379,14 +456,14 @@ void CommandTape::Replay(radray::RDGBuilder& graph,FrameTextureImports& imports,
             graph.UploadTexture(handle,upload->target.area,radray::RDGTextureUploadSource::BorrowedBytes(upload->pixels,upload->pitch));
             graph.MarkOutput(handle);
         } else if(auto* write=std::get_if<WriteBuffer>(&command)) {
-            if(write->target->host.empty()) {
+            if(!write->target->IsReadback()) {
                 auto dst=write->target->Import(graph);
                 graph.UploadBuffer(dst,write->offset,radray::RDGUploadSource::BorrowedBytes(write->borrowed));
                 graph.MarkOutput(dst);
             }
         } else if(auto* copy=std::get_if<CopyBuffer>(&command)) {
             auto src=copy->source->Import(graph);
-            bool toHost=!copy->destination->host.empty();
+            bool toHost=copy->destination->IsReadback();
             auto dst=toHost?readbacks.Import(graph):copy->destination->Import(graph);
             if(copy->source==copy->destination) {
                 auto temp=graph.CreateBuffer({.Size=copy->size,.Memory=MemoryType::Device,.Usage=BufferUse::CopySource|BufferUse::CopyDestination});

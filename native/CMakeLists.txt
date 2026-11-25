@@ -154,6 +154,9 @@ endif()
 
 add_library(rayniumruntime SHARED
     src/bridge.cpp include/raynium/bridge.h include/raynium/exception.h
+    src/render_thread_session.cpp include/raynium/render_thread_session.h
+    src/frame_packet.cpp include/raynium/frame_packet.h
+    src/frame_queue.cpp include/raynium/frame_queue.h
     src/surface_submission.cpp include/raynium/surface_submission.h
     src/buffer_registry.cpp include/raynium/buffer_registry.h
     src/frame_readbacks.cpp include/raynium/frame_readbacks.h
@@ -164,7 +167,7 @@ add_library(rayniumruntime SHARED
     src/immediate_draw.cpp
     src/immediate_pipeline.cpp
     src/immediate_pass.cpp include/raynium/immediate_pass.h
-    src/command_tape.cpp include/raynium/command_tape.h
+    src/command_tape.cpp include/raynium/command_tape.h include/raynium/raster_records.h
     src/renderer.cpp include/raynium/renderer.h
     src/terrain_residency.cpp include/raynium/terrain_residency.h
     src/terrain_draw.cpp include/raynium/terrain_draw.h

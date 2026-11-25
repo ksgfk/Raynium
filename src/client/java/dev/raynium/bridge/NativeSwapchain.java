@@ -19,6 +19,7 @@ public final class NativeSwapchain implements AutoCloseable {
         checkOpen();
         try(var scratch=Arena.ofConfined()) {
             NativeBindings.call(owner.bindings.resizeSwapchain,"resize swapchain",handle,descriptor(scratch,hwnd,width,height,mode));
+            owner.configuredSurface();
         }
     }
     public void checkRecordingOwner(NativeRenderer renderer) {

@@ -14,7 +14,7 @@ import zipfile
 from shader_pack import RESOURCE_PATH, verify_shader_pack
 
 
-ABI_VERSION = 22
+ABI_VERSION = 23
 
 
 def digest(path):
@@ -92,7 +92,7 @@ def checked_dependencies(dll, environment):
     expected = {'rn_get_abi_version', 'rn_query_abi', 'rn_init_env', 'rn_destroy_env',
                 'rn_create_runtime', 'rn_destroy_runtime', 'rn_create_renderer', 'rn_destroy_renderer',
                 'rn_register_pipeline', 'rn_destroy_pipeline', 'rn_create_buffer', 'rn_destroy_buffer', 'rn_create_query_pool', 'rn_destroy_query_pool', 'rn_sync_query_pool',
-                'rn_query_device_info', 'rn_wait_submit', 'rn_submit_frame',
+                'rn_query_device_info', 'rn_wait_submit', 'rn_submit_frame', 'rn_flush_renderer', 'rn_drain_telemetry',
                 'rn_create_swapchain', 'rn_resize_swapchain', 'rn_destroy_swapchain',
                 'rn_create_texture', 'rn_upload_texture', 'rn_destroy_texture', 'rn_poll_capture',
                 'rn_upsert_model_mesh', 'rn_remove_model_mesh'}

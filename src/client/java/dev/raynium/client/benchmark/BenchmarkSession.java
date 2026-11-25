@@ -43,10 +43,11 @@ public final class BenchmarkSession {
     private final java.lang.management.ThreadMXBean threadBean=java.lang.management.ManagementFactory.getThreadMXBean();
     private final com.sun.management.ThreadMXBean allocationBean=(com.sun.management.ThreadMXBean)threadBean;
     private final long[] nativeTimes=new long[19];
-    private long frameStarted,frameCpuStarted,previousFrame,frameInterval,firstOutputSequence,lastGpuSequence,allocatedStart,gcCountStart,gcMillisStart;
+    private long frameStarted,frameCpuStarted,previousFrame,frameInterval,allocatedStart,gcCountStart,gcMillisStart;
+    private final long[] mappedWriteBytes=new long[dev.raynium.bridge.NativeBuffer.WriteSource.values().length];
     private boolean measuringFrame;
-
-    private BenchmarkSession(Path config) throws IOException {
+    private dev.raynium.bridge.NativeRenderer measuredRenderer;
+    BenchmarkSession(Path config) throws IOException {
         directory = config.toAbsolutePath().getParent();
         JsonObject json = JsonParser.parseString(Files.readString(config)).getAsJsonObject();
         route = new BenchmarkRoute(json.getAsJsonArray("route"));
@@ -93,23 +94,23 @@ public final class BenchmarkSession {
     public static void syncWaitEnd(long start) {
         active.nativeTimes[18]+=System.nanoTime()-start;
     }
+    public static void mappedWrites(dev.raynium.bridge.NativeBuffer.WriteSource source,long bytes) {
+        if(active!=null && active.measuringFrame) active.mappedWriteBytes[source.ordinal()]+=bytes;
+    }
     public static void nativeFrame() {
         if (active != null) active.nativeFrames++;
     }
 
     public static boolean profilerEnabled() { return isActive() && active.profiler; }
-    public static void nativeBatch(dev.raynium.bridge.NativeRenderer.SubmitResult batch,long javaPrepare,long nativeCall) {
-        if(active==null || !active.measuringFrame || batch.measurements()==null) return;
-        if(active.firstOutputSequence==0) active.firstOutputSequence=batch.sequence();
-        var sample=batch.measurements();
+    public static void nativeFrames(long count) {
+        if(isActive() && Minecraft.getInstance().level!=null) active.nativeFrames+=count;
+    }
+    public static void nativeBatch(dev.raynium.bridge.NativeRenderer renderer,dev.raynium.bridge.NativeRenderer.SubmitResult batch,long javaPrepare,long nativeCall) {
+        if(active==null || !active.measuringFrame || batch.sequence()<=0) return;
+        active.measuredRenderer=renderer;
         active.nativeTimes[0]=Math.max(0,active.nativeTimes[0])+javaPrepare;
         active.nativeTimes[1]=Math.max(0,active.nativeTimes[1])+nativeCall;
-        for(int i=2;i<15;++i) active.nativeTimes[i]=Math.max(0,active.nativeTimes[i])+sample[i];
-        System.arraycopy(sample,15,active.nativeTimes,15,3);
-        if(sample[0]>=active.firstOutputSequence && sample[0]>active.lastGpuSequence) {
-            active.lastGpuSequence=sample[0];
-            active.measurements.gpu(sample[1]);
-        }
+        active.measurements.expect(batch.sequence());
     }
     public static void referenceGpuSample(long nanos) { if(active!=null && active.phase.equals("measuring")) active.measurements.gpu(nanos); }
     public static void afterFrame() {
@@ -118,6 +119,7 @@ public final class BenchmarkSession {
         active.measurements.frame(end-active.routeStarted,active.frameInterval,end-active.frameStarted,
             active.threadBean.getCurrentThreadCpuTime()-active.frameCpuStarted,active.nativeTimes);
         active.measuringFrame=false;
+        if(active.measuredRenderer!=null) active.measuredRenderer.drainTelemetry(active.measurements::receive);
     }
     public static void beforeFrame(Minecraft client) {
         if(active!=null) {
@@ -228,17 +230,52 @@ public final class BenchmarkSession {
                     finish(client, true, "Route completed");
                 }
             }
-        } catch (RuntimeException failure) {
+        } catch (Throwable failure) {
+            if (phase.equals("finished")) throw failure;
             LOGGER.error("Benchmark failed", failure);
             finish(client, false, failure.toString());
+            if(failure instanceof Error error) throw error;
         }
     }
 
     private void finish(Minecraft client, boolean success, String message) {
+        finish(success,message,RenderMode.REFERENCE,()->{
+            if(measuredRenderer!=null) return measuredRenderer;
+            var device=com.mojang.blaze3d.systems.RenderSystem.getDevice();
+            return device instanceof dev.raynium.client.renderpearl.RayniumGpuDevice raynium ? raynium.nativeRenderer() : null;
+        },client::stop);
+    }
+
+    void finish(boolean success, String message, boolean reference,
+                java.util.function.Supplier<dev.raynium.bridge.NativeRenderer> activeRenderer, Runnable stop) {
+        Throwable failure=null;
+        try {
+            var renderer=reference ? null : activeRenderer.get();
+            if(renderer!=null && !renderer.isClosed()) {
+                try {
+                    if(renderer.isPoisoned()) throw new IllegalStateException("Renderer is terminal");
+                    renderer.flush();
+                } catch(Throwable flushFailure) { failure=flushFailure; }
+                renderer.drainTelemetry(measurements::receive);
+            }
+        } catch(Throwable next) {
+            if(failure==null) failure=next;
+            else if(failure!=next) failure.addSuppressed(next);
+        } finally {
+            if(failure!=null) LOGGER.error("Benchmark telemetry collection failed",failure);
+            try { writeResult(success && failure==null,failure==null ? message : message+"; "+failure); }
+            finally { stop.run(); }
+        }
+        if(failure instanceof Error error) throw error;
+    }
+    private void writeResult(boolean success,String message) {
         result.addProperty("status", success ? "completed" : "failed");
         result.addProperty("message", message);
         result.addProperty("phase", phase);
         result.addProperty("finishedAt", Instant.now().toString());
+        var writes=new JsonObject();
+        for(var source:dev.raynium.bridge.NativeBuffer.WriteSource.values()) writes.addProperty(source.name(),mappedWriteBytes[source.ordinal()]);
+        result.add("mappedWriteBytes",writes);
         result.addProperty("nativeFrames", nativeFrames);
         result.addProperty("routeNativeFrames", routeStarted == 0 ? 0 : nativeFrames - routeFirstFrame);
         result.addProperty("routeElapsedSeconds", routeStarted == 0 ? 0 : secondsSince(routeStarted));
@@ -252,7 +289,6 @@ public final class BenchmarkSession {
             LOGGER.error("Cannot save benchmark result", failure);
         }
         LOGGER.info("Benchmark {}: {}; requesting normal game shutdown", success ? "completed" : "failed", message);
-        client.stop();
     }
 
     private static long gcCount() { return java.lang.management.ManagementFactory.getGarbageCollectorMXBeans().stream().mapToLong(bean->Math.max(0,bean.getCollectionCount())).sum(); }

@@ -1,4 +1,5 @@
 #include <raynium/world_features.h>
+#include <raynium/raster_records.h>
 #include <raynium/frame_upload.h>
 #include <radray/logger.h>
 #include <algorithm>
@@ -126,20 +127,13 @@ bool InstancedGeometryFeature::Decode(std::span<const radray::byte> bytes, std::
     const ImmediatePipelineRegistry& pipelines, const BufferRegistry& buffers, const TextureRegistry& textures,
     const StaticGeometryRegistry& staticGeometry, const TerrainResidency& terrain,
     std::span<const TextureFormat> colors, const radray::Rect& area) {
-    struct Header {
-        uint32_t opcode, size, pipeline, bindings, runCount, instanceCount, instanceStride, push;
-        uint64_t uploadOffset;
-        radray::Rect scissor;
-    };
-    static_assert(sizeof(Header) == 56 && sizeof(WireRun) == 16);
-    Header h{};
-    if (bytes.size() < sizeof(h)) return false;
-    std::memcpy(&h, bytes.data(), sizeof(h));
-    if (!h.instanceStride || !h.runCount || !h.instanceCount || h.bindings > 256) return false;
+    static_assert(sizeof(WireRun)==16);
+    wire::Geometry h{};
+    if (!wire::ReadRasterHeader(bytes,h) || h.uploadOffset>instanceUploads.size() ||
+        uint64_t(h.instanceCount)*h.instanceStride>instanceUploads.size()-h.uploadOffset) return false;
     const uint64_t bindingBytes = uint64_t(h.bindings) * sizeof(ShaderResourceBindings::Binding);
     const uint64_t runBytes = uint64_t(h.runCount) * sizeof(WireRun);
     const uint64_t pushAligned = (uint64_t(h.push) + 7u) & ~uint64_t(7u);
-    if (bytes.size() != sizeof(h) + bindingBytes + runBytes + pushAligned) return false;
     const auto bindingSpan = bytes.subspan(sizeof(h), size_t(bindingBytes));
     const auto runSpan = bytes.subspan(sizeof(h) + size_t(bindingBytes), size_t(runBytes));
     const auto pushSpan = bytes.subspan(sizeof(h) + size_t(bindingBytes) + size_t(runBytes), size_t(pushAligned));

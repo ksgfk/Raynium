@@ -50,21 +50,30 @@ class NativeSurfaceFailureTest {
         private int submit(MemorySegment renderer,MemorySegment batch,MemorySegment output) throws Throwable {
             ++submits;
             targetedSurface=batch.reinterpret(96).get(ADDRESS,8).address()!=0;
-            var result=output.reinterpret(160);
+            var result=output.reinterpret(NativeBindings.SUBMIT_BYTES);
             if(failBeforeSubmit) result.fill((byte)0);
             else if((int)submit.invokeExact(renderer,batch,output)!=0) return 1;
             lastSequence=result.get(JAVA_LONG,0);
-            if(outcome>=0) result.set(JAVA_INT,8,outcome);
-            result.set(JAVA_INT,12,flags);
+            if(status!=0 && lastSequence!=0) {
+                var progress=result.asSlice(8);
+                if((int)wait.invokeExact(renderer,lastSequence,-1L,progress)!=0) return 1;
+            }
+            apply(result.asSlice(8));
+            if(status!=0) result.set(JAVA_INT,52,flags|2);
             return status;
+        }
+        private void apply(MemorySegment progress) {
+            if(outcome<0 || !targetedSurface) return;
+            progress.set(JAVA_INT,36,outcome==0?0:outcome);
+            progress.set(JAVA_INT,40,outcome);
         }
         private int waitSubmit(MemorySegment renderer,long sequence,long timeout,MemorySegment output) throws Throwable {
             ++waits;
-            if(!loseOnWait) return (int)wait.invokeExact(renderer,sequence,timeout,output);
-            var result=output.reinterpret(16);
-            result.fill((byte)0);
-            result.set(JAVA_INT,8,1);
-            return 1;
+            int status=(int)wait.invokeExact(renderer,sequence,timeout,output);
+            var progress=output.reinterpret(NativeBindings.WAIT_BYTES);
+            apply(progress);
+            if(loseOnWait) { progress.set(JAVA_INT,44,3); return 1; }
+            return status;
         }
     }
 
@@ -164,7 +173,7 @@ class NativeSurfaceFailureTest {
                         try(var unused=device.createSurface(window.handle,()->false)) { assertFalse(unused.isAcquired()); }
                         if(fault==3) {
                             d.loseOnWait=true;
-                            assertThrows(GpuDeviceLossException.class,()->old.awaitCompletion(-1));
+                            assertThrows(GpuDeviceLossException.class,renderer::pollCompleted);
                         } else {
                             surface.blitFromTexture(encoder,view);
                             d.status=1; d.flags=fault==2?1:0;

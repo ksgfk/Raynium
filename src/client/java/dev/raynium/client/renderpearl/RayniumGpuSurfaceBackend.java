@@ -36,10 +36,9 @@ final class RayniumGpuSurfaceBackend implements GpuSurfaceBackend {
         if(closed || configuration.width()<=0 || configuration.height()<=0) throw new SurfaceException("Invalid surface configuration");
         var mode=configuration.presentMode()==GpuSurface.PresentMode.FIFO?NativeSwapchain.PresentMode.FIFO:NativeSwapchain.PresentMode.IMMEDIATE;
         try {
-            if(recreate && swapchain!=null) { swapchain.close(); swapchain=null; }
             if(swapchain==null) {
                 swapchain=renderer.createSwapchain(hwnd,configuration.width(),configuration.height(),mode);
-                renderer.onTerminalSurface(this::releaseAcquisition);
+                renderer.onSurface(this::releaseAcquisition,this::recover);
             } else swapchain.resize(configuration.width(),configuration.height(),mode);
         } catch(IllegalStateException failed) { throw new SurfaceException(failed); }
         suboptimal=recreate=submittedBlit=false;
@@ -55,7 +54,7 @@ final class RayniumGpuSurfaceBackend implements GpuSurfaceBackend {
     }
     @Override public boolean isSuboptimal() { return suboptimal; }
     @Override public void acquireNextTexture() throws SurfaceException {
-        renderer.checkOpen();
+        renderer.pollCompleted();
         if(deferred!=null) { var error=deferred; deferred=null; throw error; }
         if(swapchain==null || closed) throw new SurfaceException("Surface currently unavailable");
         submittedBlit=false;
@@ -63,12 +62,9 @@ final class RayniumGpuSurfaceBackend implements GpuSurfaceBackend {
     @Override public void blitFromTexture(CommandEncoderBackend encoder,GpuTextureView view) {
         if(!(encoder instanceof RayniumCommandEncoderBackend backend) || !(view.texture() instanceof NativeTexture texture) || view.isClosed())
             throw new IllegalArgumentException("Invalid surface blit source");
-        backend.tape().blitToSurface(texture,view.baseMipLevel(),swapchain,this::presented);
+        backend.tape().blitToSurface(texture,view.baseMipLevel(),swapchain,ignored->submittedBlit=true);
     }
-    private void presented(int outcome) {
-        submittedBlit=true;
-        if((outcome==0 || outcome==4) && dev.raynium.client.benchmark.BenchmarkSession.isActive() &&
-           net.minecraft.client.Minecraft.getInstance().level!=null) dev.raynium.client.benchmark.BenchmarkSession.nativeFrame();
+    private void recover(int outcome) {
         switch(outcome) {
             case 0,1 -> {}
             case 4 -> suboptimal=true;
@@ -88,7 +84,7 @@ final class RayniumGpuSurfaceBackend implements GpuSurfaceBackend {
         if(closed) return;
         if(swapchain!=null) {
             swapchain.close();
-            renderer.onTerminalSurface(null);
+            renderer.onSurface(null,null);
         }
         closed=true;
     }

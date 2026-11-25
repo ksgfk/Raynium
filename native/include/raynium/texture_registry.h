@@ -27,7 +27,9 @@ struct UploadedTexture {
 class TextureRegistry final {
 public:
     bool Create(radray::DeviceContext&,const rn_uploaded_texture_desc&);
-    bool Upload(const rn_texture_upload_desc&);
+    struct Upload { rn_texture_upload_desc desc; radray::vector<radray::byte> bytes; };
+    static bool PrepareUpload(const rn_uploaded_texture_desc&,const rn_texture_upload_desc&,Upload&);
+    void Enqueue(Upload upload);
     bool Destroy(uint32_t);
     const UploadedTexture* Find(uint32_t) const;
     // Transfers pending CPU payloads and GPU owners into the graph, including upload-only frames.

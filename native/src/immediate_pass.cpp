@@ -1,18 +1,15 @@
 #include <raynium/immediate_pass.h>
+#include <raynium/raster_records.h>
 #include <algorithm>
 #include <cstring>
 
 namespace raynium {
 using namespace radray::gpu;
 radray::shared_ptr<ImmediatePass> ImmediatePass::Decode(std::span<const radray::byte> record,const TextureRegistry& registry,uint32_t maxColors) {
-    struct Header { uint32_t opcode,size,colors,depth; radray::Rect area; };
     struct Wire { uint32_t id,mip,layer,clear; ColorClearValue value; };
-    static_assert(sizeof(Header)==32 && sizeof(Wire)==32);
-    Header header{};
-    if(record.size()<sizeof(header)) return nullptr;
-    std::memcpy(&header,record.data(),sizeof(header));
-    if(header.colors>maxColors || header.depth>1 || record.size()!=sizeof(header)+(uint64_t(header.colors)+header.depth)*sizeof(Wire) ||
-        header.area.X<0 || header.area.Y<0 || !header.area.Width || !header.area.Height) return nullptr;
+    static_assert(sizeof(Wire)==32);
+    wire::Pass header{};
+    if(!wire::ReadRasterHeader(record,header) || header.colors>maxColors) return nullptr;
     auto result=radray::make_shared<ImmediatePass>();
     result->_area=header.area;
     result->_colors.resize(header.colors);

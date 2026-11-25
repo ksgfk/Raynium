@@ -55,7 +55,7 @@ public final class DirectUploadPool {
     }
 
     public static void release(ByteBuffer buffer) {
-        if (buffer == null || !buffer.isDirect()) return;
+        if (buffer == null || !buffer.isDirect() || buffer.isReadOnly()) return;
         int cap = buffer.capacity();
         if (cap < MIN_BUCKET_BYTES || cap > MAX_BUCKET_BYTES || (cap & (cap - 1)) != 0) return;
         while (true) {

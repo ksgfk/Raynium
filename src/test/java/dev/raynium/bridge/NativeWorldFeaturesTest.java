@@ -31,6 +31,24 @@ import static org.junit.jupiter.api.Assertions.*;
 class NativeWorldFeaturesTest {
     @TempDir Path directory;
 
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void reuploadUsesTheRealPageWhileTheRemovedMeshIsRetained(NativeEnvironment.Backend backend) throws java.io.IOException {
+        try (var env = new NativeEnvironment(NativeTestSupport.locate(directory), backend, NativeTestSupport.recordingLogger(new ArrayList<>()));
+             var runtime = env.createRuntime(); var renderer = runtime.createRenderer(NativeTestSupport.shaders());
+             var tape = new CommandTape(renderer)) {
+            int vertices = 400_000; // Two such meshes cannot share the 16 MiB page.
+            var data = new byte[vertices * 24];
+            int indices = vertices / 4 * 6;
+            int previousPage = renderer.upsertModelMesh(16, data, vertices, indices);
+            tape.submit();
+            renderer.removeModelMesh(16);
+            int nextPage = renderer.upsertModelMesh(16, data, vertices, indices);
+            assertEquals(0, previousPage);
+            assertEquals(1, nextPage);
+            renderer.flush();
+        }
+    }
+
     private static GpuBuffer makeUbo(RayniumGpuDevice device, int bytes, java.util.function.Consumer<Std140Builder> writer) {
         ByteBuffer buf = ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder());
         writer.accept(Std140Builder.intoBuffer(buf));

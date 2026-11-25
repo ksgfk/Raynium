@@ -15,13 +15,50 @@ final class BenchmarkMeasurements {
         "terrainVertexCapacityBytes","terrainIndexCapacityBytes","terrainAllocatedBytes","nativeSyncWaitNs"};
     private final long[][] frames;
     private final long[] gpu;
+    private static final class FrameSamples {
+        final int row;
+        int expected,received;
+        boolean missingGpu;
+        long gpu;
+        FrameSamples(int row) { this.row=row; }
+    }
+    private FrameSamples currentSamples;
+    private final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<FrameSamples> batchRows=new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
+
     private int frameCount,gpuCount;
     BenchmarkMeasurements(int capacity) { frames=new long[COLUMNS.length][capacity]; gpu=new long[capacity]; }
     void frame(long elapsed,long interval,long wall,long cpu,long[] nativeTimes) {
         if(frameCount==gpu.length) throw new IllegalStateException("Benchmark frame storage exhausted");
         frames[0][frameCount]=elapsed; frames[1][frameCount]=interval; frames[2][frameCount]=wall; frames[3][frameCount]=cpu;
-        for(int i=0;i<nativeTimes.length;i++) frames[4+i][frameCount]=nativeTimes[i];
+        for(int i=0;i<nativeTimes.length;i++) {
+            if(currentSamples==null || currentSamples.received==0 || i<2 || i>17) frames[4+i][frameCount]=nativeTimes[i];
+        }
         ++frameCount;
+        if(currentSamples!=null) complete(currentSamples);
+        currentSamples=null;
+    }
+    void expect(long sequence) {
+        if(currentSamples==null) currentSamples=new FrameSamples(frameCount);
+        currentSamples.expected++;
+        batchRows.put(sequence,currentSamples);
+    }
+    void receive(java.lang.foreign.MemorySegment record) {
+        var row=batchRows.remove(record.get(java.lang.foreign.ValueLayout.JAVA_LONG,0));
+        if(row==null) return;
+        batch(row.row,record);
+        if((record.get(java.lang.foreign.ValueLayout.JAVA_INT,8)&1)==0) row.missingGpu=true;
+        else row.gpu+=record.get(java.lang.foreign.ValueLayout.JAVA_LONG,16);
+        ++row.received;
+        complete(row);
+    }
+    private void complete(FrameSamples row) {
+        if(row.row<frameCount && row.received==row.expected && !row.missingGpu) gpu(row.gpu);
+    }
+    void batch(int row,java.lang.foreign.MemorySegment record) {
+        for(int column=6;column<=21;++column) {
+            long value=record.get(java.lang.foreign.ValueLayout.JAVA_LONG,24L+(column-6)*8L);
+            frames[column][row]=column<=18?Math.max(0,frames[column][row])+value:value;
+        }
     }
     void gpu(long nanos) {
         if(nanos<0 || gpuCount==gpu.length) throw new IllegalStateException("Invalid or excessive GPU samples");

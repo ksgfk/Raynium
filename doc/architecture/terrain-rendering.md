@@ -19,7 +19,7 @@
 
 `TerrainCapture` 复用扁平数组并跨连续活跃帧保留热快照；当视图、可见列表和淡入时长匹配时，采集器按世代和槽号定位变更区块，并刷新活动淡入。区块替换和透明索引更新同时到达时，按当前槽位归并上传候选，候选用槽号世代戳去重，淡入成员用布尔数组跟踪。每次最多就地处理 `max(256, 可见槽数 / 4)` 个通知。可见区块从空变为非空或从非空变为空、脏项超限或无法沿用快照时，在 dispatcher 锁内采集区块状态、原点和上传时间并分配槽号，解锁后计算淡入和筛选上传候选。投影包含受伤、摇晃与反胃变换；每帧由 Native 进行朝向剔除。普通透明保持原版反向 section 顺序；其他层按原版可见遍历顺序送入，由 Native 按页分桶组织。连续两帧未捕获、失效或停用时释放快照引用；关闭的 section 进入延迟回收队列。
 
-同批的每个视图独占一份 `NativeFrameBuffer`。Java `TerrainResidency` 在渲染线程通过空闲栈为暂存/驻留的每个 `MeshPayload` 分配 32 位稠密槽位号 `slotId`（`1..maxSlot`，`0` 保留为空），提交淘汰时回收，未提交的分配在下次准备前自动回滚，epoch 切换时重置。预分析网格和堆外索引通过 `meshDirect`/`indexDirect` 零拷贝传递原生指针，`NativeFrameBuffer` 强引用借用的 `DirectByteBuffer` 直至 `rn_submit_frame` 返回并由 `CommandTape.release()` 清空；非预分析路径仍保留拷贝回退。可见项与实例通过复用 `int[]` 暂存批量 `MemorySegment.copy` 写入。
+同批的每个视图独占一份 `NativeFrameBuffer`。Java `TerrainResidency` 在 MC 主线程通过空闲栈为暂存/驻留的每个 `MeshPayload` 分配 32 位稠密槽位号 `slotId`（`1..maxSlot`，`0` 保留为空），提交淘汰时回收，未提交的分配在下次准备前自动回滚，epoch 切换时重置。受控地形视图固定池化顶点和索引，直至 worker 消费完整个帧包。公共 `meshDirect`、`indexDirect` 入口复制外部段，公共 `addView` 批次在入队时复制视图负载。可见项与实例通过复用 `int[]` 暂存批量 `MemorySegment.copy` 写入。
 
 ## 驻留与顶点释放
 
@@ -29,7 +29,7 @@ Java `TerrainResidency` 保留 3 MiB 软预算，按整个 section 的三层及�
 已驻留透明排序索引更新优先，可突破软预算；只更新索引，不重新上传顶点。
 当前可见或回退 section 保持活跃，Native 算出的零面组掩码不触发 Java 回收；待移除列表使用 $O(1)$ swap-pop 清理。
 
-`RN_STATUS_OK`（含跳过呈现、需要重建）后 commit 驻留/索引/移除，并在提交后回调中把已消费的 `DirectByteBuffer` 顶点与索引归还 `DirectUploadPool`，保留 `vertexCount`、layer 和索引快照身份元数据。
+每个视图在录制期创建驻留变更记录，后续同批视图可以沿用槽号。未入队关闭时按逆序恢复驻留项、索引与空闲槽。提交回调请求释放已上传的顶点和索引。对外读取使用独立游标的只读视图，原生帧包持有固定长度的只读段。全部借用结束后底层内存才返回 DirectUploadPool。
 尚未选入上传的顶点继续保留。FAILED 不承诺回滚，关闭 renderer 并向上传播，不在原 renderer 重试。
 仅交换链 resize 保留 renderer、驻留几何和纹理。
 关卡或图集几何失效沿用 MC 26.3 `LevelRenderer.invalidateCompiledGeometry`，由注入在新 `SectionCompiler` 创建前推进 epoch。
@@ -68,6 +68,6 @@ SOLID 与 CUTOUT 使用反向 Z，普通透明按原版可见顺序并使用透�
 
 ## 纹理、ABI 与测试
 
-原版维护并更新图集、光照和采样器。每次准备产生独立的视图描述，上传数据随批次保活直至 `rn_submit_frame` 返回。非零提交序号触发驻留提交回调。资源重载后新 epoch 重新采集编译产物。[互操作与加载](interop.md#提交布局)
+原版维护并更新图集、光照和采样器。每次准备产生独立的视图描述，输入数据的归池和驻留回调分别使用消费、提交水位。资源重载后新 epoch 重新采集编译产物。[互操作与加载](interop.md#提交布局)
 
 CPU 用例覆盖网格、面组和索引排序；双后端原生测试检查 direct/indirect 线框、显式面掩码、缓存与跨页扩容。基准与视觉工具分别通过世界帧计数及实际截图检验游戏路径。[构建与测试](../guide/build-test.md)

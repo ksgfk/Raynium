@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 import importlib.util
 import json
 from pathlib import Path
@@ -6,10 +7,28 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from validate_visual import compare, check_capture_log
+from validate_visual import compare, check_capture_log, link_region_storage
 
 
 class VisualInputTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows save junctions')
+    def test_original_regions_are_linked_and_metadata_is_isolated(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            world, save = root / 'world', root / 'session/save'
+            region = Path('dimensions/minecraft/overworld/region/r.0.0.mca')
+            (world / region).parent.mkdir(parents=True)
+            (world / region).write_bytes(b'region fixture')
+            (world / 'level.dat').write_bytes(b'original')
+            with ExitStack() as cleanup:
+                link_region_storage(world, save, cleanup)
+                self.assertTrue((world / region).samefile(save / region))
+                (save / 'level.dat').write_bytes(b'session')
+                self.assertEqual(b'original', (world / 'level.dat').read_bytes())
+                self.assertFalse((save / 'session.lock').exists())
+            self.assertFalse((save / region).exists())
+            self.assertEqual(b'region fixture', (world / region).read_bytes())
+
     def test_decoding_failures_and_gpu_validation_cannot_pass_as_visual_evidence(self):
         for text in ['Serialization errors:\nInvalid block state', 'Failed to decode value',
                      'Validation Error: VUID-command-buffer', '[error] d3d12 validation message', '[critical] Device lost',

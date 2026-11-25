@@ -24,7 +24,6 @@ void TextureBarrier(CommandBuffer& c,Texture* texture,TextureStates before,Textu
 void BufferBarrier(CommandBuffer& c,Buffer* buffer,BufferStates before,BufferStates after) {
     const ResourceBarrierDescriptor b=BarrierBufferDescriptor{.Target=buffer,.Before=before,.After=after}; c.ResourceBarrier({&b,1});
 }
-namespace {
 bool ValidSwapchainDesc(const rn_swapchain_desc& desc) {
     if(desc.struct_size!=sizeof(desc) || !desc.width || !desc.height || desc.width>16384 || desc.height>16384 ||
        desc.present_mode>RN_PRESENT_FIFO || !IsWindow(reinterpret_cast<HWND>(desc.hwnd))) {
@@ -32,6 +31,7 @@ bool ValidSwapchainDesc(const rn_swapchain_desc& desc) {
     }
     return true;
 }
+namespace {
 PresentMode Mode(rn_present_mode mode) { return mode==RN_PRESENT_FIFO?PresentMode::FIFO:PresentMode::Immediate; }
 
 }

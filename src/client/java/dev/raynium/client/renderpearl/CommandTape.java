@@ -13,6 +13,11 @@ import static java.lang.foreign.ValueLayout.*;
 
 /** One recording batch. Its texture owners survive application close until native replay has imported them. */
 public final class CommandTape implements AutoCloseable {
+    public static final class BorrowPermit {
+        private BorrowPermit() {}
+    }
+    private static final BorrowPermit POOLED_INPUTS=new BorrowPermit();
+
     public record Region(NativeTexture texture,int mip,int layer,int x,int y,int width,int height) {
         private void validate(NativeRenderer renderer) {
             texture.checkRecordingOwner(renderer);
@@ -122,6 +127,10 @@ public final class CommandTape implements AutoCloseable {
     private final BatchSubmission submission;
     private final java.util.ArrayDeque<Storage> freeStorage;
     private Storage storage;
+    private boolean externalView;
+    private final java.util.ArrayList<dev.raynium.bridge.NativeFrameBuffer> acquiredViews=new java.util.ArrayList<>();
+    private final java.util.ArrayList<Runnable> rollbacks=new java.util.ArrayList<>();
+    public void onDiscard(Runnable rollback) { checkRecording(); rollbacks.add(rollback); }
     private final java.util.ArrayList<NativeTexture> references=new java.util.ArrayList<>();
     private final java.util.ArrayList<NativeBuffer> bufferReferences=new java.util.ArrayList<>();
     private final java.util.ArrayList<Runnable> callbacks=new java.util.ArrayList<>();
@@ -131,7 +140,15 @@ public final class CommandTape implements AutoCloseable {
     public void onSubmitted(Runnable callback) { checkRecording(); submittedCallbacks.add(callback); }
     private final java.util.ArrayList<MemorySegment> views=new java.util.ArrayList<>();
     private final java.util.ArrayList<dev.raynium.bridge.NativeFrameBuffer> viewStorage=new java.util.ArrayList<>();
-    private final java.util.ArrayDeque<dev.raynium.bridge.NativeFrameBuffer> freeViews;
+    static final class ViewPool implements AutoCloseable {
+        final java.util.ArrayDeque<dev.raynium.bridge.NativeFrameBuffer> terrain=new java.util.ArrayDeque<>(), external=new java.util.ArrayDeque<>();
+        @Override public void close() {
+            terrain.forEach(dev.raynium.bridge.NativeFrameBuffer::close);
+            external.forEach(dev.raynium.bridge.NativeFrameBuffer::close);
+            terrain.clear(); external.clear();
+        }
+    }
+    private final ViewPool freeViews;
     private final java.util.ArrayList<net.minecraft.client.model.geom.ModelPart> modelReferences=new java.util.ArrayList<>();
     public void retainModel(net.minecraft.client.model.geom.ModelPart part) { modelReferences.add(part); }
     private final HashSet<Long> captures=new HashSet<>();
@@ -148,7 +165,7 @@ public final class CommandTape implements AutoCloseable {
     public CommandTape(NativeRenderer renderer) {
         this(renderer,null,null);
     }
-    CommandTape(NativeRenderer renderer,java.util.ArrayDeque<dev.raynium.bridge.NativeFrameBuffer> freeViews,java.util.ArrayDeque<Storage> freeStorage) {
+    CommandTape(NativeRenderer renderer,ViewPool freeViews,java.util.ArrayDeque<Storage> freeStorage) {
         this.renderer=renderer;
         this.freeViews=freeViews;
         this.freeStorage=freeStorage;
@@ -351,16 +368,33 @@ public final class CommandTape implements AutoCloseable {
     }
     public record TerrainView(CommandTape batch,int id) {}
     public dev.raynium.bridge.NativeFrameBuffer acquireViewStorage() {
+        return acquireViewStorage(null);
+    }
+    public dev.raynium.bridge.NativeFrameBuffer acquireViewStorage(dev.raynium.client.terrain.RetainedTerrain.ViewAccess access) {
         checkRecording();
-        var storage=freeViews==null?null:freeViews.pollFirst();
-        return storage==null?new dev.raynium.bridge.NativeFrameBuffer():storage;
+        dev.raynium.bridge.NativeFrameBuffer storage=null;
+        if(freeViews!=null) {
+            var pool=access==null?freeViews.external:freeViews.terrain;
+            do { storage=pool.pollFirst(); } while(storage!=null && storage.isClosed());
+        }
+        if(storage==null) storage=new dev.raynium.bridge.NativeFrameBuffer(access);
+        acquiredViews.add(storage);
+        return storage;
     }
     public int viewCount() { return views.size(); }
     public TerrainView addView(dev.raynium.bridge.NativeFrameBuffer storage,MemorySegment parameters,NativeTexture atlas,NativeTexture light) {
+        externalView=true;
+        return appendView(storage,parameters,atlas,light);
+    }
+    public TerrainView addPooledView(dev.raynium.bridge.NativeFrameBuffer storage,NativeRenderer.Frame frame,NativeTexture atlas,NativeTexture light) {
+        if(!storage.isTerrainStorage() || !acquiredViews.contains(storage)) throw new IllegalArgumentException("View storage belongs to another tape");
+        return appendView(storage,storage.finish(frame),atlas,light);
+    }
+    private TerrainView appendView(dev.raynium.bridge.NativeFrameBuffer storage,MemorySegment parameters,NativeTexture atlas,NativeTexture light) {
         checkRecording(); atlas.checkRecordingOwner(renderer); light.checkRecordingOwner(renderer);
         retain(atlas); retain(light);
         var ref=new TerrainView(this,views.size());
-        views.add(parameters); viewStorage.add(storage);
+        acquiredViews.remove(storage); views.add(parameters); viewStorage.add(storage);
         return ref;
     }
     void terrain(TerrainView view,int stage,com.mojang.renderpearl.api.commands.RenderPass.RenderArea scissor,
@@ -580,32 +614,32 @@ public final class CommandTape implements AutoCloseable {
     NativeRenderer.SubmitResult submit(boolean measure) {
         checkRecording();
         if(rasterOpen) throw new IllegalStateException("Close the render pass before submission");
+        boolean borrow=freeStorage!=null && !externalView;
+        NativeRenderer.SubmitResult result;
+        long start=terrainEvent==null?0:System.nanoTime();
         try {
-            NativeRenderer.SubmitResult result;
-            try {
-                long start=terrainEvent==null?0:System.nanoTime();
-                result=renderer.submitFrame(storage.commands.contents(),storage.uploads.contents(),storage.instanceUploads.contents(),surface,views,measure);
-                if(terrainEvent!=null) {
-                    terrainEvent.ffm=System.nanoTime()-start;
-                    terrainEvent.sequence=result.sequence();
-                    terrainEvent.commit();
-                    terrainEvent=null;
-                }
-            } catch(RuntimeException | Error failure) {
-                submission.failed();
-                throw failure;
-            }
-            if(result.sequence()>0) {
-                submission.submitted(result.sequence());
-                renderer.onCompleted(result.sequence(),callbacks);
-                submittedCallbacks.forEach(Runnable::run);
-            } else submission.failed();
-            if(!result.success()) renderer.terminalFailure(result.deviceLost());
-            if(presentation!=null) presentation.accept(result.outcome());
-            return result;
-        } finally {
-            release();
+            result=renderer.submitFrame(storage.commands.contents(),storage.uploads.contents(),storage.instanceUploads.contents(),surface,views,measure,borrow?POOLED_INPUTS:null);
+        } catch(RuntimeException | Error failure) {
+            close();
+            throw failure;
         }
+        if(terrainEvent!=null) {
+            terrainEvent.ffm=System.nanoTime()-start;
+            terrainEvent.sequence=result.sequence();
+            terrainEvent.commit();
+            terrainEvent=null;
+        }
+        if(result.sequence()>0) {
+            finalized=true;
+            submission.enqueued(result.sequence());
+            rollbacks.clear();
+            renderer.trackBatch(result.sequence(),submittedCallbacks,callbacks,borrow?this::release:()->{},submission::failed);
+            if(!borrow) release();
+            if(presentation!=null) presentation.accept(0);
+        } else close();
+        renderer.syncWorkerState(result.progress());
+        if(!result.success()) throw new IllegalStateException("Frame packet rejected");
+        return result;
     }
     private void release() {
         finalized=true;
@@ -627,16 +661,19 @@ public final class CommandTape implements AutoCloseable {
         bufferReferences.clear();
         for(int i=0;i<pipelines.size();++i) pipelines.get(i).release();
         pipelines.clear();
-        // Native has copied the view data into its frame slot before the submit call returns.
+        // Borrowed inputs reach this point only after the worker has consumed them.
         for(int i=0;i<viewStorage.size();++i) viewStorage.get(i).clearBorrowed();
         if(freeViews==null) viewStorage.forEach(dev.raynium.bridge.NativeFrameBuffer::close);
-        else freeViews.addAll(viewStorage);
+        else for(var view:viewStorage) (view.isTerrainStorage()?freeViews.terrain:freeViews.external).addLast(view);
+        acquiredViews.forEach(dev.raynium.bridge.NativeFrameBuffer::close); acquiredViews.clear();
         viewStorage.clear(); views.clear(); submittedCallbacks.clear();
         callbacks.clear();
     }
     @Override public void close() {
         if(!finalized) {
             submission.failed();
+            for(int i=rollbacks.size()-1;i>=0;--i) rollbacks.get(i).run();
+            rollbacks.clear();
             release();
         }
     }
