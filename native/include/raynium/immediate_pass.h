@@ -1,37 +1,43 @@
 #pragma once
 #include <raynium/immediate_draw.h>
-#include <variant>
+
 #include <raynium/terrain_feature.h>
 #include <raynium/world_features.h>
-#include <raynium/texture_registry.h>
+#include <raynium/resource_uploads.h>
 #include <raynium/timestamp_queries.h>
 
 namespace raynium {
-class ImmediatePass final {
+using RasterOp=FrameOp<uint32_t,ImmediateDraw,TerrainFeature,InstancedGeometryFeature>;
+class RasterPassPlan final {
 public:
-    static radray::shared_ptr<ImmediatePass> Decode(std::span<const radray::byte> record,const TextureRegistry&,uint32_t maxColors);
-    bool AddTerrain(std::span<const radray::byte>,std::span<TerrainView>,const TextureRegistry&);
-    bool AddDraw(std::span<const radray::byte>,const ImmediatePipelineRegistry&,const BufferRegistry&,const TextureRegistry&);
-    bool AddInstancedGeometry(std::span<const radray::byte>,std::span<const radray::byte> instanceUploads,
-        radray::vector<radray::gpu::DrawIndexedIndirectArguments>& indirectArgs,bool canIndirect,uint32_t indirectLimit,
-        const ImmediatePipelineRegistry&,const BufferRegistry&,const TextureRegistry&,const StaticGeometryRegistry&,const TerrainResidency&);
+    static RasterPassPlan* Decode(std::pmr::memory_resource& memory,std::span<const radray::byte> record,rn_renderer* owner,uint32_t maxColors);
+    bool AddTerrain(std::pmr::memory_resource& memory,std::pmr::vector<RasterOp>& ops,std::span<const radray::byte>,std::span<TerrainView>,rn_renderer* owner);
+    bool AddDraw(std::pmr::memory_resource& memory,std::pmr::vector<RasterOp>& ops,std::span<const radray::byte>,rn_renderer* owner);
+    bool AddInstancedGeometry(std::pmr::memory_resource& memory,std::pmr::vector<RasterOp>& ops,std::span<const radray::byte>,std::span<const radray::byte> instanceUploads,
+        std::pmr::vector<radray::gpu::DrawIndexedIndirectArguments>& indirectArgs,bool canIndirect,uint32_t indirectLimit,
+        rn_renderer* owner,const StaticGeometryRegistry&,const TerrainResidency&);
     void Measure(rn_frame_metrics&) const;
-    void WriteTimestamp(uint32_t physicalIndex);
+    void WriteTimestamp(std::pmr::vector<RasterOp>&,uint32_t);
+    void Finish(std::pmr::memory_resource& memory,const std::pmr::vector<RasterOp>& ops) { _commands=FreezeFrameArray(memory,ops); }
     void Replay(radray::RDGBuilder&,FrameTextureImports&,const FrameTimestamps&,radray::RDGBufferHandle instanceBuffer,
         radray::RDGBufferHandle geometryIndirectBuffer);
 private:
     struct Attachment {
-        radray::IntrusivePtr<radray::GpuTexture> texture;
+        const rn_texture* texture;
+        radray::RDGTextureHandle handle;
         uint32_t mip{},layer{};
         bool clear{};
         radray::gpu::ColorClearValue value{};
     };
     radray::Rect _area{};
     uint32_t _width{},_height{};
-    radray::vector<Attachment> _colors;
-    radray::InlineVector<radray::gpu::TextureFormat,8> _colorFormats;
+    std::span<Attachment> _colors;
+    std::span<radray::gpu::TextureFormat> _colorFormats;
     Attachment _depth;
-    radray::vector<std::variant<uint32_t,ImmediateDraw,TerrainFeature,InstancedGeometryFeature>> _commands;
+    std::span<RasterOp> _commands;
+    const radray::VertexBufferPool *terrainVertices{},*translucentVertices{},*staticVertices{};
+    const radray::IndexBufferPool *quadIndices{},*translucentIndices{};
+    bool needInstanceBuffer{},needGeometryIndirect{};
     bool _containsTimestamp{};
 };
 }

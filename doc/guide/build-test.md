@@ -139,7 +139,7 @@ Debug 默认启用 RadRay RHI 检查。`rhiValidation=true`（JVM 属性 `rayniu
 D3D12 在此创建 factory 并启用调试层，早于窗口创建；createDevice 复用环境创建 runtime。
 也可通过独立 `nativeTest -PrhiValidation=true` 验证。
 启动日志中的 `Raynium native manifest=` 与 `Raynium native library loaded:` 记录内容缓存和 ABI/build ID、RadRay 身份、dirty、配置、CRT 与工具链。
-Debug CRT 为 MTd，Release 为 MT；静态分配器随 bridge 加载与卸载。当前要求 ABI 24，导出清单见 `tools/native.py`。
+Debug CRT 为 MTd，Release 为 MT；静态分配器随 bridge 加载与卸载。当前要求 ABI 25，导出清单见 `tools/native.py`。
 `Raynium runtime created` 表示设备与队列完成。GUI 和世界的实际显示须通过窗口观察；F2 使用原版文件写入保存 native 主颜色目标，全景入口通过独立尺寸离屏帧输出，纹理导出使用按子资源请求读回。
 
 ## 自动跑图与性能采样

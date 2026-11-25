@@ -61,7 +61,7 @@ void Renderer::Finish() {
     _pipeline->Finish(_device.GetDevice());
     _scheduler->WaitIdle();
 }
-bool Renderer::SubmitFrame(const rn_batch_desc& batch,Swapchain* target,FrameExecution& result,const std::function<void(uint64_t)>& notifySubmitted,const std::function<bool()>& collect) {
+bool Renderer::SubmitFrame(rn_renderer* owner,BatchEnvelope& envelope,FrameExecution& result,const std::function<void(uint64_t)>& notifySubmitted,const std::function<bool()>& collect) {
     using namespace radray::gpu;
     auto& device=_device.GetDevice();
     const auto fail=[&] {
@@ -69,7 +69,14 @@ bool Renderer::SubmitFrame(const rn_batch_desc& batch,Swapchain* target,FrameExe
         if(device.IsDeviceLost()) result.flags|=RN_SUBMIT_FLAG_DEVICE_LOST;
         return false;
     };
+    const auto& batch=envelope.batch;
+    bool submittedCaptures=false;
+    auto cancelCaptures=radray::MakeScopeGuard([&]() noexcept {
+        if(!submittedCaptures && batch.capture_count)
+            _pipeline->CancelUnsubmittedCaptures({batch.captures,batch.capture_count});
+    });
     if(_poisoned || device.IsDeviceLost()) return fail();
+    auto* target=envelope.target;
     const bool measure=batch.flags&RN_BATCH_MEASURE;
     const auto now=[measure]()->uint64_t {
         return measure?uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()):0;
@@ -80,22 +87,20 @@ bool Renderer::SubmitFrame(const rn_batch_desc& batch,Swapchain* target,FrameExe
     if(device.IsDeviceLost()) return fail();
     if (!collect()) return fail();
     _pipeline->MeasureBatch(slot,measure);
-    auto& tape=*slot.Emplace<CommandTape>();
+    auto& tape=*slot.Emplace<TapeCompiler>(slot);
+    for(auto id:envelope.resources.removedModelMeshes) RemoveModelMesh(id);
     _staticGeometry->BeginSlot();
     if(!_staticGeometry->PrepareQuadIndices(_terrain,slot,tape.WorldUploads()) ||
-       !tape.PrepareViews(batch,_terrain,_uploaded,_pipeline->Resources(),slot,_pipeline->UsesIndirect()) ||
-       !tape.Decode(batch,_uploaded,_buffers,_pipelines,*_staticGeometry,_terrain,device.GetCapabilities())) {
+       !tape.PrepareViews(batch,_terrain,owner,_pipeline->Resources(),_pipeline->UsesIndirect()) ||
+       !_pipeline->CompileTape(slot,tape,batch,owner,*_staticGeometry,_terrain)) {
         RADRAY_ERR_LOG("Invalid command tape or view");
         return fail();
     }
     _staticGeometry->FlushPending(slot,tape.WorldUploads());
-    auto cancel=radray::MakeScopeGuard([&]() noexcept { _pipeline->CancelUnsubmittedReadbacks(); });
-    if(!_pipeline->PrepareTape(slot,tape) || !_buffers.Flush({batch.dirty_ranges,batch.dirty_count})) {
-        RADRAY_ERR_LOG("Invalid command tape or readback reservation");
-        return fail();
-    }
+    tape.FinishUploads();
     TerrainFrame frame{};
-    frame.textures=&_uploaded;
+    frame.uploads=&envelope.resources;
+    frame.shadowWrites=envelope.shadows;
     SwapChainAcquireResult acquired{.Status=SwapChainStatus::RetryLater};
     if(target) {
         if(!target->Validate()) return fail();
@@ -113,7 +118,6 @@ bool Renderer::SubmitFrame(const rn_batch_desc& batch,Swapchain* target,FrameExe
                 if(acquired.Status==SwapChainStatus::Success || acquired.Status==SwapChainStatus::Suboptimal) RADRAY_ABORT("Successful surface acquisition has no frame");
                 result.outcome=*outcome;
                 if(*outcome==RN_PRESENT_SURFACE_LOST) target->MarkBroken();
-                if(acquired.Status==SwapChainStatus::RetryLater) target->TimedOut();
             }
         }
         if(acquired.Frame) {
@@ -129,19 +133,24 @@ bool Renderer::SubmitFrame(const rn_batch_desc& batch,Swapchain* target,FrameExe
         _staticGeometry->MeasureGeometry(result.metrics);
     }
     const auto prepared=now();
-    _pipeline->SetTape(frame,tape,_buffers);
+    _pipeline->SetTape(frame,tape,batch.capture_count!=0);
     auto clear=radray::MakeScopeGuard([&]() noexcept { _pipeline->ClearInput(); });
-    if(!_scheduler->RunFrame()) {
+    bool ran=false;
+    {
+        std::unique_lock<std::mutex> readbackLock;
+        if(batch.capture_count) readbackLock=_pipeline->LockReadbacks();
+        ran=_scheduler->RunFrame();
+    }
+    if(!ran) {
         CheckFailedQueueSubmission(device.IsDeviceLost());
         if(acquired.Frame) target->Chain().DiscardAcquiredFrame(std::move(*acquired.Frame));
         return fail();
     }
-    cancel.Dismiss();
+    submittedCaptures=true;
     const auto submitted=now();
     result.sequence=_pipeline->SubmittedSequence();
     _pipeline->ClearInput();
     notifySubmitted(result.sequence);
-    _buffers.Advance(result.sequence);
     auto record=radray::MakeScopeGuard([&]() noexcept {
         if(measure) {
             result.wait_ns=waited-start; result.prepare_ns=prepared-waited;

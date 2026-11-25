@@ -1,13 +1,13 @@
 #pragma once
 
-#include <raynium/bridge.h>
+#include <raynium/resource_handles.h>
 #include <radray/runtime/rdg.h>
 #include <radray/types.h>
 #include <span>
 
 namespace raynium {
-struct TimestampTarget { uint32_t pool, slot; };
-struct PublishedTimestamp { uint32_t pool, slot; uint64_t sequence, ticks; };
+struct TimestampTarget { radray::IntrusivePtr<QueryPoolStorage> pool; uint32_t slot; };
+struct PublishedTimestamp { radray::IntrusivePtr<QueryPoolStorage> pool; uint32_t slot; uint64_t sequence, ticks; };
 
 class FrameTimestamps final {
 public:

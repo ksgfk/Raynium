@@ -94,10 +94,4 @@ bool MeshPassResources::Create(Device& device,std::span<const radray::byte> shad
     p.wireframe=CreateTerrainPipeline(device,*solid.program,solid.vs.get(),solid.ps.get(),solid.pipelineLayout.get(),Solid,TextureFormat::RGBA8_UNORM,true,cache);
     output=radray::unique_ptr<MeshPassResources>(new MeshPassResources(std::move(objects))); return true;
 }
-bool MeshPassResources::PrepareOutput(Device& device,TextureFormat format) {
-    if(format!=TextureFormat::RGBA8_UNORM || !device.QueryTextureSupport({TextureDimension::Dim2D,format,TextureUse::RenderTarget}).Supported) {
-        RADRAY_ERR_LOG("RGBA8 scene output is unsupported"); return false;
-    }
-    return true;
-}
 }

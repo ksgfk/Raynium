@@ -137,12 +137,21 @@ struct TerrainViewCacheSlot {
     radray::vector<rn_instance> instances;
     radray::array<radray::vector<uint32_t>,3> layerItems;
     uint64_t maxInstanceEnd{};
-    uint64_t epoch{}, partitionVersion{};
+    uint64_t epoch{}, partitionVersion{}, visibleVersion{}, originsVersion{}, instancesVersion{};
+    bool MatchesVisible(const rn_terrain_view_desc& view) const noexcept {
+        return epoch==view.epoch && view.visible_version && visibleVersion==view.visible_version && visible.size()==view.visible_count;
+    }
+    bool MatchesOrigins(const rn_terrain_view_desc& view) const noexcept {
+        return epoch==view.epoch && view.origins_version && originsVersion==view.origins_version && instances.size()==view.instance_count;
+    }
+    bool MatchesInstances(const rn_terrain_view_desc& view) const noexcept {
+        return epoch==view.epoch && view.instances_version && instancesVersion==view.instances_version && instances.size()==view.instance_count;
+    }
 };
 
 struct SlotUploads {
     radray::FrameSlot& frame;
-    radray::vector<GeometryUpload>& geometry;
+    std::pmr::vector<GeometryUpload>& geometry;
     TerrainViewCacheSlot& cache;
     bool useIndirect{};
 };
@@ -150,13 +159,14 @@ struct SlotUploads {
 // ABI payloads are borrowed until synchronous RDG Prepare; no borrow is used by Wait or cleanup.
 struct TerrainFrame {
     const TerrainViewDrawData* draws{};
-    radray::vector<GeometryUpload>* geometry{};
+    std::pmr::vector<GeometryUpload>* geometry{};
     std::span<const rn_instance> instances;
     radray::IntrusivePtr<radray::GpuBuffer> persistentInstances;
     radray::array<radray::IntrusivePtr<radray::GpuBuffer>,3> persistentIndirect;
     radray::array<bool,3> uploadIndirect{};
     bool uploadInstances{};
-    TextureRegistry* textures{};
+    PendingResourceOps* uploads{};
+    std::span<const ShadowWrite> shadowWrites;
     rn_terrain_view_desc parameters{};
     bool hasTranslucent{};
     uint32_t width{},height{};
@@ -173,7 +183,7 @@ public:
         radray::unique_ptr<radray::IndexBufferPool> quadPool,radray::unique_ptr<radray::IndexBufferPool> indices);
     void BeginSlotViews(std::span<const rn_terrain_view_desc> views,radray::FrameSlot& slot);
     TerrainViewCacheSlot& View(size_t index) { return *_views[index]; }
-    bool PrepareFrame(const TextureRegistry&,const rn_terrain_view_desc&,const MeshPassResources&,SlotUploads,TerrainFrame&);
+    bool PrepareFrame(rn_renderer* owner,const rn_terrain_view_desc&,const MeshPassResources&,SlotUploads,TerrainFrame&);
     void Reset() noexcept;
     uint64_t ResidentBytes() const noexcept;
     void MeasureGeometry(rn_frame_metrics&) const noexcept;
@@ -183,7 +193,7 @@ public:
     const radray::IndexBufferPool& TranslucentIndexPool() const noexcept { return *_indices; }
     const radray::IndexBufferSubAllocation& QuadIndices() const noexcept { return _quadIndices; }
 
-    bool EnsureQuadIndices(uint32_t vertexCount,radray::vector<GeometryUpload>& uploads,radray::FrameSlot* retireSlot,
+    bool EnsureQuadIndices(uint32_t vertexCount,std::pmr::vector<GeometryUpload>& uploads,radray::FrameSlot* retireSlot,
         uint64_t* uploadBytesOut=nullptr,bool* grewOut=nullptr);
     bool ResyncQuadMeshes();
 private:

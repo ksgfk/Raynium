@@ -7,6 +7,7 @@ import com.mojang.renderpearl.api.device.*;
 import com.mojang.renderpearl.api.pipeline.*;
 import com.mojang.renderpearl.api.textures.*;
 import com.mojang.renderpearl.frontend.FrontendCommandEncoder;
+import com.mojang.renderpearl.frontend.FrontendRenderPass;
 import dev.raynium.bridge.*;
 import java.nio.ByteBuffer;
 import java.util.*;
@@ -26,25 +27,30 @@ public final class RayniumGpuDevice implements GpuDevice,AutoCloseable {
         var compiled=compiledPipelines.get(pipeline);
         return compiled!=null && compiled.supportsInstanced(mode);
     }
+    private static RayniumRenderPassBackend recorder(RenderPass pass) {
+        if(!(pass instanceof FrontendRenderPass frontend)) return null;
+        if(frontend.isClosed) throw new IllegalStateException("Render pass is closed");
+        return frontend.backend instanceof RayniumRenderPassBackend recorder?recorder:null;
+    }
     public static CommandTape activeTape(RenderPass pass) {
-        if(!(pass instanceof com.mojang.renderpearl.frontend.FrontendRenderPass frontend) ||
-            !(frontend.backend instanceof RayniumRenderPassBackend.Lease lease)) throw new IllegalArgumentException("Invalid Raynium render pass");
-        return lease.recorder().tape();
+        var recorder=recorder(pass);
+        if(recorder==null) throw new IllegalArgumentException("Invalid Raynium render pass");
+        return recorder.tape();
     }
     public static boolean recordInstancedGeometry(RenderPass pass,String mode,long uploadOffset,int instanceCount,int instanceStride,
             int[] runMeshIds,int[] runFirstInstances,int[] runInstanceCounts,int runCount) {
-        if(!(pass instanceof com.mojang.renderpearl.frontend.FrontendRenderPass frontend) ||
-            !(frontend.backend instanceof RayniumRenderPassBackend.Lease lease)) return false;
-        return lease.recorder().instancedGeometry(mode,uploadOffset,instanceCount,instanceStride,runMeshIds,runFirstInstances,runInstanceCounts,runCount);
+        var recorder=recorder(pass);
+        if(recorder==null) return false;
+        return recorder.instancedGeometry(mode,uploadOffset,instanceCount,instanceStride,runMeshIds,runFirstInstances,runInstanceCounts,runCount);
     }
     public CommandTape.TerrainView captureTerrain(net.minecraft.client.renderer.LevelRenderer level) {
         return terrain.capture(level,backend.renderer,currentBatch());
     }
     public static void recordTerrain(RenderPass pass,CommandTape.TerrainView view,int stage,
             com.mojang.renderpearl.util.TextureViewAndSampler atlas,com.mojang.renderpearl.util.TextureViewAndSampler light,GpuTextureView... inputs) {
-        if(!(pass instanceof com.mojang.renderpearl.frontend.FrontendRenderPass frontend) ||
-            !(frontend.backend instanceof RayniumRenderPassBackend.Lease lease)) throw new IllegalArgumentException("Invalid terrain render pass");
-        lease.recorder().terrain(view,stage,atlas,light,inputs);
+        var recorder=recorder(pass);
+        if(recorder==null) throw new IllegalArgumentException("Invalid terrain render pass");
+        recorder.terrain(view,stage,atlas,light,inputs);
     }
     public RayniumGpuDevice(NativeRuntime runtime,NativeRenderer renderer,boolean debug) {
         this(runtime,renderer,debug,java.nio.file.Path.of("."));

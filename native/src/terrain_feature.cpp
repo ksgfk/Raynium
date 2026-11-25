@@ -47,7 +47,7 @@ void TerrainView::Import(radray::RDGBuilder& graph,GpuBackend backend) {
     }
 }
 
-bool TerrainFeature::Decode(std::span<const radray::byte> bytes,std::span<TerrainView> views,const TextureRegistry& textures,const radray::Rect& area) {
+bool TerrainFeature::Decode(std::span<const radray::byte> bytes,std::span<TerrainView> views,rn_renderer* owner,const radray::Rect& area) {
     wire::Terrain w{};
     if(bytes.size()!=sizeof(w)) return false;
     std::memcpy(&w,bytes.data(),sizeof(w));
@@ -56,16 +56,16 @@ bool TerrainFeature::Decode(std::span<const radray::byte> bytes,std::span<Terrai
     view=&views[w.view]; stage=w.stage; scissor=w.scissor;
     for(uint32_t i=0;i<2;++i) {
         const auto& m=w.materials[i];
-        const auto* image=textures.Find(m.id);
+        const auto* image=ResolveHandle(owner,m.id);
         if(!image || image->desc.array_layers!=1 || IsDepthStencilFormat(image->texture->GetDesc().Format) ||
            !m.sampling.mip_count || uint64_t(m.sampling.base_mip)+m.sampling.mip_count>image->desc.mip_levels) return false;
-        materials[i]={image->texture,m.sampling,m.flags,{}};
+        materials[i]={image,m.sampling,m.flags,{}};
     }
     uint32_t required=stage==OitTransmittance?1:stage==OitAccumulate?3:0;
     for(uint32_t i=0;i<required;++i) {
-        auto* image=textures.Find(w.ids[i]);
+        auto* image=ResolveHandle(owner,w.ids[i]);
         if(!image || w.mips[i]>=image->desc.mip_levels || image->desc.array_layers!=1) return false;
-        sources[i]=image->texture; mips[i]=w.mips[i];
+        sources[i]=image; mips[i]=w.mips[i];
     }
     return true;
 }
@@ -103,7 +103,7 @@ bool TerrainFeature::Prepare(radray::RDGPrepareContext& ctx) {
     radray::array<radray::TransientParameterBinding,4> materialBindings;
     for(uint32_t i=0;i<2;++i) {
         const auto& m=materials[i];
-        auto* srv=GetSamplingView(slot.GetDevice(),*m.image,m.sampling);
+        auto* srv=GetSamplingView(slot.GetDevice(),*m.image->texture,m.sampling);
         auto* sampler=GetTextureSampler(slot.GetDevice(),m.flags,m.sampling);
         if(!srv || !sampler) return false;
         materialBindings[i]={1+i,0,srv};
@@ -115,7 +115,7 @@ bool TerrainFeature::Prepare(radray::RDGPrepareContext& ctx) {
         radray::array<radray::TransientParameterBinding,4> bindings;
         for(uint32_t i=0;i<4;++i) {
             uint32_t j=i<3 && sources[i]?i:0;
-            auto* srv=GetSamplingView(slot.GetDevice(),*sources[j],{mips[j],1,0,1});
+            auto* srv=GetSamplingView(slot.GetDevice(),*sources[j]->texture,{mips[j],1,0,1});
             if(!srv) return false;
             bindings[i]={i,0,srv};
         }

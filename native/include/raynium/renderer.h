@@ -5,6 +5,7 @@
 #include <radray/runtime/frame_scheduler.h>
 #include <raynium/immediate_pipeline.h>
 #include <raynium/static_geometry_registry.h>
+#include <raynium/batch_envelope.h>
 #include <span>
 #include <utility>
 
@@ -21,18 +22,11 @@ public:
     ~Renderer() noexcept;
     static bool Create(radray::DeviceContext&,std::span<const radray::byte>,uint32_t flags,radray::unique_ptr<Renderer>&);
     RenderProgramLibrary& Programs() { return _pipeline->Programs(); }
-    ImmediatePipelineRegistry& Pipelines() { return _pipelines; }
-    TextureRegistry& Textures() { return _uploaded; }
     ModularFramePipeline& Pipeline() { return *_pipeline; }
-    BufferRegistry& Buffers() { return _buffers; }
-    bool SubmitFrame(const rn_batch_desc&,Swapchain*,FrameExecution&,const std::function<void(uint64_t)>& submitted, const std::function<bool()>& collect);
+    BufferPool& Buffers() { return _buffers; }
+    bool SubmitFrame(rn_renderer*,BatchEnvelope&,FrameExecution&,const std::function<void(uint64_t)>& submitted, const std::function<bool()>& collect);
     bool IsTerminal() const { return _poisoned || _device.GetDevice().IsDeviceLost(); }
-    bool PrepareOutput(radray::gpu::TextureFormat format) {
-        return _pipeline->PrepareOutput(format,_device.GetDevice());
-    }
     void Finish();
-    void UploadTexture(TextureRegistry::Upload upload) { _uploaded.Enqueue(std::move(upload)); }
-    bool DestroyTexture(uint32_t id) { return _uploaded.Destroy(id); }
     bool UpsertModelMesh(int32_t meshId,std::span<const radray::byte> vertices,uint32_t vertexCount,uint32_t indexCount,uint32_t& pageId) {
         return !IsTerminal() && _staticGeometry->Upsert(meshId,vertices,vertexCount,indexCount,pageId);
     }
@@ -52,9 +46,7 @@ private:
     TerrainResidency _terrain;
     radray::unique_ptr<StaticGeometryRegistry> _staticGeometry;
     ModularFramePipeline* _pipeline;
-    TextureRegistry _uploaded;
-    BufferRegistry _buffers;
-    ImmediatePipelineRegistry _pipelines;
+    BufferPool _buffers;
     bool _poisoned{};
 };
 }

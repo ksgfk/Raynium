@@ -1,9 +1,10 @@
 #include <raynium/terrain_draw.h>
-#include <raynium/buffer_registry.h>
+#include <raynium/buffer_pool.h>
 #include <raynium/terrain_feature.h>
 #include "test_fakes.h"
 #include <raynium/terrain_residency.h>
 #include <raynium/world_features.h>
+#include <raynium/frame_plan.h>
 #include <raynium/frame_upload.h>
 #include <radray/types.h>
 #include <radray/profiler.h>
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <memory_resource>
 #include <span>
@@ -97,53 +99,48 @@ public:
     radray::vector<Indirect> indirect;
 };
 
-TEST(BufferRegistry, ReuseRequiresCompletedSubmissionAndLastSlotReference) {
+TEST(BufferPool, ReuseRequiresCompletedSubmissionAndLastSlotReference) {
     radray::test::FakeDevice device;
     device.EnableHostBuffers=true;
-    BufferRegistry registry;
+    BufferPool registry;
     const uint32_t usage=RN_BUFFER_MAP_WRITE|RN_BUFFER_COPY_SRC;
-    auto allocation=BufferRegistry::Allocate(device,usage,256);
+    auto allocation=BufferPool::Allocate(device,usage,256);
     ASSERT_TRUE(allocation);
     auto* original=allocation.get();
-    registry.Register(1,std::move(allocation),{},false);
-    auto retained=registry.Find(1);
-    registry.Advance(5);
-    ASSERT_TRUE(registry.Destroy(1));
-    EXPECT_FALSE(registry.Find(1));
+    auto retained=allocation->device;
+    registry.Retire(std::move(allocation),5);
     EXPECT_FALSE(registry.Take(usage,256,3));
     EXPECT_FALSE(registry.Take(usage,256,5));
-    retained.reset();
+    retained=nullptr;
     EXPECT_FALSE(registry.Take(usage,256,3));
     auto reused=registry.Take(usage,256,5);
     ASSERT_EQ(reused.get(),original);
-    registry.Register(2,std::move(reused),{},false);
-    ASSERT_TRUE(registry.Destroy(2));
+    registry.Retire(std::move(reused),5);
     registry.Advance(125);
     EXPECT_FALSE(registry.Take(usage,256,125));
 }
 
-TEST(BufferRegistry, IdleBudgetCapsExactSizeBuckets) {
+TEST(BufferPool, IdleBudgetCapsExactSizeBuckets) {
     radray::test::FakeDevice device;
     device.EnableHostBuffers=true;
-    BufferRegistry registry;
+    BufferPool registry;
     constexpr uint32_t usage=RN_BUFFER_MAP_WRITE|RN_BUFFER_COPY_SRC;
     constexpr uint64_t size=16u<<20;
     for(uint32_t id=1;id<=5;++id) {
-        auto allocation=BufferRegistry::Allocate(device,usage,size);
+        auto allocation=BufferPool::Allocate(device,usage,size);
         ASSERT_TRUE(allocation);
-        registry.Register(id,std::move(allocation),{},false);
+        registry.Retire(std::move(allocation),0);
     }
-    for(uint32_t id=1;id<=5;++id) ASSERT_TRUE(registry.Destroy(id));
     for(unsigned i=0;i<4;++i) EXPECT_TRUE(registry.Take(usage,size,0));
     EXPECT_FALSE(registry.Take(usage,size,0));
 }
 
-TEST(BufferRegistry, FlushesInitialAndDirtyRangesOnPooledMappedStorage) {
+TEST(BufferPool, FlushesInitialAndDirtyRangesOnPooledMappedStorage) {
     radray::test::FakeDevice device;
     device.EnableHostBuffers=true;
     radray::vector<BufferRange> flushes;
     device.OnFlush=[&](BufferRange range) { flushes.push_back(range); };
-    BufferRegistry registry;
+    BufferPool registry;
     constexpr uint32_t usage=RN_BUFFER_MAP_WRITE|RN_BUFFER_COPY_SRC|RN_BUFFER_FENCE_ROTATED;
     constexpr uint64_t size=512u<<10;
     ASSERT_TRUE(registry.Prewarm(device));
@@ -151,12 +148,12 @@ TEST(BufferRegistry, FlushesInitialAndDirtyRangesOnPooledMappedStorage) {
     auto pooled=registry.Take(usage,size,0);
     ASSERT_TRUE(pooled);
     ASSERT_NE(pooled->mapped,nullptr);
-    registry.Register(7,std::move(pooled),{},true);
+    ASSERT_TRUE(pooled->upload->FlushMappedRange({0,size}));
     ASSERT_EQ(flushes.size(),1u);
     EXPECT_EQ(flushes[0].Offset,0u);
     EXPECT_EQ(flushes[0].Size,size);
-    const radray::array dirty{rn_mapped_range{7,0,37,19},rn_mapped_range{7,0,201,54}};
-    ASSERT_TRUE(registry.Flush(dirty));
+    const radray::array dirty{rn_mapped_range{pooled.get(),37,19},rn_mapped_range{pooled.get(),201,54}};
+    for(const auto& range:dirty) ASSERT_TRUE(range.buffer->upload->FlushMappedRange({range.offset,range.length}));
     ASSERT_EQ(flushes.size(),3u);
     for(size_t i=0;i<dirty.size();++i) {
         EXPECT_EQ(flushes[i+1].Offset,dirty[i].offset);
@@ -164,27 +161,23 @@ TEST(BufferRegistry, FlushesInitialAndDirtyRangesOnPooledMappedStorage) {
     }
 }
 
-TEST(BufferRegistry, FailedFlushDoesNotRegisterOrPublishWrites) {
+TEST(BufferPool, LostDeviceRejectsMappedRanges) {
     radray::test::FakeDevice device;
     device.EnableHostBuffers=true;
     const auto usage=RN_BUFFER_MAP_WRITE|RN_BUFFER_COPY_SRC|RN_BUFFER_FENCE_ROTATED;
-    auto entry=BufferRegistry::Allocate(device,usage,256);
+    auto entry=BufferPool::Allocate(device,usage,256);
     ASSERT_TRUE(entry);
-    BufferRegistry registry;
     device.Lost=true;
-    EXPECT_FALSE(registry.Register(1,entry,{},true));
-    EXPECT_FALSE(registry.Find(1));
-    ASSERT_TRUE(registry.Register(2,std::move(entry),{},false));
-    const radray::array dirty{rn_mapped_range{2,0,0,16}};
-    EXPECT_FALSE(registry.Flush(dirty));
+    EXPECT_FALSE(entry->upload->FlushMappedRange({0,256}));
+    EXPECT_FALSE(entry->upload->FlushMappedRange({0,16}));
 }
 
-TEST(BufferRegistry, GraphRecognizesPersistentUploadAfterRegistryRelease) {
+TEST(BufferPool, GraphRecognizesPersistentUploadAfterHandleRelease) {
     radray::test::FakeGpu gpu;
     gpu.Device->EnableHostBuffers=true;
     auto scheduler=radray::FrameScheduler::Create(gpu.Context,radray::make_unique<radray::test::CallbackPipeline>(),1).Unwrap();
     radray::RDGBuilder graph{scheduler->BeginFrame()};
-    auto entry=BufferRegistry::Allocate(*gpu.Device,RN_BUFFER_FENCE_ROTATED|RN_BUFFER_MAP_WRITE|RN_BUFFER_VERTEX,256);
+    auto entry=BufferPool::Allocate(*gpu.Device,RN_BUFFER_FENCE_ROTATED|RN_BUFFER_MAP_WRITE|RN_BUFFER_VERTEX,256);
     ASSERT_TRUE(entry);
     ASSERT_EQ(entry->upload->UseCount(),1u);
     auto handle=entry->Import(graph);
@@ -194,6 +187,229 @@ TEST(BufferRegistry, GraphRecognizesPersistentUploadAfterRegistryRelease) {
     graph.UploadBuffer(handle,0,radray::RDGUploadSource::SnapshotBytes(bytes));
     graph.MarkOutput(handle);
     EXPECT_FALSE(graph.Compile());
+}
+
+TEST(TerrainViewCache, VersionsRequireMatchingEpochAndExtent) {
+    TerrainViewCacheSlot cache{};
+    cache.epoch=17;
+    cache.visibleVersion=5;
+    cache.originsVersion=8;
+    cache.instancesVersion=11;
+    cache.visible.resize(2);
+    cache.instances.resize(1);
+    rn_terrain_view_desc view{};
+    view.epoch=17;
+    view.visible_version=5;
+    view.origins_version=8;
+    view.instances_version=11;
+    view.visible_count=2;
+    view.instance_count=1;
+    EXPECT_TRUE(cache.MatchesVisible(view));
+    EXPECT_TRUE(cache.MatchesOrigins(view));
+    EXPECT_TRUE(cache.MatchesInstances(view));
+    ++view.instance_count;
+    EXPECT_FALSE(cache.MatchesOrigins(view));
+    EXPECT_FALSE(cache.MatchesInstances(view));
+    --view.instance_count;
+    ++view.instances_version;
+    EXPECT_TRUE(cache.MatchesOrigins(view));
+    EXPECT_FALSE(cache.MatchesInstances(view));
+    view.instances_version=11;
+    ++view.visible_version;
+    EXPECT_FALSE(cache.MatchesVisible(view));
+    EXPECT_TRUE(cache.MatchesOrigins(view));
+    EXPECT_TRUE(cache.MatchesInstances(view));
+    view.visible_version=5;
+    ++view.epoch;
+    EXPECT_FALSE(cache.MatchesVisible(view));
+    EXPECT_FALSE(cache.MatchesOrigins(view));
+    EXPECT_FALSE(cache.MatchesInstances(view));
+    --view.epoch;
+    cache.visibleVersion=view.visible_version=0;
+    cache.originsVersion=view.origins_version=0;
+    cache.instancesVersion=view.instances_version=0;
+    EXPECT_FALSE(cache.MatchesVisible(view));
+    EXPECT_FALSE(cache.MatchesOrigins(view));
+    EXPECT_FALSE(cache.MatchesInstances(view));
+}
+
+class ShaderProbe final : public Shader {
+public:
+    explicit ShaderProbe(ShaderStages stages) noexcept : _stages(stages) {}
+    bool IsValid() const noexcept override { return true; }
+    void Destroy() noexcept override {}
+    ShaderStages GetStages() const noexcept override { return _stages; }
+private:
+    ShaderStages _stages{};
+};
+
+class BindingGroupLayoutProbe final : public BindingGroupLayout {
+public:
+    bool IsValid() const noexcept override { return true; }
+    void Destroy() noexcept override {}
+    void SetDebugName(std::string_view) noexcept override {}
+    BindingGroupLayoutDescriptor GetDesc() const noexcept override { return {}; }
+};
+
+class TerrainFakeDevice final : public radray::test::FakeDevice {
+public:
+    TerrainFakeDevice() {
+        EnableHostBuffers=true;
+        EnableTextures=true;
+        Capabilities.Limits.MaxColorAttachments=8;
+        Capabilities.Limits.MaxBufferSize=512ull<<20;
+    }
+    TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept override {
+        auto support=radray::test::FakeDevice::QueryTextureSupport(query);
+        support.Blending=true;
+        return support;
+    }
+    radray::Nullable<radray::unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override {
+        return radray::make_unique<ShaderProbe>(desc.Stages);
+    }
+    radray::Nullable<radray::unique_ptr<BindingGroupLayout>> CreateBindingGroupLayout(const BindingGroupLayoutDescriptor&) noexcept override {
+        return radray::make_unique<BindingGroupLayoutProbe>();
+    }
+    radray::Nullable<radray::unique_ptr<PipelineLayout>> CreatePipelineLayout(const PipelineLayoutDescriptor&) noexcept override {
+        return radray::make_unique<radray::test::FakePipelineLayout>();
+    }
+    radray::Nullable<radray::unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override {
+        return radray::make_unique<radray::test::FakePipeline>(desc.PipelineLayout);
+    }
+};
+
+TEST(TerrainResidencyCache, NonReuseRescanWithMatchingVersionsHitsCacheAndPromotesBuffers) {
+    std::ifstream file(RAYNIUM_SHADER_PACK_PATH,std::ios::binary|std::ios::ate);
+    ASSERT_TRUE(file.is_open());
+    const auto packSize=size_t(file.tellg());
+    file.seekg(0);
+    radray::vector<radray::byte> packBytes(packSize);
+    ASSERT_TRUE(file.read(reinterpret_cast<char*>(packBytes.data()),std::streamsize(packSize)));
+
+    auto fakeDevice=radray::make_shared<TerrainFakeDevice>();
+    radray::DeviceContext context{fakeDevice,&fakeDevice->Queue};
+    radray::unique_ptr<MeshPassResources> resources;
+    ASSERT_TRUE(MeshPassResources::Create(context.GetDevice(),packBytes,resources));
+
+    const radray::array layouts{VertexBufferLayout{0,28,VertexStepMode::Vertex},VertexBufferLayout{1,16,VertexStepMode::Instance}};
+    const radray::array attributes{radray::VertexInputAttribute{0,0,"POSITION",0,VertexFormat::FLOAT32X3}};
+    auto vertices=radray::VertexBufferPool::Create(context.GetDevice(),{.VertexStride=28,.PageVertexCapacity=4096,.AdditionalUsage=BufferUse::Resource,.Layouts=layouts,.Attributes=attributes}).Unwrap();
+    auto translucentVertices=radray::VertexBufferPool::Create(context.GetDevice(),{.VertexStride=28,.PageVertexCapacity=4096,.AdditionalUsage=BufferUse::Resource,.Layouts=layouts,.Attributes=attributes}).Unwrap();
+    auto quadPool=radray::IndexBufferPool::Create(context.GetDevice(),{.PageIndexCapacity=65536*6/4,.AdditionalUsage=BufferUse::Resource}).Unwrap();
+    auto indices=radray::IndexBufferPool::Create(context.GetDevice(),{.PageIndexCapacity=4096,.AdditionalUsage=BufferUse::Resource}).Unwrap();
+    TerrainResidency residency(context,std::move(vertices),std::move(translucentVertices),std::move(quadPool),std::move(indices));
+    auto scheduler=radray::FrameScheduler::Create(context,radray::make_unique<radray::test::CallbackPipeline>(),2).Unwrap();
+
+    auto* owner=reinterpret_cast<rn_renderer*>(uintptr_t{1});
+    rn_texture albedo{},light{};
+    albedo.owner=owner; albedo.live=true;
+    light.owner=owner; light.live=true;
+
+    radray::array<radray::byte,112> quadVertices{};
+    rn_terrain_mesh_layout meshLayout{};
+    meshLayout.group_quad_counts[6]=1;
+    meshLayout.flags=RN_TERRAIN_LAYOUT_FINITE_BOUNDS;
+    meshLayout.maximum[0]=meshLayout.maximum[1]=meshLayout.maximum[2]=1.0f;
+    rn_mesh_update meshUpdate{1,quadVertices.data(),4,RN_MATERIAL_OPAQUE,&meshLayout};
+    rn_visible_item visibleItem{1,UINT32_MAX,0,0,1};
+    rn_instance initialInstance{{0,0,0},1.0f};
+
+    auto makeView=[&](uint64_t seq,uint64_t visVer,uint64_t origVer,uint64_t instVer,const rn_instance* instPtr,bool withMesh) {
+        rn_terrain_view_desc view{};
+        view.struct_size=sizeof(view);
+        view.epoch=1;
+        view.output_sequence=seq;
+        view.meshes=withMesh?&meshUpdate:nullptr;
+        view.mesh_count=withMesh?1u:0u;
+        view.visible=&visibleItem;
+        view.visible_count=1;
+        view.instances=instPtr;
+        view.instance_count=1;
+        view.terrain_anisotropy=1;
+        view.terrain_albedo_texture=&albedo;
+        view.terrain_light_texture=&light;
+        for(int i=0;i<16;i+=5) view.projection[i]=view.view[i]=1.0f;
+        view.visible_version=visVer;
+        view.origins_version=origVer;
+        view.instances_version=instVer;
+        return view;
+    };
+
+    auto runFrame=[&](const rn_terrain_view_desc& view,TerrainFrame& outFrame) {
+        auto& slot=scheduler->BeginFrame();
+        residency.BeginSlotViews({&view,1},slot);
+        std::pmr::vector<GeometryUpload> geometry(&slot.GetMemoryResource());
+        const bool ok=residency.PrepareFrame(owner,view,*resources,{slot,geometry,residency.View(0),true},outFrame);
+        EXPECT_TRUE(scheduler->RunFrame());
+        return ok;
+    };
+
+    TerrainFrame frame{};
+    ASSERT_TRUE(runFrame(makeView(1,10,10,10,&initialInstance,true),frame));
+    EXPECT_FALSE(frame.persistentInstances);
+    EXPECT_FALSE(frame.persistentIndirect[0]);
+
+    // Frame 2: non-reuse rescan with identical versions hits MatchesVisible/MatchesOrigins/MatchesInstances and skips copying instances.
+    rn_instance sentinelInstance{{999,999,999},0.25f};
+    ASSERT_TRUE(runFrame(makeView(2,10,10,10,&sentinelInstance,false),frame));
+    ASSERT_EQ(residency.View(0).instances.size(),1u);
+    EXPECT_EQ(residency.View(0).instances[0].origin[0],0);
+    EXPECT_FLOAT_EQ(residency.View(0).instances[0].visibility,1.0f);
+    EXPECT_EQ(residency.View(0).instanceBuffer.stableFrames,1u);
+    EXPECT_EQ(residency.View(0).argumentBuffers[0].stableFrames,1u);
+
+    // Frame 3: second consecutive hit promotes both instance and indirect argument buffers.
+    ASSERT_TRUE(runFrame(makeView(3,10,10,10,&sentinelInstance,false),frame));
+    EXPECT_TRUE(frame.persistentInstances);
+    EXPECT_TRUE(frame.uploadInstances);
+    EXPECT_TRUE(frame.persistentIndirect[0]);
+    EXPECT_TRUE(frame.uploadIndirect[0]);
+
+    // Frame 4: steady reuse avoids uploading both buffers.
+    ASSERT_TRUE(runFrame(makeView(4,10,10,10,&sentinelInstance,false),frame));
+    EXPECT_TRUE(frame.persistentInstances);
+    EXPECT_FALSE(frame.uploadInstances);
+    EXPECT_TRUE(frame.persistentIndirect[0]);
+    EXPECT_FALSE(frame.uploadIndirect[0]);
+
+    // Frame 5: visibility-only change bumps instances_version -> updates instances while keeping indirect arguments promoted.
+    rn_instance fadedInstance{{0,0,0},0.5f};
+    ASSERT_TRUE(runFrame(makeView(5,10,10,20,&fadedInstance,false),frame));
+    EXPECT_FLOAT_EQ(residency.View(0).instances[0].visibility,0.5f);
+    EXPECT_FALSE(frame.persistentInstances);
+    EXPECT_TRUE(frame.persistentIndirect[0]);
+    EXPECT_FALSE(frame.uploadIndirect[0]);
+}
+
+TEST(FrameOpInline, StoresSmallTrivialPayloadsInlineAndLargeByPointer) {
+    struct Small { uint32_t value; };
+    struct Large { uint64_t a,b; };
+    using Op=FrameOp<uint32_t,Small,Large>;
+    static_assert(Op::kInline<uint32_t>);
+    static_assert(Op::kInline<Small>);
+    static_assert(!Op::kInline<Large>);
+    static_assert(std::is_trivially_destructible_v<Op>);
+
+    Op empty{};
+    EXPECT_FALSE(empty.Get<uint32_t>().has_value());
+    EXPECT_FALSE(empty.Get<Small>().has_value());
+    EXPECT_EQ(empty.Get<Large>(),nullptr);
+
+    Op inlineU32(42u);
+    ASSERT_TRUE(inlineU32.Get<uint32_t>().has_value());
+    EXPECT_EQ(*inlineU32.Get<uint32_t>(),42u);
+    EXPECT_FALSE(inlineU32.Get<Small>().has_value());
+    EXPECT_EQ(inlineU32.Get<Large>(),nullptr);
+
+    Op inlineSmall(Small{99u});
+    ASSERT_TRUE(inlineSmall.Get<Small>().has_value());
+    EXPECT_EQ(inlineSmall.Get<Small>()->value,99u);
+    EXPECT_FALSE(inlineSmall.Get<uint32_t>().has_value());
+
+    Large payload{123,456};
+    Op external(&payload);
+    EXPECT_EQ(external.Get<Large>(),&payload);
+    EXPECT_FALSE(external.Get<uint32_t>().has_value());
 }
 
 TEST(TerrainBounds, OnlyStrictlySeparatedScreenBoundsCanCross) {
@@ -249,10 +465,11 @@ TEST(InstancedGeometry, ValidatesStrideAndCombinesAdjacentRunsOnTheSamePage) {
     ASSERT_TRUE(quad);
     const radray::array runs{InstancedGeometryFeature::WireRun{1, 0, 1, 0}, InstancedGeometryFeature::WireRun{2, 1, 2, 0}};
     const radray::array layouts{VertexBufferLayout{1, 56, VertexStepMode::Instance}};
-    radray::vector<DrawIndexedIndirectArguments> args;
-    InstancedGeometryFeature feature;
+    std::pmr::monotonic_buffer_resource memory;
+    std::pmr::vector<DrawIndexedIndirectArguments> args(&memory);
+    InstancedGeometryFeature feature{};
     auto decode = [&](size_t runCount, uint32_t stride, uint64_t offset, bool mdi) {
-        return feature.DecodeRuns(std::as_bytes(std::span(runs).first(runCount)), 3, stride, offset, 168,
+        return feature.DecodeRuns(memory,std::as_bytes(std::span(runs).first(runCount)), 3, stride, offset, 168,
             layouts, *geometry, *quad, args, mdi, 2);
     };
     EXPECT_FALSE(decode(2, 64, 0, true));
@@ -460,95 +677,33 @@ TEST(SceneFrameUpload, ExpandedLinesPreserveBothEndpointSides) {
     EXPECT_FALSE(WriteLineIndices({}, 2)); EXPECT_TRUE(WriteLineIndices({}, 0));
 }
 
-bool AnalyzeAndWrite(std::span<const radray::byte> source, rn_material_mode layer, TerrainMeshLayout& layout, radray::vector<radray::byte>& bytes) {
-    std::pmr::monotonic_buffer_resource memory;
-    TerrainMeshUpload upload{memory};
-    if (!AnalyzeTerrainMesh(source, layer, layout, upload)) return false;
-    bytes.resize(source.size()); return upload.Write(bytes);
-}
-
-radray::vector<radray::byte> Quad(uint32_t group, float plane = 0) {
-    float points[4][3]{};
-    if (group < 6) {
-        const uint32_t a = group / 2, b = (a + 1) % 3, c = (a + 2) % 3;
-        for (auto& point : points) point[a] = plane;
-        points[1][b] = 1; points[2][b] = 1; points[2][c] = 1; points[3][c] = 1;
-        if (group & 1) for (uint32_t i = 0; i < 3; i++) std::swap(points[1][i], points[3][i]);
+rn_terrain_mesh_layout GroupLayout(std::span<const uint32_t> groups,radray::vector<uint8_t>& packed) {
+    rn_terrain_mesh_layout wire{};
+    for(auto group:groups) ++wire.group_quad_counts[group];
+    if(!groups.empty()) {
+        wire.flags=RN_TERRAIN_LAYOUT_FINITE_BOUNDS;
+        std::fill_n(wire.maximum,3,1.5f);
     }
-    radray::vector<radray::byte> bytes(112);
-    for (uint32_t v = 0; v < 4; ++v) {
-        std::memcpy(bytes.data() + v * 28, points[v], 12);
-        const uint32_t color = 0x12340000 + group; std::memcpy(bytes.data() + v * 28 + 12, &color, 4);
+    if(std::count_if(std::begin(wire.group_quad_counts),std::end(wire.group_quad_counts),[](auto n){return n>0;})>1) {
+        packed.assign((groups.size()*3+7)/8,0);
+        for(size_t i=0;i<groups.size();++i) {
+            auto bit=i*3;
+            packed[bit/8]|=uint8_t(groups[i]<<(bit%8));
+            if(bit%8>5) packed[bit/8+1]|=uint8_t(groups[i]>>(8-bit%8));
+        }
+        wire.flags|=RN_TERRAIN_LAYOUT_WIREFRAME_GROUPS;
+        wire.original_quad_groups=packed.data();
+        wire.original_quad_groups_bytes=uint32_t(packed.size());
     }
-    return bytes;
+    return wire;
 }
 
-TEST(TerrainMeshAnalysis, ReordersSevenGroupsWithoutChangingVertexBytesOrWithinGroupOrder) {
-    radray::vector<radray::byte> source(13); for (int g = 6; g >= 0; --g) { auto q = Quad(g); source.insert(source.end(), q.begin(), q.end()); }
-    auto q = Quad(0, 2); source.insert(source.end(), q.begin(), q.end());
-    TerrainMeshLayout layout; radray::vector<radray::byte> bytes;
-    ASSERT_TRUE(AnalyzeAndWrite(std::span{source}.subspan(13), RN_MATERIAL_OPAQUE, layout, bytes));
-    ASSERT_EQ(layout.ranges.size(), 7); EXPECT_EQ(layout.ranges[0].count, 12);
-    EXPECT_EQ(layout.groupBits, (radray::array<uint32_t, 7>{1, 2, 4, 8, 16, 32, 64}));
-    radray::vector<radray::byte> expected;
-    for (uint32_t g = 0; g < 7; g++) { auto first = Quad(g); expected.insert(expected.end(), first.begin(), first.end()); if (g == 0) expected.insert(expected.end(), q.begin(), q.end()); }
-    EXPECT_EQ(bytes, expected);
-    rn_terrain_view_desc frame{}; rn_instance instance{};
-    frame.camera_fraction[0] = frame.camera_fraction[1] = frame.camera_fraction[2] = -2;
-    EXPECT_EQ(TerrainVisibleMask(layout, {{}, true}, frame, {&instance, 1}), 0b1101010u);
-    frame.camera_fraction[0] = 3; frame.camera_fraction[1] = frame.camera_fraction[2] = 2;
-    EXPECT_EQ(TerrainVisibleMask(layout, {{}, true}, frame, {&instance, 1}), 0b1010101u);
-}
-
-TEST(TerrainMeshAnalysis, OutlyingBoundsSparseGroupsAndEveryInstanceRemainConservative) {
-    auto source = Quad(0, 32); TerrainMeshLayout layout; radray::vector<radray::byte> bytes;
-    ASSERT_TRUE(AnalyzeAndWrite(source, RN_MATERIAL_CUTOUT, layout, bytes));
-    EXPECT_EQ(layout.minimum[0], 32); EXPECT_EQ(layout.maximum[0], 32);
-    rn_terrain_view_desc frame{}; const rn_instance instances[]{{{-31, 0, 0}, 1}, {{-33, 0, 0}, 1}};
-    EXPECT_EQ(TerrainVisibleMask(layout, {{}, true}, frame, {instances, 1}), 0u);
-    EXPECT_EQ(TerrainVisibleMask(layout, {{}, true}, frame, instances), 1u);
-    frame.camera_block[0] = INT32_MAX; rn_instance far{{INT32_MAX - 32, 0, 0}, 1};
-    EXPECT_EQ(TerrainVisibleMask(layout, {{}, true}, frame, {&far, 1}), 1u);
-    frame.camera_fraction[0] = std::numeric_limits<float>::quiet_NaN();
-    EXPECT_EQ(TerrainVisibleMask(layout, {{}, true}, frame, {&far, 1}), 1u);
-    source = Quad(5); auto second = Quad(2); source.insert(source.end(), second.begin(), second.end());
-    ASSERT_TRUE(AnalyzeAndWrite(source, RN_MATERIAL_OPAQUE, layout, bytes));
-    EXPECT_EQ(layout.groupBits[2], 1); EXPECT_EQ(layout.groupBits[5], 2);
-    frame = {}; frame.camera_fraction[1] = -2; frame.camera_fraction[2] = 2; rn_instance origin{};
-    EXPECT_EQ(TerrainVisibleMask(layout, {{}, true}, frame, {&origin, 1}), 0u);
-}
-
-TEST(TerrainMeshAnalysis, NonplanarInconsistentDegenerateAndNonfiniteQuadsStayGeneral) {
-    auto source = Quad(0); float value = .1f; std::memcpy(source.data() + 56, &value, 4);
-    TerrainMeshLayout layout; radray::vector<radray::byte> bytes;
-    ASSERT_TRUE(AnalyzeAndWrite(source, RN_MATERIAL_OPAQUE, layout, bytes)); EXPECT_EQ(layout.groupBits[6], 1);
-    source = Quad(0); value = 2; std::memcpy(source.data() + 84 + 4, &value, 4);
-    ASSERT_TRUE(AnalyzeAndWrite(source, RN_MATERIAL_OPAQUE, layout, bytes)); EXPECT_EQ(layout.groupBits[6], 1);
-    source = Quad(6); ASSERT_TRUE(AnalyzeAndWrite(source, RN_MATERIAL_OPAQUE, layout, bytes)); EXPECT_EQ(layout.groupBits[6], 1);
-    source = Quad(0); value = std::numeric_limits<float>::quiet_NaN(); std::memcpy(source.data(), &value, 4);
-    ASSERT_TRUE(AnalyzeAndWrite(source, RN_MATERIAL_OPAQUE, layout, bytes)); EXPECT_FALSE(layout.finiteBounds);
-    rn_terrain_view_desc frame{}; rn_instance instance{};
-    EXPECT_EQ(TerrainVisibleMask(layout, {{}, true}, frame, {&instance, 1}), 1u);
-    EXPECT_TRUE(AnalyzeAndWrite({}, RN_MATERIAL_OPAQUE, layout, bytes)); EXPECT_TRUE(layout.ranges.empty());
-    EXPECT_FALSE(AnalyzeAndWrite(std::span{source}.first(111), RN_MATERIAL_OPAQUE, layout, bytes));
-}
-
-TEST(TerrainMeshAnalysis, TranslucencyPreservesCompilerOrder) {
-    auto source = Quad(5); auto q = Quad(0); source.insert(source.end(), q.begin(), q.end());
-    TerrainMeshLayout layout; radray::vector<radray::byte> bytes;
-    ASSERT_TRUE(AnalyzeAndWrite(source, RN_MATERIAL_TRANSLUCENT, layout, bytes));
-    EXPECT_EQ(bytes, source); ASSERT_EQ(layout.ranges.size(), 1); EXPECT_EQ(layout.ranges[0].count, 12);
-    EXPECT_TRUE(layout.originalQuadGroups.empty());
-}
-
-TEST(TerrainMeshAnalysis, PackedWireframeIndicesRestoreOriginalVerticesForEveryFaceMask) {
+TEST(TerrainPreanalyzedLayout, PackedWireframeIndicesRestoreOriginalVerticesForEveryFaceMask) {
     const radray::array<uint32_t, 11> groups{6, 0, 5, 2, 0, 1, 4, 3, 6, 2, 5};
-    radray::vector<radray::byte> source;
-    for (size_t n = 0; n < groups.size(); ++n) { auto q = Quad(groups[n], float(n)); source.insert(source.end(), q.begin(), q.end()); }
-    TerrainMeshLayout layout; radray::vector<radray::byte> grouped;
-    ASSERT_TRUE(AnalyzeAndWrite(source, RN_MATERIAL_OPAQUE, layout, grouped));
-    ASSERT_EQ(layout.originalQuadGroups.size(), 5u);
-    ASSERT_NE(grouped, source);
+    radray::vector<uint8_t> packed;
+    auto wire=GroupLayout(groups,packed);
+    TerrainMeshLayout layout;
+    ASSERT_TRUE(BuildPreanalyzedTerrainMeshLayout(wire,uint32_t(4*groups.size()),RN_MATERIAL_OPAQUE,layout));
     const radray::array<uint32_t, 6> vertices{0, 1, 2, 2, 3, 0};
     for (uint32_t mask = 0; mask < 128; ++mask) {
         size_t selected = 0; for (auto g : groups) if (mask & layout.groupBits[g]) ++selected;
@@ -559,25 +714,30 @@ TEST(TerrainMeshAnalysis, PackedWireframeIndicesRestoreOriginalVerticesForEveryF
         for (size_t q = 0; q < groups.size(); ++q) if (mask & layout.groupBits[groups[q]]) for (auto vertex : vertices) {
             uint32_t actual; std::memcpy(&actual, storage.data() + 1 + index++ * 4, 4);
             ASSERT_LT(actual, layout.vertexCount);
-            EXPECT_EQ(std::memcmp(grouped.data() + actual * 28, source.data() + (q * 4 + vertex) * 28, 28), 0);
+            const auto group=groups[q];
+            size_t prior=std::count_if(groups.begin(),groups.end(),[&](auto g){return g<group;});
+            prior+=std::count(groups.begin(),groups.begin()+q,group);
+            EXPECT_EQ(actual,prior*4+vertex);
         }
     }
     EXPECT_FALSE(WriteWireframeIndices({}, layout, 128));
     EXPECT_FALSE(WriteWireframeIndices({}, layout, 127));
 }
 
-TEST(TerrainMeshAnalysis, SingleGroupNeedsNoRetainedWireframePermutation) {
-    TerrainMeshLayout layout; radray::vector<radray::byte> grouped;
-    ASSERT_TRUE(AnalyzeAndWrite(Quad(4), RN_MATERIAL_CUTOUT, layout, grouped));
+TEST(TerrainPreanalyzedLayout, SingleGroupNeedsNoRetainedWireframePermutation) {
+    TerrainMeshLayout layout;
+    radray::vector<uint8_t> packed;
+    const radray::array groups{4u};
+    ASSERT_TRUE(BuildPreanalyzedTerrainMeshLayout(GroupLayout(groups,packed),4,RN_MATERIAL_CUTOUT,layout));
     EXPECT_TRUE(layout.originalQuadGroups.empty());
     radray::array<radray::byte, 24> indices{}, expected{};
     ASSERT_TRUE(WriteWireframeIndices(indices, layout, 1)); ASSERT_TRUE(WriteQuadIndices(expected, 4));
     EXPECT_EQ(indices, expected); EXPECT_TRUE(WriteWireframeIndices({}, layout, 0));
-    ASSERT_TRUE(AnalyzeAndWrite({}, RN_MATERIAL_OPAQUE, layout, grouped));
+    ASSERT_TRUE(BuildPreanalyzedTerrainMeshLayout({},0,RN_MATERIAL_OPAQUE,layout));
     EXPECT_TRUE(WriteWireframeIndices({}, layout, 0));
 }
 
-TEST(TerrainMeshAnalysis, InverseProjectionEyeIncludesTranslationAndRejectsInvalidMatrices) {
+TEST(TerrainPreanalyzedLayout, InverseProjectionEyeIncludesTranslationAndRejectsInvalidMatrices) {
     rn_terrain_view_desc frame{};
     for (uint32_t i = 0; i < 4; i++) frame.projection[i * 5] = frame.view[i * 5] = 1;
     EXPECT_FALSE(ComputeTerrainEye(frame).valid);
@@ -588,55 +748,35 @@ TEST(TerrainMeshAnalysis, InverseProjectionEyeIncludesTranslationAndRejectsInval
     frame = {}; EXPECT_FALSE(ComputeTerrainEye(frame).valid);
 }
 
-TEST(TerrainPreanalyzedLayout, MatchesAnalyzeTerrainMeshAndRejectsMalformedLayouts) {
+TEST(TerrainPreanalyzedLayout, DecodesGroupRangesAndRejectsMalformedLayouts) {
     const radray::array<uint32_t, 11> groups{6, 0, 5, 2, 0, 1, 4, 3, 6, 2, 5};
-    radray::vector<radray::byte> source;
-    for (size_t n = 0; n < groups.size(); ++n) {
-        auto q = Quad(groups[n], float(n));
-        source.insert(source.end(), q.begin(), q.end());
-    }
-    TerrainMeshLayout expected;
-    radray::vector<radray::byte> grouped;
-    ASSERT_TRUE(AnalyzeAndWrite(source, RN_MATERIAL_OPAQUE, expected, grouped));
-
-    rn_terrain_mesh_layout wire{};
-    for (uint32_t g : groups) ++wire.group_quad_counts[g];
-    wire.flags = RN_TERRAIN_LAYOUT_FINITE_BOUNDS | RN_TERRAIN_LAYOUT_WIREFRAME_GROUPS;
-    for (uint32_t a = 0; a < 3; ++a) {
-        wire.minimum[a] = float(expected.minimum[a]);
-        wire.maximum[a] = float(expected.maximum[a]);
-    }
-    wire.original_quad_groups = expected.originalQuadGroups.data();
-    wire.original_quad_groups_bytes = uint32_t(expected.originalQuadGroups.size());
-
+    radray::vector<uint8_t> packed;
+    auto wire=GroupLayout(groups,packed);
+    constexpr uint32_t vertexCount=uint32_t(groups.size())*4;
     TerrainMeshLayout actual;
-    ASSERT_TRUE(BuildPreanalyzedTerrainMeshLayout(wire, expected.vertexCount, RN_MATERIAL_OPAQUE, actual));
-    EXPECT_EQ(actual.vertexCount, expected.vertexCount);
-    EXPECT_EQ(actual.layer, expected.layer);
-    EXPECT_EQ(actual.finiteBounds, expected.finiteBounds);
-    EXPECT_EQ(actual.groupBits, expected.groupBits);
-    EXPECT_EQ(actual.originalQuadGroups, expected.originalQuadGroups);
-    ASSERT_EQ(actual.ranges.size(), expected.ranges.size());
-    for (size_t i = 0; i < expected.ranges.size(); ++i) {
-        EXPECT_EQ(actual.ranges[i].first, expected.ranges[i].first);
-        EXPECT_EQ(actual.ranges[i].count, expected.ranges[i].count);
-    }
-    for (uint32_t a = 0; a < 3; ++a) {
-        EXPECT_DOUBLE_EQ(actual.minimum[a], expected.minimum[a]);
-        EXPECT_DOUBLE_EQ(actual.maximum[a], expected.maximum[a]);
+    ASSERT_TRUE(BuildPreanalyzedTerrainMeshLayout(wire,vertexCount,RN_MATERIAL_OPAQUE,actual));
+    EXPECT_EQ(actual.vertexCount,vertexCount);
+    EXPECT_EQ(actual.originalQuadGroups,packed);
+    ASSERT_EQ(actual.ranges.size(),7u);
+    uint32_t first=0;
+    for(size_t i=0;i<7;++i) {
+        EXPECT_EQ(actual.groupBits[i],1u<<i);
+        EXPECT_EQ(actual.ranges[i].first,first);
+        EXPECT_EQ(actual.ranges[i].count,wire.group_quad_counts[i]*6);
+        first+=actual.ranges[i].count;
     }
 
     // Rejection paths.
     auto badCount = wire; badCount.group_quad_counts[0] += 1;
-    EXPECT_FALSE(BuildPreanalyzedTerrainMeshLayout(badCount, expected.vertexCount, RN_MATERIAL_OPAQUE, actual));
+    EXPECT_FALSE(BuildPreanalyzedTerrainMeshLayout(badCount, vertexCount, RN_MATERIAL_OPAQUE, actual));
     auto badBounds = wire; badBounds.minimum[1] = 100.0f; badBounds.maximum[1] = 1.0f;
-    EXPECT_FALSE(BuildPreanalyzedTerrainMeshLayout(badBounds, expected.vertexCount, RN_MATERIAL_OPAQUE, actual));
+    EXPECT_FALSE(BuildPreanalyzedTerrainMeshLayout(badBounds, vertexCount, RN_MATERIAL_OPAQUE, actual));
     auto badWf = wire; badWf.original_quad_groups_bytes -= 1;
-    EXPECT_FALSE(BuildPreanalyzedTerrainMeshLayout(badWf, expected.vertexCount, RN_MATERIAL_OPAQUE, actual));
+    EXPECT_FALSE(BuildPreanalyzedTerrainMeshLayout(badWf, vertexCount, RN_MATERIAL_OPAQUE, actual));
     auto badReserved = wire; badReserved.reserved = 1;
-    EXPECT_FALSE(BuildPreanalyzedTerrainMeshLayout(badReserved, expected.vertexCount, RN_MATERIAL_OPAQUE, actual));
+    EXPECT_FALSE(BuildPreanalyzedTerrainMeshLayout(badReserved, vertexCount, RN_MATERIAL_OPAQUE, actual));
     auto badTranslucent = wire;
-    EXPECT_FALSE(BuildPreanalyzedTerrainMeshLayout(badTranslucent, expected.vertexCount, RN_MATERIAL_TRANSLUCENT, actual));
+    EXPECT_FALSE(BuildPreanalyzedTerrainMeshLayout(badTranslucent, vertexCount, RN_MATERIAL_TRANSLUCENT, actual));
 
     // Valid translucent preanalyzed layout (only group 6, no wireframe groups).
     rn_terrain_mesh_layout transWire{};
@@ -681,14 +821,10 @@ TEST(TerrainHotSlotFastPath, PackedAndWideRangesMatchEveryFaceMask) {
 }
 
 TEST(TerrainHotSlotFastPath, CrossingMaskAndContiguousArgumentsMatchReference) {
-    radray::vector<radray::byte> source;
-    // Sparse groups: 0 (+X, 2 quads), 2 (+Y, 1 quad), 3 (-Y, 1 quad), 6 (general, 1 quad).
-    for (auto q : {Quad(0, 0), Quad(0, 1), Quad(2, 0.5f), Quad(3, 1.5f), Quad(6, 0)}) {
-        source.insert(source.end(), q.begin(), q.end());
-    }
+    const radray::array groups{0u,0u,2u,3u,6u};
+    radray::vector<uint8_t> packed;
     TerrainMeshLayout layout;
-    radray::vector<radray::byte> grouped;
-    ASSERT_TRUE(AnalyzeAndWrite(source, RN_MATERIAL_OPAQUE, layout, grouped));
+    ASSERT_TRUE(BuildPreanalyzedTerrainMeshLayout(GroupLayout(groups,packed),20,RN_MATERIAL_OPAQUE,layout));
 
     TerrainHotSlot hot{};
     for (uint32_t a = 0; a < 3; ++a) {

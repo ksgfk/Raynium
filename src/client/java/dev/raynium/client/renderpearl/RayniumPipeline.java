@@ -9,8 +9,8 @@ import java.util.List;
 
 final class RayniumPipeline implements BackendRenderPipeline {
     final NativeRenderer owner;
-    final int id;
-    final int instancedId;
+    final long handle;
+    final long instancedHandle;
     final String instancedMode;
     final List<RayniumPrograms.Route> instancedRoutes;
     final int[] instancedUniformMap;
@@ -29,7 +29,7 @@ final class RayniumPipeline implements BackendRenderPipeline {
         this.pushBytes=pipeline.pushConstantSize();
         this.routes=prepared.routes();
         this.onClose=onClose;
-        this.id=owner.registerPipeline(prepared.name(),prepared.words(),prepared.pack());
+        this.handle=owner.registerPipeline(prepared.name(),prepared.words(),prepared.pack());
         var inst=prepared.instanced();
         if(inst!=null) {
             int[] map=new int[inst.uniforms().size()];
@@ -40,18 +40,18 @@ final class RayniumPipeline implements BackendRenderPipeline {
                 map[i]=baseIndex;
             }
             if(allMapped) {
-                this.instancedId=owner.registerPipeline(inst.name(),inst.words(),null);
+                this.instancedHandle=owner.registerPipeline(inst.name(),inst.words(),null);
                 this.instancedMode=inst.mode();
                 this.instancedRoutes=inst.routes();
                 this.instancedUniformMap=map;
             } else {
-                this.instancedId=0;
+                this.instancedHandle=0;
                 this.instancedMode=null;
                 this.instancedRoutes=List.of();
                 this.instancedUniformMap=new int[0];
             }
         } else {
-            this.instancedId=0;
+            this.instancedHandle=0;
             this.instancedMode=null;
             this.instancedRoutes=List.of();
             this.instancedUniformMap=new int[0];
@@ -74,7 +74,7 @@ final class RayniumPipeline implements BackendRenderPipeline {
     }
 
     boolean supportsInstanced(String mode) {
-        return !closed && instancedId!=0 && mode.equals(instancedMode);
+        return !closed && instancedHandle!=0 && mode.equals(instancedMode);
     }
 
     void retain() {
@@ -87,8 +87,8 @@ final class RayniumPipeline implements BackendRenderPipeline {
     }
 
     private void destroyNative() {
-        owner.destroyPipeline(id);
-        if(instancedId!=0) owner.destroyPipeline(instancedId);
+        owner.destroyPipeline(handle);
+        if(instancedHandle!=0) owner.destroyPipeline(instancedHandle);
     }
 
     @Override public boolean isClosed() { return closed; }

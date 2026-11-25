@@ -1,6 +1,6 @@
 #pragma once
 #include <algorithm>
-#include <raynium/texture_registry.h>
+#include <raynium/resource_uploads.h>
 #include <raynium/shader_pack.h>
 #include <raynium/frame_upload.h>
 

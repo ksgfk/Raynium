@@ -19,7 +19,7 @@
 
 `TerrainCapture` 复用扁平数组并跨连续活跃帧保留热快照；当视图、可见列表和淡入时长匹配时，采集器按世代和槽号定位变更区块，并刷新活动淡入。区块替换和透明索引更新同时到达时，按当前槽位归并上传候选，候选用槽号世代戳去重，淡入成员用布尔数组跟踪。每次最多就地处理 `max(256, 可见槽数 / 4)` 个通知。可见区块从空变为非空或从非空变为空、脏项超限或无法沿用快照时，在 dispatcher 锁内采集区块状态、原点和上传时间并分配槽号，解锁后计算淡入和筛选上传候选。投影包含受伤、摇晃与反胃变换；每帧由 Native 进行朝向剔除。普通透明保持原版反向 section 顺序；其他层按原版可见遍历顺序送入，由 Native 按页分桶组织。连续两帧未捕获、失效或停用时释放快照引用；关闭的 section 进入延迟回收队列。
 
-同批的每个视图独占一份 `NativeFrameBuffer`。Java `TerrainResidency` 在 MC 主线程通过空闲栈为暂存/驻留的每个 `MeshPayload` 分配 32 位稠密槽位号 `slotId`（`1..maxSlot`，`0` 保留为空），提交淘汰时回收，未提交的分配在下次准备前自动回滚，epoch 切换时重置。受控地形视图固定池化顶点和索引，直至 worker 消费完整个帧包。公共 `meshDirect`、`indexDirect` 入口复制外部段，公共 `addView` 批次在入队时复制视图负载。可见项与实例通过复用 `int[]` 暂存批量 `MemorySegment.copy` 写入。
+同批的每个视图独占一份 `NativeFrameBuffer`。Java `TerrainResidency` 在 MC 主线程通过空闲栈为暂存/驻留的每个 `MeshPayload` 分配 32 位稠密槽位号 `slotId`（`1..maxSlot`，`0` 保留为空），提交淘汰时回收，未提交的分配在下次准备前自动回滚，epoch 切换时重置。受控地形视图使用原子引用计数固定池化顶点和索引，复用各自的原生段，直至 worker 消费完整个批次。公共 `meshDirect`、`indexDirect` 入口复制外部段，公共 `addView` 批次在入队时复制视图负载。可见项与实例通过复用 `int[]` 暂存批量 `MemorySegment.copy` 写入。
 
 ## 驻留与顶点释放
 
@@ -38,7 +38,7 @@ Java `TerrainResidency` 保留 3 MiB 软预算，按整个 section 的三层及�
 
 ## Native 分组与保守剔除
 
-`rn_mesh_update` 携带可选的 `rn_terrain_mesh_layout* layout`：提供时 Native 通过 `BuildPreanalyzedTerrainMeshLayout` 以 $O(1)$ 校验每组 quad 计数、包围盒及可选 3 位线框组号，并以 `RDGUploadSource::BorrowedBytes` 连续上传顶点；`layout == nullptr` 时回退到 `AnalyzeTerrainMesh` 在准备期完成分组与生成写入。
+`rn_mesh_update.layout` 必须指向预分析布局。Java 的 `MeshPayload` 完成顶点分组。Native 通过 `BuildPreanalyzedTerrainMeshLayout` 校验七组 quad 计数、包围盒及线框组号负载长度，并借用分组后的连续顶点用于上传。
 分组规则为：SOLID/CUTOUT 检查精确轴向平面及两个三角形绕序，记录六轴向加 general 的分组与偏移，按实际顶点计算 AABB（允许模型超出 section），非平面、退化、绕序不一致进入 general，非有限数据保守可见；非空组映射到紧凑 submesh 位；TRANSLUCENT 保持原 quad 顺序与单 submesh。
 共享 Quad 索引由 Native 管理；透明索引归对应 mesh，mesh 删除时同时退役。
 
@@ -54,7 +54,7 @@ Native 按视图求逆 projection × view，变换 (0,0,1,0) 得到有效视点�
 
 `TerrainResidency` 通过按 `slotId` 索引的平坦数组（`meshesBySlot`，上限 `kMaxMeshSlot`）和 64 字节对齐热数组（`_hotSlots`）实现 $O(1)$ 寻址。几何池均开启 `BufferUse::Resource`，分为 128 MiB/页的 `TerrainVertices`（承载 `OPAQUE` 与 `CUTOUT`）、独立的每页至多 512 MiB、受设备单缓冲上限约束的 `TranslucentVertices`（承载 `TRANSLUCENT`）、专供共享四边形的 16 MiB 索引页及半透明和线框使用的 128 MiB 索引页。帧槽回收后可释放空闲页。
 
-每个视图按层缓存实例、可见列表、分页代表命令及索引绘制参数。Solid 和 Cutout 在有效视点各轴 ±1 方块内记录可能跨越可见平面的区块及其有效面掩码。视点在盒内移动且触及候选平面时，只复查这些候选。相同视点和未触及平面的位移直接复用绘制参数。有效掩码翻转、离开盒子或几何版本变化会触发重建。线框对多面组使用按请求掩码生成的原序索引。经典透明以排序键为初始顺序，跨页时在八项窗口内仅将投影包围盒与所有被跨越项严格分离的单实例调到同页项旁。包围盒无效或穿过视点时维持原序。发生交换的绘制参数在下个视图重建。OIT 按顶点和索引页合批。
+每个视图按层缓存实例、可见列表、分页代表命令及索引绘制参数。Java 在完整重扫与淡入增量更新中分别比对可见项、区块坐标和完整实例（含淡入可见度）并维护三组单调版本号：仅可见集变化或发生网格增删时更新 `visible_version`，仅区块坐标或实例数变化时更新 `origins_version`，任一实例坐标、可见度或数量变化时更新 `instances_version`；epoch 重置时三者一并清零。Native 按 epoch、元素数和非零版本以 $O(1)$ 判定可见列表、原点和完整实例是否未变：即使未挂复用标志，三者命中时仍跳过实例拷贝并维持实例缓冲与各层间接参数缓冲的常驻晋升；仅淡入系数变化时推进 `instances_version` 并上传新实例可见度，同时复用原点相关的面剔除结果与间接参数。Solid 和 Cutout 在有效视点各轴 ±1 方块内记录可能跨越可见平面的区块及其有效面掩码。视点在盒内移动且触及候选平面时，只复查这些候选。相同视点和未触及平面的位移直接复用绘制参数。有效掩码翻转、离开盒子或几何版本变化会触发重建。线框对多面组使用按请求掩码生成的原序索引。经典透明以排序键为初始顺序，跨页时在八项窗口内仅将投影包围盒与所有被跨越项严格分离的单实例调到同页项旁。包围盒无效或穿过视点时维持原序。发生交换的绘制参数在下个视图重建。OIT 按顶点和索引页合批。
 
 变化的实例表和逐层间接参数使用当前帧槽的瞬态 RDG 缓冲。内容和有效字节数保持相同，且连续两次用于绘制后，视图将数据上传到专属 Device 缓冲。后续命中帧只导入缓冲。没有地形绘制时，未变的实例表保留原缓冲和命中计数。实例表有变化则重新计数，等待恢复绘制后晋升。
 
@@ -62,9 +62,9 @@ Native 按视图求逆 projection × view，变换 (0,0,1,0) 得到有效视点�
 
 ## 绘制与 OIT
 
-`TerrainAnchorMixin` 从原版 `renderLayers` 调用捕获当前三层或 OIT 阶段以及该次绑定的 atlas、lightmap、mip 范围、采样器和 OIT 视图。命令引用本批地形视图的索引。native 在所属 `ImmediatePass` 内按需对 `TerrainVertices`、`TranslucentVertices`、`QuadIndices` 与 `TranslucentIndices` 执行单次去重池级读依赖声明（`AddPassReadAccess`），不逐命令或逐网格重复声明屏障，同时按层声明间接参数缓冲与实例/常量/纹理访问，按原版附件与 scissor 内联录制。光栅 Pass 只按原版指定的 load/clear 操作开始一次。
+`TerrainAnchorMixin` 从原版 `renderLayers` 调用捕获当前三层或 OIT 阶段以及该次绑定的 atlas、lightmap、mip 范围、采样器和 OIT 视图。命令引用本批地形视图的索引。native 在所属 `RasterPassPlan` 内按需对 `TerrainVertices`、`TranslucentVertices`、`QuadIndices` 与 `TranslucentIndices` 执行单次去重池级读依赖声明（`AddPassReadAccess`），不逐命令或逐网格重复声明屏障，同时按层声明间接参数缓冲与实例/常量/纹理访问，按原版附件与 scissor 内联录制。光栅 Pass 只按原版指定的 load/clear 操作开始一次。
 
-SOLID 与 CUTOUT 使用反向 Z，普通透明按原版可见顺序并使用透明索引。启用改进透明度后，原版控制范围、裁剪、透射率、颜色累积和合成的顺序与附件。OIT 三个几何阶段（范围、透射率、颜色累积）复用同一份 `PreparedMeshPassIndirectDraws` 与第 2 层的间接参数缓冲，只上传一次参数；专用地形程序承担带区块几何的阶段，全屏裁剪与合成经即时绘制路径执行。绘制完地形后，`ImmediatePass` 立即使 Pass 级 RHI 状态缓存失效，确保下一条即时 draw 按自身状态重新绑定。
+SOLID 与 CUTOUT 使用反向 Z，普通透明按原版可见顺序并使用透明索引。启用改进透明度后，原版控制范围、裁剪、透射率、颜色累积和合成的顺序与附件。OIT 三个几何阶段（范围、透射率、颜色累积）复用同一份 `PreparedMeshPassIndirectDraws` 与第 2 层的间接参数缓冲，只上传一次参数；专用地形程序承担带区块几何的阶段，全屏裁剪与合成经即时绘制路径执行。绘制完地形后，`RasterPassPlan` 立即使 Pass 级 RHI 状态缓存失效，确保下一条即时 draw 按自身状态重新绑定。
 
 ## 纹理、ABI 与测试
 

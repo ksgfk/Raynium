@@ -11,28 +11,6 @@
 #include <string_view>
 
 namespace raynium {
-namespace {
-float TerrainCoordinate(std::span<const radray::byte> bytes,size_t vertex,uint32_t axis) noexcept {
-    float value; std::memcpy(&value,bytes.data()+vertex*28+axis*4,4); return value;
-}
-uint32_t TerrainQuadGroup(std::span<const radray::byte> bytes,size_t first) noexcept {
-    for(size_t v=0;v<4;++v) for(uint32_t a=0;a<3;++a)
-        if(!std::isfinite(TerrainCoordinate(bytes,first+v,a))) return 6;
-    for(uint32_t a=0;a<3;++a) {
-        const auto plane=TerrainCoordinate(bytes,first,a);
-        if(plane!=TerrainCoordinate(bytes,first+1,a) || plane!=TerrainCoordinate(bytes,first+2,a) || plane!=TerrainCoordinate(bytes,first+3,a)) continue;
-        const uint32_t b=(a+1)%3,c=(a+2)%3;
-        const double b0=TerrainCoordinate(bytes,first,b),c0=TerrainCoordinate(bytes,first,c);
-        const double b1=double(TerrainCoordinate(bytes,first+1,b))-b0,c1=double(TerrainCoordinate(bytes,first+1,c))-c0;
-        const double b2=double(TerrainCoordinate(bytes,first+2,b))-b0,c2=double(TerrainCoordinate(bytes,first+2,c))-c0;
-        const double b3=double(TerrainCoordinate(bytes,first+3,b))-b0,c3=double(TerrainCoordinate(bytes,first+3,c))-c0;
-        const double n=b1*c2-c1*b2,m=b2*c3-c2*b3;
-        if(n>0 && m>0) return a*2;
-        if(n<0 && m<0) return a*2+1;
-    }
-    return 6;
-}
-}
 bool SelectTerrainSubmission(uint32_t flags,const radray::gpu::GpuDeviceCapabilities& caps,bool& indirect) {
     indirect=false;
     if(flags>RN_RENDERER_INDIRECT) { RADRAY_ERR_LOG("Unknown or mutually exclusive terrain submission flags: {}",flags); return false; }
@@ -47,40 +25,6 @@ bool SelectTerrainSubmission(uint32_t flags,const radray::gpu::GpuDeviceCapabili
         flags==RN_RENDERER_DIRECT?"direct":flags==RN_RENDERER_INDIRECT?"indirect":"auto",indirect?"indirect":"direct",
         caps.Features.IndirectDraw,caps.Features.IndirectFirstInstance,caps.Limits.MaxDrawIndirectCount,
         flags==0 && !indirect?reason:std::string_view{"none"});
-    return true;
-}
-bool AnalyzeTerrainMesh(std::span<const radray::byte> bytes,rn_material_mode layer,TerrainMeshLayout& layout,
-    TerrainMeshUpload& upload) {
-    if(layer>RN_MATERIAL_TRANSLUCENT || bytes.size()%112 || bytes.size()/28>1048576) {
-        RADRAY_ERR_LOG("Invalid terrain quad stream or layer"); return false;
-    }
-    layout={}; layout.vertexCount=uint32_t(bytes.size()/28); layout.layer=layer; layout.finiteBounds=!bytes.empty();
-    layout.minimum.fill(std::numeric_limits<double>::infinity()); layout.maximum.fill(-std::numeric_limits<double>::infinity());
-    radray::array<uint32_t,7> counts{};
-    upload.source=bytes; upload.groups.resize(bytes.size()/112); upload.offsets={};
-    auto& groups=upload.groups; auto& offsets=upload.offsets;
-    for(size_t q=0;q<groups.size();++q) {
-        for(size_t v=0;v<4;++v) for(uint32_t a=0;a<3;++a) {
-            const double x=TerrainCoordinate(bytes,q*4+v,a);
-            if(!std::isfinite(x)) layout.finiteBounds=false;
-            layout.minimum[a]=std::min(layout.minimum[a],x); layout.maximum[a]=std::max(layout.maximum[a],x);
-        }
-        groups[q]=uint8_t(layer==RN_MATERIAL_TRANSLUCENT?6:TerrainQuadGroup(bytes,q*4)); counts[groups[q]]+=4;
-    }
-    uint32_t first=0;
-    for(uint32_t g=0;g<7;++g) {
-        offsets[g]=first/6*112;
-        if(counts[g]) { layout.groupBits[g]=1u<<layout.ranges.size(); layout.ranges.push_back({first,counts[g]/4*6,0}); }
-        first+=counts[g]/4*6;
-    }
-    if(layer!=RN_MATERIAL_TRANSLUCENT && layout.ranges.size()>1) {
-        layout.originalQuadGroups.resize((groups.size()*3+7)/8,0);
-        for(size_t q=0;q<groups.size();++q) {
-            const size_t bit=q*3,byte=bit/8; const auto shift=uint32_t(bit%8);
-            layout.originalQuadGroups[byte]|=uint8_t(groups[q]<<shift);
-            if(shift>5) layout.originalQuadGroups[byte+1]|=uint8_t(groups[q]>>(8-shift));
-        }
-    }
     return true;
 }
 bool BuildPreanalyzedTerrainMeshLayout(const rn_terrain_mesh_layout& source,uint32_t vertexCount,rn_material_mode layer,
@@ -138,17 +82,6 @@ bool BuildPreanalyzedTerrainMeshLayout(const rn_terrain_mesh_layout& source,uint
         layout.originalQuadGroups.assign(source.original_quad_groups,source.original_quad_groups+expectedBytes);
     } else if(hasWireframeFlag || source.original_quad_groups || source.original_quad_groups_bytes) {
         RADRAY_ERR_LOG("Unexpected wireframe group payload on single-group or translucent terrain mesh"); return false;
-    }
-    return true;
-}
-bool TerrainMeshUpload::Write(std::span<radray::byte> destination) const noexcept {
-    if(destination.size()!=source.size() || groups.size()*112!=source.size()) return false;
-    auto positions=offsets;
-    for(size_t q=0;q<groups.size();++q) {
-        const auto group=groups[q];
-        if(group>=positions.size() || uint64_t(positions[group])+112>destination.size()) return false;
-        auto& offset=positions[group];
-        std::memcpy(destination.data()+offset,source.data()+q*112,112); offset+=112;
     }
     return true;
 }

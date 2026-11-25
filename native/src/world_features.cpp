@@ -8,60 +8,61 @@
 namespace raynium {
 using namespace radray::gpu;
 
-bool ShaderResourceBindings::Decode(uint32_t pipelineId, const radray::Rect& scissorRect, uint32_t bindingCount, uint32_t pushBytes,
-    std::span<const radray::byte> bindingBytes, std::span<const radray::byte> pushData,
-    const ImmediatePipelineRegistry& pipelines, const BufferRegistry& buffers, const TextureRegistry& textures,
+ShaderResourceBindings::Binding ShaderResourceBindings::ReadBinding(const radray::byte* base, size_t index) noexcept {
+    Binding b{};
+    std::memcpy(&b, base + index * sizeof(Binding), sizeof(Binding));
+    return b;
+}
+
+bool ShaderResourceBindings::Decode(std::pmr::memory_resource& memory,rn_pipeline* pipelineId, const radray::Rect& scissorRect, uint32_t bindingCount, uint32_t pushBytes,
+    std::span<const radray::byte> bindingSpan, std::span<const radray::byte> pushData,
+    rn_renderer* owner,
     std::span<const TextureFormat> colors, const radray::Rect& area) {
-    if (bindingCount > 256 || pushBytes % 4 || bindingBytes.size() != uint64_t(bindingCount) * sizeof(Binding) ||
+    if (bindingCount > 256 || pushBytes % 4 || bindingSpan.size() != uint64_t(bindingCount) * sizeof(Binding) ||
         pushData.size() < pushBytes || scissorRect.X < area.X || scissorRect.Y < area.Y ||
         uint64_t(scissorRect.X) + scissorRect.Width > uint64_t(area.X) + area.Width ||
         uint64_t(scissorRect.Y) + scissorRect.Height > uint64_t(area.Y) + area.Height) return false;
-    pipeline = pipelines.Find(pipelineId);
+    auto* handle=ResolveHandle(owner,pipelineId);
+    pipeline=handle?handle->impl.get():nullptr;
     if (!pipeline || pipeline->program->drawBasesLayout || colors.size() != pipeline->state.colors.size()) return false;
     for (size_t i = 0; i < colors.size(); ++i) {
         if (colors[i] != pipeline->state.colors[i].Format) return false;
     }
     scissor = scissorRect;
-    resources.reserve(bindingCount);
+    bindingBytes = bindingSpan.data();
+    resources=FrameArray<Resource>(memory,bindingCount);
     for (uint32_t i = 0; i < bindingCount; ++i) {
-        Resource r{};
-        auto& b = r.binding;
-        std::memcpy(&b, bindingBytes.data() + size_t(i) * sizeof(Binding), sizeof(Binding));
+        auto& r=resources[i];
+        const auto b = ReadBinding(bindingBytes, i);
+        r.kind = b.kind;
         if (b.kind == 5) {
-            auto* image = textures.Find(b.id);
+            auto* image = ResolveHandle(owner,reinterpret_cast<rn_texture*>(b.resource));
             if (!image || !b.sampling.mip_count || b.sampling.base_mip >= image->desc.mip_levels ||
                 b.sampling.mip_count > image->desc.mip_levels - b.sampling.base_mip) return false;
-            r.texture = image->texture;
+            r.texture = image;
         } else if (b.kind == 3 || b.kind == 4) {
             const uint32_t reqUsage = b.kind == 3 ? RN_BUFFER_UNIFORM : RN_BUFFER_TEXEL;
-            r.buffer = buffers.Find(b.id);
+            r.buffer = ResolveHandle(owner,reinterpret_cast<rn_buffer*>(b.resource));
             if (!r.buffer || !(r.buffer->usage & reqUsage) || !r.buffer->Contains(b.offset, b.size)) return false;
         } else {
             return false;
         }
-        resources.push_back(std::move(r));
     }
-    if (auto size = pipeline->program->pushBytes) {
-        const auto copySize = std::min(size, pushBytes);
-        push.clear();
-        push.reserve(size);
-        for (uint32_t i = 0; i < copySize; ++i) push.push_back(pushData[i]);
-        for (uint32_t i = copySize; i < size; ++i) push.push_back(radray::byte{});
-    }
+    push=FramePushConstants(memory,pushData.first(pushBytes),pipeline->program->pushBytes);
     return true;
 }
 
 void ShaderResourceBindings::Import(radray::RDGBuilder& graph, FrameTextureImports& imports) {
     for (auto& r : resources) {
-        if (r.texture) r.imageHandle = imports.Import(r.texture);
+        if (r.kind == 5) r.imageHandle = imports.Import(r.texture);
         else r.bufferHandle = r.buffer->Import(graph);
     }
 }
 
 void ShaderResourceBindings::Declare(radray::RDGRasterPassBuilder& pass) const {
     for (const auto& r : resources) {
-        if (r.texture) pass.ReadTexture(r.imageHandle);
-        else pass.ReadBuffer(r.bufferHandle, r.binding.kind == 3 ? BufferState::CBuffer : BufferState::ShaderRead);
+        if (r.kind == 5) pass.ReadTexture(r.imageHandle);
+        else pass.ReadBuffer(r.bufferHandle, r.kind == 3 ? BufferState::CBuffer : BufferState::ShaderRead);
     }
 }
 
@@ -71,23 +72,25 @@ bool ShaderResourceBindings::Prepare(radray::RDGPrepareContext& ctx, TextureForm
     pso = pipeline->Resolve(device, depth);
     if (!pso) return false;
     const auto& program = *pipeline->program;
-    radray::array<radray::InlineVector<radray::TransientParameterBinding, 16>, 2> groups;
-    for (auto& r : resources) {
-        const auto& b = r.binding;
-        if (b.kind == 5) {
+    FrameParameterBindings bindings(slot);
+    auto& groups=bindings.groups;
+    for (size_t i = 0; i < resources.size(); ++i) {
+        const auto& r = resources[i];
+        const auto b = ReadBinding(bindingBytes, i);
+        if (r.kind == 5) {
             if (program.RequiresBinding(1, b.slot)) {
-                auto* view = GetSamplingView(device, *r.texture, b.sampling);
+                auto* view = GetSamplingView(device, *r.texture->texture, b.sampling);
                 if (!view) return false;
                 groups[1].push_back({b.slot, 0, view});
             }
-            if (program.HasSampler(b.slot + 1)) {
+            if (program.HasSampler(b.slot+1u)) {
                 auto* sampler = GetTextureSampler(device, b.format, b.sampling);
                 if (!sampler) return false;
-                groups[1].push_back({b.slot + 1, 0, sampler});
+                groups[1].push_back({b.slot+1u, 0, sampler});
             }
             continue;
         }
-        if (b.kind == 3) {
+        if (r.kind == 3) {
             if (program.RequiresBinding(0, b.slot)) {
                 auto slice = ctx.ResolveBuffer(r.bufferHandle);
                 slice.Offset += b.offset;
@@ -122,9 +125,9 @@ bool ShaderResourceBindings::Bind(GraphicsCommandEncoder& enc, ImmediatePassStat
     return true;
 }
 
-bool InstancedGeometryFeature::Decode(std::span<const radray::byte> bytes, std::span<const radray::byte> instanceUploads,
-    radray::vector<DrawIndexedIndirectArguments>& indirectArgs, bool canIndirect, uint32_t indirectLimit,
-    const ImmediatePipelineRegistry& pipelines, const BufferRegistry& buffers, const TextureRegistry& textures,
+bool InstancedGeometryFeature::Decode(std::pmr::memory_resource& memory,std::span<const radray::byte> bytes, std::span<const radray::byte> instanceUploads,
+    std::pmr::vector<DrawIndexedIndirectArguments>& indirectArgs, bool canIndirect, uint32_t indirectLimit,
+    rn_renderer* owner,
     const StaticGeometryRegistry& staticGeometry, const TerrainResidency& terrain,
     std::span<const TextureFormat> colors, const radray::Rect& area) {
     static_assert(sizeof(WireRun)==16);
@@ -137,16 +140,16 @@ bool InstancedGeometryFeature::Decode(std::span<const radray::byte> bytes, std::
     const auto bindingSpan = bytes.subspan(sizeof(h), size_t(bindingBytes));
     const auto runSpan = bytes.subspan(sizeof(h) + size_t(bindingBytes), size_t(runBytes));
     const auto pushSpan = bytes.subspan(sizeof(h) + size_t(bindingBytes) + size_t(runBytes), size_t(pushAligned));
-    if (!_shader.Decode(h.pipeline, h.scissor, h.bindings, h.push, bindingSpan, pushSpan, pipelines, buffers, textures, colors, area)) return false;
+    if (!_shader.Decode(memory,h.pipeline, h.scissor, h.bindings, h.push, bindingSpan, pushSpan, owner, colors, area)) return false;
     _indexPool = &terrain.QuadIndexPool();
-    return DecodeRuns(runSpan, h.instanceCount, h.instanceStride, h.uploadOffset, instanceUploads.size(),
+    return DecodeRuns(memory,runSpan, h.instanceCount, h.instanceStride, h.uploadOffset, instanceUploads.size(),
         _shader.pipeline->state.vertices, staticGeometry, terrain.QuadIndices(), indirectArgs, canIndirect, indirectLimit);
 }
 
-bool InstancedGeometryFeature::DecodeRuns(std::span<const radray::byte> runs, uint32_t instanceCount, uint32_t stride,
+bool InstancedGeometryFeature::DecodeRuns(std::pmr::memory_resource& memory,std::span<const radray::byte> runs, uint32_t instanceCount, uint32_t stride,
     uint64_t offset, uint64_t uploadSize, std::span<const VertexBufferLayout> layouts,
     const StaticGeometryRegistry& geometry, const radray::IndexBufferSubAllocation& quadIndices,
-    radray::vector<DrawIndexedIndirectArguments>& indirectArgs, bool canIndirect, uint32_t indirectLimit) {
+    std::pmr::vector<DrawIndexedIndirectArguments>& indirectArgs, bool canIndirect, uint32_t indirectLimit) {
     if (!quadIndices || !instanceCount || !stride || runs.empty() || runs.size() % sizeof(WireRun)) return false;
     if (std::none_of(layouts.begin(), layouts.end(), [&](const VertexBufferLayout& layout) {
         return layout.Binding == 1 && layout.StepMode == VertexStepMode::Instance && layout.ArrayStride == stride;
@@ -157,7 +160,8 @@ bool InstancedGeometryFeature::DecodeRuns(std::span<const radray::byte> runs, ui
     _quadFirstIndex = quadIndices.GetFirstIndex();
     _indirectLimit = std::max(1u, indirectLimit);
     _usesIndirect = false;
-    _batches.clear();
+    auto batches=FrameArray<Batch>(memory,runs.size()/sizeof(WireRun));
+    _batches=batches.first(0);
     for (size_t i = 0; i < runs.size(); i += sizeof(WireRun)) {
         WireRun r{};
         std::memcpy(&r, runs.data() + i, sizeof(WireRun));
@@ -190,7 +194,8 @@ bool InstancedGeometryFeature::DecodeRuns(std::span<const radray::byte> runs, ui
                 ++prev.indexCountOrArgCount;
             }
         } else {
-            _batches.push_back({vb, vbSize, firstVertex, mesh->indexCount, r.firstInstance, r.instanceCount, false});
+            batches[_batches.size()]={vb,vbSize,firstVertex,mesh->indexCount,r.firstInstance,r.instanceCount,false};
+            _batches=batches.first(_batches.size()+1);
         }
     }
     _staticVertexPool = &geometry.VertexPool();

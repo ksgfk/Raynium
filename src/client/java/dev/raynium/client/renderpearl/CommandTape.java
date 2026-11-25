@@ -6,9 +6,9 @@ import dev.raynium.bridge.NativeTexture;
 import dev.raynium.bridge.NativeBuffer;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import dev.raynium.bridge.NativeSwapchain;
+import java.util.ArrayList;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
-import java.util.HashSet;
 import static java.lang.foreign.ValueLayout.*;
 
 /** One recording batch. Its texture owners survive application close until native replay has imported them. */
@@ -30,13 +30,13 @@ public final class CommandTape implements AutoCloseable {
         }
         private boolean depth() { return texture.format().gpu().hasDepthAspect(); }
         private void write(MemorySegment record,long offset) {
-            record.set(JAVA_INT,offset,texture.id());
-            record.set(JAVA_INT,offset+4,mip);
-            record.set(JAVA_INT,offset+8,layer);
-            record.set(JAVA_INT,offset+12,x);
-            record.set(JAVA_INT,offset+16,y);
-            record.set(JAVA_INT,offset+20,width);
-            record.set(JAVA_INT,offset+24,height);
+            record.set(JAVA_LONG,offset,texture.handle());
+            record.set(JAVA_INT,offset+8,mip);
+            record.set(JAVA_INT,offset+12,layer);
+            record.set(JAVA_INT,offset+16,x);
+            record.set(JAVA_INT,offset+20,y);
+            record.set(JAVA_INT,offset+24,width);
+            record.set(JAVA_INT,offset+28,height);
         }
     }
     static final class Storage implements AutoCloseable {
@@ -45,6 +45,7 @@ public final class CommandTape implements AutoCloseable {
         final Stream commands;
         final Stream uploads;
         final Stream instanceUploads;
+        final Stream captureIds=new Stream(64),queryWrites=new Stream(128);
 
         Storage() {
             this(INITIAL_COMMANDS,INITIAL_UPLOADS);
@@ -58,14 +59,10 @@ public final class CommandTape implements AutoCloseable {
             commands.reset();
             uploads.reset();
             instanceUploads.reset();
+            captureIds.reset(); queryWrites.reset();
         }
         @Override public void close() {
-            try {
-                commands.close();
-            } finally {
-                uploads.close();
-                instanceUploads.close();
-            }
+            try(commands; uploads; instanceUploads; captureIds; queryWrites) {}
         }
     }
     static final class Stream implements AutoCloseable {
@@ -137,6 +134,8 @@ public final class CommandTape implements AutoCloseable {
     private final java.util.ArrayList<RayniumQueryPool> queryReferences=new java.util.ArrayList<>();
     private final java.util.ArrayList<RayniumPipeline> pipelines=new java.util.ArrayList<>();
     private final java.util.ArrayList<Runnable> submittedCallbacks=new java.util.ArrayList<>();
+    private final ArrayList<Runnable> recyclers=new ArrayList<>();
+    void recycleAfterBatch(Runnable recycle) { checkRecording(); recyclers.add(recycle); }
     public void onSubmitted(Runnable callback) { checkRecording(); submittedCallbacks.add(callback); }
     private final java.util.ArrayList<MemorySegment> views=new java.util.ArrayList<>();
     private final java.util.ArrayList<dev.raynium.bridge.NativeFrameBuffer> viewStorage=new java.util.ArrayList<>();
@@ -151,7 +150,6 @@ public final class CommandTape implements AutoCloseable {
     private final ViewPool freeViews;
     private final java.util.ArrayList<net.minecraft.client.model.geom.ModelPart> modelReferences=new java.util.ArrayList<>();
     public void retainModel(net.minecraft.client.model.geom.ModelPart part) { modelReferences.add(part); }
-    private final HashSet<Long> captures=new HashSet<>();
     private boolean finalized,rasterOpen;
     private dev.raynium.bridge.TerrainFrameEvent terrainEvent;
 
@@ -193,30 +191,30 @@ public final class CommandTape implements AutoCloseable {
     public void clearColor(Region target,float red,float green,float blue,float alpha) {
         validateAttachment(target,false);
         var record=command(1,56,target);
-        record.set(JAVA_FLOAT,36,red);
-        record.set(JAVA_FLOAT,40,green);
-        record.set(JAVA_FLOAT,44,blue);
-        record.set(JAVA_FLOAT,48,alpha);
-        record.set(JAVA_INT,52,0);
+        record.set(JAVA_FLOAT,40,red);
+        record.set(JAVA_FLOAT,44,green);
+        record.set(JAVA_FLOAT,48,blue);
+        record.set(JAVA_FLOAT,52,alpha);
     }
     public void clearDepth(Region target,float depth) {
         validateAttachment(target,true);
         if(!(depth>=0 && depth<=1)) throw new IllegalArgumentException("Invalid depth");
         var record=command(2,56,target);
-        record.set(JAVA_FLOAT,36,depth);
-        record.set(JAVA_FLOAT,40,0f);
+        record.set(JAVA_FLOAT,40,depth);
         record.set(JAVA_FLOAT,44,0f);
         record.set(JAVA_FLOAT,48,0f);
-        record.set(JAVA_INT,52,0);
+        record.set(JAVA_FLOAT,52,0f);
     }
     public void captureColor(Region source,long id) {
         checkRecording();
         source.validate(renderer);
         if(id<=0 || source.texture.format()!=NativeTexture.Format.RGBA8 ||
-           (source.texture.flags()&NativeTexture.READBACK)==0 || !captures.add(id))
+           (source.texture.flags()&NativeTexture.READBACK)==0)
             throw new IllegalArgumentException("Invalid capture source or ID");
+        var ids=storage.captureIds.contents();
+        for(long at=0;at<ids.byteSize();at+=8) if(ids.get(JAVA_LONG,at)==id) throw new IllegalArgumentException("Duplicate capture ID");
+        storage.captureIds.append(8).set(JAVA_LONG,0,id);
         var record=command(3,48,source);
-        record.set(JAVA_INT,36,0);
         record.set(JAVA_LONG,40,id);
     }
     public void uploadTexture(Region target,int pitch,MemorySegment pixels) {
@@ -228,9 +226,9 @@ public final class CommandTape implements AutoCloseable {
         if(pitch<row || pixels.byteSize()<size) throw new IllegalArgumentException("Invalid upload row pitch or size");
         long offset=storage.uploads.used;
         storage.uploads.append(size).copyFrom(pixels.asSlice(0,size));
-        var record=command(4,48,target);
-        record.set(JAVA_INT,36,pitch);
-        record.set(JAVA_LONG,40,offset);
+        var record=command(4,56,target);
+        record.set(JAVA_INT,40,pitch); record.set(JAVA_INT,44,0);
+        record.set(JAVA_LONG,48,offset);
     }
     public void copyTexture(Region source,Region destination) {
         checkRecording();
@@ -244,9 +242,9 @@ public final class CommandTape implements AutoCloseable {
             source.x<destination.x+destination.width && destination.x<source.x+source.width &&
             source.y<destination.y+destination.height && destination.y<source.y+source.height)
             throw new IllegalArgumentException("Overlapping texture copy");
-        var record=command(5,64,source);
+        var record=command(5,72,source);
         retain(destination.texture);
-        destination.write(record,36);
+        destination.write(record,40);
     }
     public void blitToSurface(NativeTexture source,int baseMip,NativeSwapchain target) {
         blitToSurface(source,baseMip,target,null);
@@ -258,12 +256,12 @@ public final class CommandTape implements AutoCloseable {
         if(surface!=null || baseMip<0 || baseMip>=source.mipLevels() || source.arrayLayers()!=1 ||
            !source.format().supportsFloatBlit() || (source.flags()&NativeTexture.READBACK)==0)
             throw new IllegalArgumentException("Invalid surface blit");
-        var record=storage.commands.append(16);
+        var record=storage.commands.append(24);
         retain(source);
         record.set(JAVA_INT,0,6);
-        record.set(JAVA_INT,4,16);
-        record.set(JAVA_INT,8,source.id());
-        record.set(JAVA_INT,12,baseMip);
+        record.set(JAVA_INT,4,24);
+        record.set(JAVA_LONG,8,source.handle());
+        record.set(JAVA_INT,16,baseMip); record.set(JAVA_INT,20,0);
         surface=target;
         this.presentation=presentation;
     }
@@ -309,10 +307,10 @@ public final class CommandTape implements AutoCloseable {
     private NativeTexture putAttachment(MemorySegment record,long at,com.mojang.renderpearl.api.textures.GpuTextureView view,boolean clear) {
         var texture=(NativeTexture)view.texture();
         retain(texture);
-        record.set(JAVA_INT,at,texture.id());
-        record.set(JAVA_INT,at+4,view.baseMipLevel());
-        record.set(JAVA_INT,at+8,0);
-        record.set(JAVA_INT,at+12,clear?1:0);
+        record.set(JAVA_LONG,at,texture.handle());
+        record.set(JAVA_INT,at+8,view.baseMipLevel());
+        record.set(JAVA_INT,at+12,0);
+        record.set(JAVA_INT,at+16,clear?1:0); record.set(JAVA_INT,at+20,0);
         return texture;
     }
     void beginRaster(com.mojang.renderpearl.api.commands.RenderPassDescriptor desc) {
@@ -322,7 +320,7 @@ public final class CommandTape implements AutoCloseable {
         for(var a:desc.colorAttachments()) if(a!=null) ((NativeTexture)a.textureView().texture()).checkRecordingOwner(renderer);
         if(desc.depthAttachment()!=null) ((NativeTexture)desc.depthAttachment().textureView().texture()).checkRecordingOwner(renderer);
         int count=desc.colorAttachments().size(),depth=desc.depthAttachment()==null?0:1;
-        int size=32+32*(count+depth);
+        int size=32+40*(count+depth);
         var record=storage.commands.append(size);
         record.set(JAVA_INT,0,12);
         record.set(JAVA_INT,4,size);
@@ -333,28 +331,28 @@ public final class CommandTape implements AutoCloseable {
         record.set(JAVA_INT,24,area.width()); record.set(JAVA_INT,28,area.height());
         for(int i=0;i<count;++i) {
             var a=desc.colorAttachments().get(i);
-            int at=32+32*i;
+            int at=32+40*i;
             if(a==null) {
-                record.set(JAVA_INT,at,0);
+                record.set(JAVA_LONG,at,0);
                 continue;
             }
             var clearValue=a.clearValue();
             putAttachment(record,at,a.textureView(),clearValue.isPresent());
             if(clearValue.isPresent()) {
                 var c=clearValue.get();
-                record.set(JAVA_FLOAT,at+16,c.x()); record.set(JAVA_FLOAT,at+20,c.y());
-                record.set(JAVA_FLOAT,at+24,c.z()); record.set(JAVA_FLOAT,at+28,c.w());
+                record.set(JAVA_FLOAT,at+24,c.x()); record.set(JAVA_FLOAT,at+28,c.y());
+                record.set(JAVA_FLOAT,at+32,c.z()); record.set(JAVA_FLOAT,at+36,c.w());
             } else {
-                record.set(JAVA_FLOAT,at+16,0f); record.set(JAVA_FLOAT,at+20,0f);
                 record.set(JAVA_FLOAT,at+24,0f); record.set(JAVA_FLOAT,at+28,0f);
+                record.set(JAVA_FLOAT,at+32,0f); record.set(JAVA_FLOAT,at+36,0f);
             }
         }
         if(depth!=0) {
             var a=desc.depthAttachment();
-            int at=32+32*count;
+            int at=32+40*count;
             putAttachment(record,at,a.textureView(),a.clearValue().isPresent());
-            record.set(JAVA_FLOAT,at+16,(float)a.clearValue().orElse(0));
-            record.set(JAVA_FLOAT,at+20,0f); record.set(JAVA_FLOAT,at+24,0f); record.set(JAVA_FLOAT,at+28,0f);
+            record.set(JAVA_FLOAT,at+24,(float)a.clearValue().orElse(0));
+            record.set(JAVA_FLOAT,at+28,0f); record.set(JAVA_FLOAT,at+32,0f); record.set(JAVA_FLOAT,at+36,0f);
         }
         rasterOpen=true;
     }
@@ -397,7 +395,7 @@ public final class CommandTape implements AutoCloseable {
         acquiredViews.remove(storage); views.add(parameters); viewStorage.add(storage);
         return ref;
     }
-    void terrain(TerrainView view,int stage,com.mojang.renderpearl.api.commands.RenderPass.RenderArea scissor,
+    void terrain(TerrainView view,int stage,int scissorX,int scissorY,int scissorW,int scissorH,
                  com.mojang.renderpearl.util.TextureViewAndSampler atlas,com.mojang.renderpearl.util.TextureViewAndSampler light,
                  com.mojang.renderpearl.api.textures.GpuTextureView[] inputs) {
         checkRecording();
@@ -413,34 +411,36 @@ public final class CommandTape implements AutoCloseable {
                 throw new IllegalArgumentException("Invalid terrain material");
             validateTexture(image);
         }
-        var record=storage.commands.append(104);
+        var record=storage.commands.append(136);
         record.set(JAVA_INT,0,15);
-        record.set(JAVA_INT,4,104);
+        record.set(JAVA_INT,4,136);
+        record.set(JAVA_INT,68,0);
         record.set(JAVA_INT,8,view.id());
         record.set(JAVA_INT,12,stage);
-        record.set(JAVA_INT,16,scissor.x());
-        record.set(JAVA_INT,20,scissor.y());
-        record.set(JAVA_INT,24,scissor.width());
-        record.set(JAVA_INT,28,scissor.height());
+        record.set(JAVA_INT,16,scissorX);
+        record.set(JAVA_INT,20,scissorY);
+        record.set(JAVA_INT,24,scissorW);
+        record.set(JAVA_INT,28,scissorH);
         for(int i=0;i<material.size();++i) {
             var pair=material.get(i);
             var image=(NativeTexture)pair.view().texture();
-            long at=56+24L*i;
-            record.set(JAVA_INT,at,image.id());
-            record.set(JAVA_INT,at+4,RayniumSampler.flags(pair.sampler()));
-            record.set(JAVA_INT,at+8,pair.view().baseMipLevel());
-            record.set(JAVA_INT,at+12,pair.view().mipLevels());
-            record.set(JAVA_FLOAT,at+16,(float)pair.sampler().getMaxLod().orElse(1000));
-            record.set(JAVA_INT,at+20,pair.sampler().getMaxAnisotropy());
+            long at=72+32L*i;
+            record.set(JAVA_LONG,at,image.handle());
+            record.set(JAVA_INT,at+12,0);
+            record.set(JAVA_INT,at+8,RayniumSampler.flags(pair.sampler()));
+            record.set(JAVA_INT,at+16,pair.view().baseMipLevel());
+            record.set(JAVA_INT,at+20,pair.view().mipLevels());
+            record.set(JAVA_FLOAT,at+24,(float)pair.sampler().getMaxLod().orElse(1000));
+            record.set(JAVA_INT,at+28,pair.sampler().getMaxAnisotropy());
             retain(image);
         }
         for(int i=0;i<inputs.length;++i) {
             var image=(NativeTexture)inputs[i].texture();
-            record.set(JAVA_INT,32+i*4L,image.id()); record.set(JAVA_INT,44+i*4L,inputs[i].baseMipLevel());
+            record.set(JAVA_LONG,32+i*8L,image.handle()); record.set(JAVA_INT,56+i*4L,inputs[i].baseMipLevel());
             retain(image);
         }
         for(int i=inputs.length;i<3;++i) {
-            record.set(JAVA_INT,32+i*4L,0); record.set(JAVA_INT,44+i*4L,0);
+            record.set(JAVA_LONG,32+i*8L,0); record.set(JAVA_INT,56+i*4L,0);
         }
     }
     public long reserveInstanceUpload(long bytes,int alignment) {
@@ -459,27 +459,28 @@ public final class CommandTape implements AutoCloseable {
     MemorySegment beginInstancedGeometry(RayniumPipeline pipeline,long uploadOffset,int instanceCount,int instanceStride,int runCount,
             int x,int y,int width,int height,int bindings,byte[] push,int pushLength) {
         checkRecording();
-        if(!rasterOpen || pipeline.owner!=renderer || pipeline.isClosed() || pipeline.instancedId==0)
+        if(!rasterOpen || pipeline.owner!=renderer || pipeline.isClosed() || pipeline.instancedHandle==0)
             throw new IllegalStateException("Invalid instanced geometry pipeline");
         if(instanceCount<=0 || instanceStride<=0 || runCount<=0 || uploadOffset<0 || pushLength<0 || pushLength>push.length)
             throw new IllegalArgumentException("Invalid instanced geometry arguments");
-        int headerAndData=Math.addExact(56,Math.addExact(Math.multiplyExact(48,bindings),Math.multiplyExact(16,runCount)));
+        int headerAndData=Math.addExact(64,Math.addExact(Math.multiplyExact(48,bindings),Math.multiplyExact(16,runCount)));
         int size=(Math.addExact(headerAndData,pushLength)+7)&~7;
         var record=storage.commands.append(size);
         retain(pipeline);
         record.set(JAVA_INT,0,16);
         record.set(JAVA_INT,4,size);
-        record.set(JAVA_INT,8,pipeline.instancedId);
-        record.set(JAVA_INT,12,bindings);
-        record.set(JAVA_INT,16,runCount);
-        record.set(JAVA_INT,20,instanceCount);
-        record.set(JAVA_INT,24,instanceStride);
-        record.set(JAVA_INT,28,pushLength);
-        record.set(JAVA_LONG,32,uploadOffset);
-        record.set(JAVA_INT,40,x);
-        record.set(JAVA_INT,44,y);
-        record.set(JAVA_INT,48,width);
-        record.set(JAVA_INT,52,height);
+        record.set(JAVA_LONG,8,pipeline.instancedHandle);
+        record.set(JAVA_INT,16,bindings);
+        record.set(JAVA_INT,20,runCount);
+        record.set(JAVA_INT,24,instanceCount);
+        record.set(JAVA_INT,28,instanceStride);
+        record.set(JAVA_INT,32,pushLength);
+        record.set(JAVA_INT,36,0);
+        record.set(JAVA_LONG,40,uploadOffset);
+        record.set(JAVA_INT,48,x);
+        record.set(JAVA_INT,52,y);
+        record.set(JAVA_INT,56,width);
+        record.set(JAVA_INT,60,height);
         if(pushLength>0) MemorySegment.copy(push,0,record,JAVA_BYTE,headerAndData,pushLength);
         return record;
     }
@@ -493,23 +494,23 @@ public final class CommandTape implements AutoCloseable {
         retain(pipeline);
         record.set(JAVA_INT,0,14);
         record.set(JAVA_INT,4,size);
-        record.set(JAVA_INT,8,pipeline.id);
-        record.set(JAVA_INT,12,kind);
-        record.set(JAVA_INT,16,count);
-        record.set(JAVA_INT,20,instances);
-        record.set(JAVA_INT,24,first);
-        record.set(JAVA_INT,28,firstInstance);
-        record.set(JAVA_INT,32,baseVertex);
-        record.set(JAVA_INT,36,x);
-        record.set(JAVA_INT,40,y);
-        record.set(JAVA_INT,44,width);
-        record.set(JAVA_INT,48,height);
-        record.set(JAVA_INT,52,bindings);
-        record.set(JAVA_INT,56,pushLength);
-        record.set(JAVA_INT,60,0);
+        record.set(JAVA_LONG,8,pipeline.handle);
+        record.set(JAVA_INT,16,kind);
+        record.set(JAVA_INT,20,count);
+        record.set(JAVA_INT,24,instances);
+        record.set(JAVA_INT,28,first);
+        record.set(JAVA_INT,32,firstInstance);
+        record.set(JAVA_INT,36,baseVertex);
+        record.set(JAVA_INT,40,x);
+        record.set(JAVA_INT,44,y);
+        record.set(JAVA_INT,48,width);
+        record.set(JAVA_INT,52,height);
+        record.set(JAVA_INT,56,bindings);
+        record.set(JAVA_INT,60,pushLength);
         if(pushLength>0) MemorySegment.copy(push,0,record,JAVA_BYTE,64+48L*bindings,pushLength);
         return record;
     }
+    void discardLastRecord(MemorySegment record) { storage.commands.used-=record.byteSize(); }
     void validateBuffer(NativeBuffer buffer,long offset,long length,int uses) { buffer.checkRange(renderer,offset,length,uses); }
     void validateTexture(NativeTexture image) { image.checkRecordingOwner(renderer); }
     void retain(NativeTexture image) {
@@ -545,8 +546,7 @@ public final class CommandTape implements AutoCloseable {
         var record=storage.commands.append(40);
         record.set(JAVA_INT,0,8);
         record.set(JAVA_INT,4,40);
-        record.set(JAVA_INT,8,target.id());
-        record.set(JAVA_INT,12,0);
+        record.set(JAVA_LONG,8,target.handle());
         record.set(JAVA_LONG,16,offset);
         record.set(JAVA_LONG,24,size);
         record.set(JAVA_LONG,32,upload);
@@ -558,14 +558,14 @@ public final class CommandTape implements AutoCloseable {
         target.checkRange(renderer,dstOffset,size,GpuBuffer.USAGE_COPY_DST);
         if(source==target && srcOffset<dstOffset+size && dstOffset<srcOffset+size)
             throw new IllegalArgumentException("Overlapping buffer copy");
-        var record=storage.commands.append(40);
+        var record=storage.commands.append(48);
         record.set(JAVA_INT,0,9);
-        record.set(JAVA_INT,4,40);
-        record.set(JAVA_INT,8,source.id());
-        record.set(JAVA_INT,12,target.id());
-        record.set(JAVA_LONG,16,srcOffset);
-        record.set(JAVA_LONG,24,dstOffset);
-        record.set(JAVA_LONG,32,size);
+        record.set(JAVA_INT,4,48);
+        record.set(JAVA_LONG,8,source.handle());
+        record.set(JAVA_LONG,16,target.handle());
+        record.set(JAVA_LONG,24,srcOffset);
+        record.set(JAVA_LONG,32,dstOffset);
+        record.set(JAVA_LONG,40,size);
         retain(source);
         retain(target);
     }
@@ -589,20 +589,21 @@ public final class CommandTape implements AutoCloseable {
         long row=(long)image.width*image.texture.format().bytesPerPixel();
         if(pitch<row) throw new IllegalArgumentException("Invalid texture row pitch");
         buffer.checkRange(renderer,offset,(long)pitch*(image.height-1)+row,toImage?GpuBuffer.USAGE_COPY_SRC:GpuBuffer.USAGE_COPY_DST);
-        var record=command(toImage?10:11,56,image);
-        record.set(JAVA_INT,36,buffer.id());
-        record.set(JAVA_LONG,40,offset);
-        record.set(JAVA_LONG,48,pitch);
+        var record=command(toImage?10:11,64,image);
+        record.set(JAVA_LONG,40,buffer.handle());
+        record.set(JAVA_LONG,48,offset);
+        record.set(JAVA_LONG,56,pitch);
         retain(buffer);
     }
     public void writeTimestamp(RayniumQueryPool pool,int index) {
         checkRecording();
         pool.validateWrite(renderer,index);
-        var record=storage.commands.append(16);
+        var record=storage.commands.append(24);
         record.set(JAVA_INT,0,7);
-        record.set(JAVA_INT,4,16);
-        record.set(JAVA_INT,8,pool.id());
-        record.set(JAVA_INT,12,index);
+        record.set(JAVA_INT,4,24);
+        record.set(JAVA_LONG,8,pool.handle());
+        record.set(JAVA_INT,16,index); record.set(JAVA_INT,20,0);
+        storage.queryWrites.append(16).copyFrom(record.asSlice(8,16));
         retain(pool);
         pool.written(index,submission);
     }
@@ -618,7 +619,7 @@ public final class CommandTape implements AutoCloseable {
         NativeRenderer.SubmitResult result;
         long start=terrainEvent==null?0:System.nanoTime();
         try {
-            result=renderer.submitFrame(storage.commands.contents(),storage.uploads.contents(),storage.instanceUploads.contents(),surface,views,measure,borrow?POOLED_INPUTS:null);
+            result=renderer.submitFrame(storage.commands.contents(),storage.uploads.contents(),storage.instanceUploads.contents(),surface,views,measure,borrow?POOLED_INPUTS:null,storage.captureIds.contents(),storage.queryWrites.contents());
         } catch(RuntimeException | Error failure) {
             close();
             throw failure;
@@ -633,8 +634,8 @@ public final class CommandTape implements AutoCloseable {
             finalized=true;
             submission.enqueued(result.sequence());
             rollbacks.clear();
-            renderer.trackBatch(result.sequence(),submittedCallbacks,callbacks,borrow?this::release:()->{},submission::failed);
-            if(!borrow) release();
+            renderer.trackBatch(result.sequence(),submittedCallbacks,callbacks,recyclers,this::release,submission::failed);
+            if(!borrow) releaseStorage();
             if(presentation!=null) presentation.accept(0);
         } else close();
         renderer.syncWorkerState(result.progress());
@@ -643,7 +644,18 @@ public final class CommandTape implements AutoCloseable {
     }
     private void release() {
         finalized=true;
+        releaseStorage();
+        for(int i=0;i<references.size();++i) references.get(i).releaseRecording();
+        references.clear();
+        for(int i=0;i<queryReferences.size();++i) queryReferences.get(i).releaseRecording();
+        queryReferences.clear();
+        for(int i=0;i<bufferReferences.size();++i) bufferReferences.get(i).releaseRecording();
+        bufferReferences.clear();
+        for(int i=0;i<pipelines.size();++i) pipelines.get(i).release();
+        pipelines.clear();
         modelReferences.clear();
+    }
+    private void releaseStorage() {
         var owned=storage;
         storage=null;
         if(owned!=null) {
@@ -653,21 +665,12 @@ public final class CommandTape implements AutoCloseable {
                 freeStorage.addFirst(owned);
             }
         }
-        for(int i=0;i<references.size();++i) references.get(i).releaseRecording();
-        references.clear();
-        for(int i=0;i<queryReferences.size();++i) queryReferences.get(i).releaseRecording();
-        queryReferences.clear();
-        for(int i=0;i<bufferReferences.size();++i) bufferReferences.get(i).releaseRecording();
-        bufferReferences.clear();
-        for(int i=0;i<pipelines.size();++i) pipelines.get(i).release();
-        pipelines.clear();
         // Borrowed inputs reach this point only after the worker has consumed them.
         for(int i=0;i<viewStorage.size();++i) viewStorage.get(i).clearBorrowed();
         if(freeViews==null) viewStorage.forEach(dev.raynium.bridge.NativeFrameBuffer::close);
         else for(var view:viewStorage) (view.isTerrainStorage()?freeViews.terrain:freeViews.external).addLast(view);
         acquiredViews.forEach(dev.raynium.bridge.NativeFrameBuffer::close); acquiredViews.clear();
-        viewStorage.clear(); views.clear(); submittedCallbacks.clear();
-        callbacks.clear();
+        viewStorage.clear(); views.clear();
     }
     @Override public void close() {
         if(!finalized) {
@@ -675,6 +678,8 @@ public final class CommandTape implements AutoCloseable {
             for(int i=rollbacks.size()-1;i>=0;--i) rollbacks.get(i).run();
             rollbacks.clear();
             release();
+            for(var recycle:recyclers) recycle.run();
+            recyclers.clear();
         }
     }
 }

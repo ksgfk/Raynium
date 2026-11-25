@@ -18,14 +18,6 @@ struct TerrainMeshLayout {
     bool finiteBounds{};
 };
 struct TerrainEye { radray::array<double,3> offset{}; bool valid{}; };
-struct TerrainMeshUpload {
-    explicit TerrainMeshUpload(std::pmr::memory_resource& memory):groups(&memory) {}
-    std::span<const radray::byte> source;
-    std::pmr::vector<uint8_t> groups;
-    radray::array<uint32_t,7> offsets{};
-    bool Write(std::span<radray::byte>) const noexcept;
-};
-bool AnalyzeTerrainMesh(std::span<const radray::byte>,rn_material_mode,TerrainMeshLayout&,TerrainMeshUpload&);
 bool BuildPreanalyzedTerrainMeshLayout(const rn_terrain_mesh_layout&,uint32_t vertexCount,rn_material_mode,TerrainMeshLayout&);
 bool WriteQuadIndices(std::span<radray::byte>,uint32_t vertexCount) noexcept;
 bool WriteWireframeIndices(std::span<radray::byte>,const TerrainMeshLayout&,uint32_t mask) noexcept;

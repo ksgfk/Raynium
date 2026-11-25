@@ -30,8 +30,8 @@ public:
     bool Upsert(int32_t meshId, std::span<const radray::byte> vertices, uint32_t vertexCount, uint32_t indexCount, uint32_t& outPageId);
     bool Remove(int32_t meshId);
     const StaticMesh* Find(int32_t meshId) const noexcept;
-    bool PrepareQuadIndices(TerrainResidency& terrain, radray::FrameSlot& slot, radray::vector<GeometryUpload>& uploads);
-    void FlushPending(radray::FrameSlot& slot, radray::vector<GeometryUpload>& uploads);
+    bool PrepareQuadIndices(TerrainResidency& terrain, radray::FrameSlot& slot, std::pmr::vector<GeometryUpload>& uploads);
+    void FlushPending(radray::FrameSlot& slot, std::pmr::vector<GeometryUpload>& uploads);
     void MeasureGeometry(rn_frame_metrics& metrics) const noexcept;
     void Reset() noexcept;
 

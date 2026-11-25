@@ -99,7 +99,7 @@ const StaticMesh* StaticGeometryRegistry::Find(int32_t meshId) const noexcept {
     return meshId >= 0 && size_t(meshId) < _meshes.size() && _meshes[meshId].geometry ? &_meshes[meshId] : nullptr;
 }
 
-bool StaticGeometryRegistry::PrepareQuadIndices(TerrainResidency& terrain, radray::FrameSlot& slot, radray::vector<GeometryUpload>& uploads) {
+bool StaticGeometryRegistry::PrepareQuadIndices(TerrainResidency& terrain, radray::FrameSlot& slot, std::pmr::vector<GeometryUpload>& uploads) {
     if (!_maxVertexCount) return true;
     bool grew = false;
     if (!terrain.EnsureQuadIndices(_maxVertexCount, uploads, &slot, nullptr, &grew)) return false;
@@ -107,7 +107,7 @@ bool StaticGeometryRegistry::PrepareQuadIndices(TerrainResidency& terrain, radra
     return true;
 }
 
-void StaticGeometryRegistry::FlushPending(radray::FrameSlot& slot, radray::vector<GeometryUpload>& uploads) {
+void StaticGeometryRegistry::FlushPending(radray::FrameSlot& slot, std::pmr::vector<GeometryUpload>& uploads) {
     for (auto& upload : _pendingUploads) {
         uploads.push_back(std::move(upload));
     }

@@ -1,5 +1,6 @@
 #pragma once
-#include <raynium/buffer_registry.h>
+#include <raynium/buffer_pool.h>
+#include <raynium/frame_plan.h>
 #include <raynium/frame_upload.h>
 #include <raynium/immediate_pipeline.h>
 #include <radray/inline_vector.h>
@@ -7,7 +8,7 @@
 namespace raynium {
 class ImmediateDraw final {
 public:
-    bool Decode(std::span<const radray::byte>,const ImmediatePipelineRegistry&,const BufferRegistry&,const TextureRegistry&,
+    bool Decode(std::pmr::memory_resource& memory,std::span<const radray::byte>,rn_renderer* owner,
         std::span<const radray::gpu::TextureFormat> colors,const radray::Rect& area);
     void Import(radray::RDGBuilder&,FrameTextureImports&);
     void Declare(radray::RDGRasterPassBuilder&) const;
@@ -16,29 +17,38 @@ public:
     bool Record(radray::gpu::GraphicsCommandEncoder&,ImmediatePassStateCache&) const noexcept;
 private:
     struct Binding {
-        uint32_t kind,slot,id,format;
-        uint64_t offset,size;
+        uint64_t resource,offset,size;
+        uint8_t kind,format;
+        uint16_t slot;
+        uint32_t reserved;
         rn_texture_sampling sampling;
     };
     struct Resource {
-        Binding binding;
-        radray::shared_ptr<BufferEntry> buffer;
-        radray::IntrusivePtr<radray::GpuTexture> texture;
-        radray::RDGBufferHandle bufferHandle;
-        radray::RDGTextureHandle imageHandle;
+        union {
+            rn_buffer* buffer{};
+            const rn_texture* texture;
+        };
+        union {
+            radray::RDGBufferHandle bufferHandle{};
+            radray::RDGTextureHandle imageHandle;
+        };
+        uint8_t kind{};
     };
-    radray::shared_ptr<ImmediatePipeline> _pipeline;
-    radray::InlineVector<Resource,8> _resources;
-    radray::InlineVector<radray::byte,128> _push;
+    static_assert(sizeof(Resource)==16 && std::is_trivially_destructible_v<Resource>);
+    static Binding ReadBinding(const radray::byte* base,size_t index) noexcept;
+    ImmediatePipeline* _pipeline;
+    const radray::byte* _bindingBytes{};
+    std::span<Resource> _resources;
+    std::span<const radray::byte> _push;
     radray::Rect _scissor{};
     uint32_t _kind{},_count{},_instances{},_first{},_firstInstance{};
     int32_t _base{};
     radray::gpu::GraphicsPipelineState* _pso{};
     radray::array<radray::gpu::ShaderParameterSet*,2> _sets{};
-    radray::InlineVector<radray::gpu::VertexBufferBinding,2> _vertices;
+    std::span<radray::gpu::VertexBufferBinding> _vertices;
     radray::gpu::IndexBufferView _indices{};
     radray::RDGBufferSlice _indirect{};
     radray::RDGBufferHandle _fan,_drawBases;
-    radray::InlineVector<radray::gpu::ShaderParameterSet*,1> _drawBaseSets;
+    std::span<radray::gpu::ShaderParameterSet*> _drawBaseSets;
 };
 }

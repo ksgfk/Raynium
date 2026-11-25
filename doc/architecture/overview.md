@@ -13,7 +13,7 @@ MC 26.3 继续负责窗口生命周期、世界更新、渲染顺序和资源管
 | `FrontendCommandEncoder`、`FrontendRenderPass` | 原版校验和整理绑定。后端将即时绘制、纹理操作、时间戳、地形、常驻世界快轨及上屏顺序写入同一批次。 |
 | `RetainedTerrain`、`TerrainFeature` | 拦截原版地形暂存写入与二次准备，每次地形准备产生独立视图，在原版当前光栅 Pass 按页直接或间接绘制驻留区块几何。 |
 | `RetainedModelManager`、`ModelFastTrack`、`ParticleFastTrack`、`ShadowFastTrack`、`world_features` | 仅在主世界 `featureFrame` 作用域内将合格刚体 `ModelPart`（24 B 局部网格 + 80 B 实例）、粒子和阴影片（各 56 B/实例）合批送入 `CommandTape`；不满足条件或着色器被覆盖时保序回退原版即时路径。 |
-| `rn_submit_frame`、`ModularFramePipeline` | 按命令顺序构建 RadRay RDG，管理帧槽、资源在途寿命、Fence、读回及呈现。 |
+| `RenderChannel`、`TapeCompiler`、`ModularFramePipeline` | 双槽批次通过单生产者单消费者通道提交，在帧槽内编译命令并按序构建 RadRay RDG，管理帧槽、资源在途寿命、Fence、读回及呈现。 |
 | `VisualValidation`、`BenchmarkSession` | 用相同场景驱动原版和新后端，单独保存截图差异和性能数据。 |
 
 ## 文档索引

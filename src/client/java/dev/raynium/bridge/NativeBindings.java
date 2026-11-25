@@ -27,7 +27,7 @@ final class NativeBindings {
     private final MethodHandle destroyEnvironment;
     private final MethodHandle create;
     private final MethodHandle destroy;
-    static final int WAIT_BYTES=48, SUBMIT_BYTES=56, TELEMETRY_BYTES=152;
+    static final int BATCH_BYTES=128, WAIT_BYTES=48, SUBMIT_BYTES=56, TELEMETRY_BYTES=152;
     final MethodHandle createRenderer, destroyRenderer, flushRenderer, drainTelemetry;
     final MethodHandle queryDeviceInfo,createSwapchain,resizeSwapchain,destroySwapchain;
     final MethodHandle createBuffer,destroyBuffer,registerPipeline,destroyPipeline;
@@ -55,10 +55,10 @@ final class NativeBindings {
         createSwapchain=bind(linker,library,"rn_create_swapchain",signature(3));
         resizeSwapchain=bind(linker,library,"rn_resize_swapchain",signature(2));
         destroySwapchain=bind(linker,library,"rn_destroy_swapchain",signature(1));
-        createTexture=bind(linker,library,"rn_create_texture",signature(2));
+        createTexture=bind(linker,library,"rn_create_texture",signature(3));
         uploadTexture=bind(linker,library,"rn_upload_texture",signature(2));
         destroyTexture=bind(linker,library,"rn_destroy_texture",FunctionDescriptor.of(ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
+            ValueLayout.ADDRESS,ValueLayout.JAVA_LONG));
         upsertModelMesh=bind(linker,library,"rn_upsert_model_mesh",FunctionDescriptor.of(ValueLayout.JAVA_INT,
             ValueLayout.ADDRESS,ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.JAVA_INT,ValueLayout.JAVA_INT,ValueLayout.JAVA_INT,ValueLayout.ADDRESS));
         removeModelMesh=bind(linker,library,"rn_remove_model_mesh",FunctionDescriptor.of(ValueLayout.JAVA_INT,
@@ -66,15 +66,15 @@ final class NativeBindings {
         pollCapture=bind(linker,library,"rn_poll_capture",FunctionDescriptor.of(ValueLayout.JAVA_INT,
             ValueLayout.ADDRESS,ValueLayout.JAVA_LONG,ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_LONG));
         registerPipeline=bind(linker,library,"rn_register_pipeline",signature(3));
-        destroyPipeline=bind(linker,library,"rn_destroy_pipeline",FunctionDescriptor.of(ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
+        destroyPipeline=bind(linker,library,"rn_destroy_pipeline",FunctionDescriptor.of(ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.JAVA_LONG));
         createBuffer=bind(linker,library,"rn_create_buffer",signature(3));
-        destroyBuffer=bind(linker,library,"rn_destroy_buffer",FunctionDescriptor.of(ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
+        destroyBuffer=bind(linker,library,"rn_destroy_buffer",FunctionDescriptor.of(ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.JAVA_LONG));
         createQueryPool=bind(linker,library,"rn_create_query_pool",FunctionDescriptor.of(ValueLayout.JAVA_INT,
             ValueLayout.ADDRESS,ValueLayout.JAVA_INT,ValueLayout.ADDRESS));
         destroyQueryPool=bind(linker,library,"rn_destroy_query_pool",FunctionDescriptor.of(ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS,ValueLayout.JAVA_INT));
+            ValueLayout.ADDRESS,ValueLayout.JAVA_LONG));
         syncQueryPool=bind(linker,library,"rn_sync_query_pool",FunctionDescriptor.of(ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS,ValueLayout.JAVA_INT,ValueLayout.JAVA_INT,ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.ADDRESS));
+            ValueLayout.ADDRESS,ValueLayout.JAVA_LONG,ValueLayout.JAVA_INT,ValueLayout.JAVA_INT,ValueLayout.ADDRESS,ValueLayout.ADDRESS));
         flushRenderer=bind(linker,library,"rn_flush_renderer",signature(2));
         drainTelemetry=bind(linker,library,"rn_drain_telemetry",FunctionDescriptor.of(ValueLayout.JAVA_INT,
                 ValueLayout.ADDRESS,ValueLayout.ADDRESS,ValueLayout.JAVA_INT,ValueLayout.ADDRESS));
@@ -196,6 +196,11 @@ final class NativeBindings {
     }
     static void call(MethodHandle method,String operation,MemorySegment handle,int id) {
         try { checkStatus(operation,(int)method.invokeExact(handle,id)); }
+        catch(RuntimeException | Error failure) { throw failure; }
+        catch(Throwable failure) { throw new IllegalStateException(operation,failure); }
+    }
+    static void call(MethodHandle method,String operation,MemorySegment handle,long pointer) {
+        try { checkStatus(operation,(int)method.invokeExact(handle,pointer)); }
         catch(RuntimeException | Error failure) { throw failure; }
         catch(Throwable failure) { throw new IllegalStateException(operation,failure); }
     }

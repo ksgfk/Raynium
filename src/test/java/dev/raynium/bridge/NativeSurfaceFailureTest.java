@@ -112,12 +112,12 @@ class NativeSurfaceFailureTest {
                     boolean terrain=outcome==5 || outcome==0;
                     if(terrain) {
                         var frame=NativeTestSupport.solidFrame(outcome==5?1:2);
-                        frame.terrainAlbedoTexture=atlas.id(); frame.terrainLightTexture=light.id();
-                        frame.instances=List.of(new NativeRenderer.Instance(0,0,0,1));
-                        frame.visible=List.of(new NativeRenderer.Visible(9,-1,0,0,1));
-                        if(outcome==5) frame.meshes=List.of(new NativeRenderer.Mesh(9,NativeRenderPearlTest.terrainQuad(128),8,0));
+                        frame.terrainAlbedoTexture=atlas.handle(); frame.terrainLightTexture=light.handle();
+                        frame.instances=List.of(new TerrainFixture.Instance(0,0,0,1));
+                        frame.visible=List.of(new TerrainFixture.Visible(9,-1,0,0,1));
+                        if(outcome==5) frame.meshes=List.of(new TerrainFixture.Mesh(9,NativeRenderPearlTest.terrainQuad(128),8,0));
                         var storage=batch.acquireViewStorage();
-                        var snapshot=batch.addView(storage,storage.marshal(frame),atlas,light);
+                        var snapshot=batch.addView(storage,frame.marshal(storage),atlas,light);
                         TerrainTestPass.record(batch,snapshot,image,depth,atlas,light);
                         encoder.writeTimestamp(queries,0);
                         encoder.copyTextureToBuffer(texture,read,0,()->{},0);

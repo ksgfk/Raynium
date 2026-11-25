@@ -1,7 +1,7 @@
 #pragma once
 #include <radray/types.h>
 #include <raynium/render_resources.h>
-#include <raynium/texture_registry.h>
+#include <raynium/resource_uploads.h>
 #include <raynium/shader_pack.h>
 #include <span>
 #include <utility>
@@ -29,7 +29,6 @@ public:
         if(pass==Wireframe || (wireframe && pass<=Translucent)) return _objects->wireframe.get();
         return _objects->programs[pass].pipeline.get();
     }
-    bool PrepareOutput(radray::gpu::Device&,radray::gpu::TextureFormat);
     const radray::shared_ptr<radray::gpu::BindingGroupLayout>& OitGroupLayout() const { return _objects->oitGroupLayout; }
     const radray::shared_ptr<radray::gpu::BindingGroupLayout>& MaterialGroupLayout() const { return _objects->materialGroupLayout; }
 private:

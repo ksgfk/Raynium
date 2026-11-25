@@ -26,7 +26,7 @@ GraphicsPipelineState* ImmediatePipeline::Resolve(Device& device,TextureFormat d
     return result;
 }
 
-radray::shared_ptr<ImmediatePipeline> ImmediatePipeline::Create(Device& device,RenderProgramLibrary& resources,const rn_pipeline_desc& desc,
+radray::unique_ptr<ImmediatePipeline> ImmediatePipeline::Create(Device& device,RenderProgramLibrary& resources,const rn_pipeline_desc& desc,
     radray::Nullable<PipelineCache*> cache) {
     if(desc.struct_size!=sizeof(desc) || !desc.program || !desc.words || desc.word_count<9) return {};
     const auto* w=desc.words;
@@ -36,7 +36,7 @@ radray::shared_ptr<ImmediatePipeline> ImmediatePipeline::Create(Device& device,R
        desc.word_count!=9ull+3ull*bindings+4ull*attributes+9ull*colors) return {};
     const auto bias=std::bit_cast<float>(w[4]),slope=std::bit_cast<float>(w[5]);
     if(!std::isfinite(bias) || double(bias)<INT32_MIN || double(bias)>INT32_MAX || !std::isfinite(slope)) return {};
-    auto item=radray::make_shared<ImmediatePipeline>();
+    auto item=radray::make_unique<ImmediatePipeline>();
     if(desc.shader_pack_size>ShaderPackMaxSize || (desc.shader_pack_size && !desc.shader_pack)) return {};
     item->program=resources.GetProgram(device,desc.program,{static_cast<const radray::byte*>(desc.shader_pack),size_t(desc.shader_pack_size)});
     if(!item->program) return {};
@@ -81,8 +81,4 @@ radray::shared_ptr<ImmediatePipeline> ImmediatePipeline::Create(Device& device,R
     return item;
 }
 
-radray::shared_ptr<ImmediatePipeline> ImmediatePipelineRegistry::Find(uint32_t id) const {
-    auto found=_items.find(id);
-    return found==_items.end()?nullptr:found->second;
-}
 }

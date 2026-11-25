@@ -2,6 +2,8 @@ package dev.raynium.bridge;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import dev.raynium.client.terrain.MeshPayload;
+import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import java.util.ArrayList;
 import java.util.Arrays;
 import static java.lang.foreign.ValueLayout.*;
@@ -41,12 +43,13 @@ public final class NativeFrameBuffer implements AutoCloseable {
     private final int[] counts=new int[5];
     private final ArrayList<Object> borrowed=new ArrayList<>();
     private Arena externalCopies;
-    private final ArrayList<dev.raynium.client.terrain.MeshPayload.UploadLease> uploads=new ArrayList<>();
+    private final ObjectArrayList<MeshPayload> pinnedMeshes=new ObjectArrayList<>();
+    private final ObjectArrayList<MeshPayload.IndexSnapshot> pinnedIndices=new ObjectArrayList<>();
     private int layoutCount;
     private long uploadCursor;
     private boolean closed;
 
-    public static final int BYTE_SIZE=280;
+    public static final int BYTE_SIZE=312;
     public static final int MESH_UPDATE_STRIDE=32;
     public static final int MESH_LAYOUT_STRIDE=72;
     public static final int LAYOUT_FLAG_FINITE_BOUNDS=1;
@@ -80,13 +83,20 @@ public final class NativeFrameBuffer implements AutoCloseable {
         if(owner!=null) borrowed.add(owner);
     }
     public void clearBorrowed() {
-        for(var upload:uploads) upload.close();
-        uploads.clear();
+        for(int i=0;i<pinnedMeshes.size();i++) pinnedMeshes.get(i).unpin();
+        for(int i=0;i<pinnedIndices.size();i++) pinnedIndices.get(i).unpin();
+        pinnedMeshes.clear();
+        pinnedIndices.clear();
         borrowed.clear();
         if(externalCopies!=null) { externalCopies.close(); externalCopies=null; }
     }
-    public void terrain(int albedo,int light,int anisotropy) {
-        descriptor.set(JAVA_INT,84,albedo); descriptor.set(JAVA_INT,88,light); descriptor.set(JAVA_INT,92,anisotropy);
+    public void terrain(long albedo,long light,int anisotropy) {
+        descriptor.set(JAVA_INT,84,anisotropy); descriptor.set(JAVA_LONG,88,albedo); descriptor.set(JAVA_LONG,96,light);
+    }
+    public void versions(long visible,long origins,long instances) {
+        descriptor.set(JAVA_LONG,288,visible);
+        descriptor.set(JAVA_LONG,296,origins);
+        descriptor.set(JAVA_LONG,304,instances);
     }
     private long dataOffset(long bytes) {
         long offset=(uploadCursor+7)&~7L;
@@ -100,11 +110,6 @@ public final class NativeFrameBuffer implements AutoCloseable {
         s.set(JAVA_LONG,o,id); s.set(ADDRESS,o+8,pointer);
         s.set(JAVA_INT,o+16,count); s.set(JAVA_INT,o+20,0);
     }
-    public void index(long id,int[] values) {
-        long offset=dataOffset(values.length*4L);
-        MemorySegment.copy(MemorySegment.ofArray(values),0,upload.segment,offset,values.length*4L);
-        indexHeader(id,upload.segment.asSlice(offset),values.length);
-    }
     private MemorySegment own(MemorySegment source,long bytes) {
         if(externalCopies==null) externalCopies=Arena.ofConfined();
         var copy=externalCopies.allocate(bytes,8);
@@ -112,14 +117,14 @@ public final class NativeFrameBuffer implements AutoCloseable {
         return copy;
     }
     public void indexPooled(long id,dev.raynium.client.terrain.MeshPayload.IndexSnapshot snapshot) {
-        var lease=snapshot.pinIndices();
-        uploads.add(lease);
-        indexHeader(id,lease.bytes(),snapshot.count);
+        var bytes=snapshot.pin();
+        pinnedIndices.add(snapshot);
+        indexHeader(id,bytes,snapshot.count);
     }
     public void meshPooled(long id,dev.raynium.client.terrain.MeshPayload mesh) {
-        var lease=mesh.pinVertices();
-        uploads.add(lease);
-        meshRecord(id,lease.bytes(),mesh.vertexCount,mesh.mode,mesh.groupQuadCounts,mesh.layoutFlags,
+        var bytes=mesh.pin();
+        pinnedMeshes.add(mesh);
+        meshRecord(id,bytes,mesh.vertexCount,mesh.mode,mesh.groupQuadCounts,mesh.layoutFlags,
                 mesh.minBounds,mesh.maxBounds,mesh.originalQuadGroups);
     }
     public void indexDirect(long id,MemorySegment nativeIndices,int count,Object owner) {
@@ -127,15 +132,6 @@ public final class NativeFrameBuffer implements AutoCloseable {
         if(nativeIndices==null || !nativeIndices.isNative() || nativeIndices.byteSize()<bytes)
             throw new IllegalArgumentException("Direct terrain indices must be a native segment covering count*4 bytes");
         indexHeader(id,own(nativeIndices,bytes),count);
-    }
-    public void mesh(long id,byte[] vertices,int vertexCount,int layer) {
-        if(vertexCount*28L!=vertices.length) throw new IllegalArgumentException("Vertex byte count mismatch");
-        long offset=dataOffset(vertices.length);
-        MemorySegment.copy(MemorySegment.ofArray(vertices),0,upload.segment,offset,vertices.length);
-        var s=arrays[1].segment; long o=counts[1]++*(long)MESH_UPDATE_STRIDE;
-        s.set(JAVA_LONG,o,id); s.set(ADDRESS,o+8,upload.segment.asSlice(offset));
-        s.set(JAVA_INT,o+16,vertexCount); s.set(JAVA_INT,o+20,layer);
-        s.set(ADDRESS,o+24,MemorySegment.NULL);
     }
     public void meshDirect(long id,MemorySegment nativeVertices,int vertexCount,int layer,Object owner,
             int[] groupQuadCounts,int layoutFlags,float[] minBounds,float[] maxBounds,byte[] wireframeGroups) {
@@ -207,23 +203,10 @@ public final class NativeFrameBuffer implements AutoCloseable {
             s.set(ADDRESS,24+i*8L,counts[i]==0?MemorySegment.NULL:arrays[i].segment);
             s.set(JAVA_INT,64+i*4L,counts[i]);
         }
-        floats(s,96,frame.projection,16); floats(s,160,frame.view,16);
-        for(int i=0;i<3;i++) s.set(JAVA_INT,224+i*4L,frame.cameraBlock[i]);
-        floats(s,236,frame.cameraFraction,3); floats(s,248,frame.fogColor,4); floats(s,264,frame.fogDistances,4);
+        floats(s,104,frame.projection,16); floats(s,168,frame.view,16);
+        for(int i=0;i<3;i++) s.set(JAVA_INT,232+i*4L,frame.cameraBlock[i]);
+        floats(s,244,frame.cameraFraction,3); floats(s,256,frame.fogColor,4); floats(s,272,frame.fogDistances,4);
         return s;
-    }
-    MemorySegment marshal(NativeRenderer.Frame frame) {
-        long bytes=0;
-        for(var x:frame.indices) bytes=Math.addExact(bytes,alignedBytes(x.values().length*4L));
-        for(var x:frame.meshes) bytes=Math.addExact(bytes,alignedBytes(x.vertices().length));
-        begin(Math.max(frame.visible.size(),frame.instances.size()),frame.removedMeshes.length,frame.meshes.size(),frame.indices.size(),bytes);
-        terrain(frame.terrainAlbedoTexture,frame.terrainLightTexture,frame.terrainAnisotropy);
-        for(var x:frame.indices) index(x.meshId(),x.values());
-        for(var x:frame.meshes) mesh(x.id(),x.vertices(),x.vertexCount(),x.layer());
-        for(var x:frame.visible) visible(x.mesh(),x.elementMask(),x.sortKey(),x.firstInstance(),x.instanceCount());
-        for(var x:frame.instances) instance(x.x(),x.y(),x.z(),x.visibility());
-        for(long id:frame.removedMeshes) removeMesh(id);
-        return finish(frame);
     }
     @Override public void close() {
         if(closed) return;

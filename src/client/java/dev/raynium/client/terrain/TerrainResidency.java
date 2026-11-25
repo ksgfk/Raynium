@@ -36,6 +36,7 @@ final class TerrainResidency {
     private long epoch,frameId;
     private int residentCount;
     private int nextSlotId=1;
+    private long visibleVersion,originsVersion,instancesVersion;
     private int lastVisCount,lastInstCount;
     private int lastReuseFlags;
     private boolean hasDeferredUploads;
@@ -52,6 +53,7 @@ final class TerrainResidency {
         candidates.clear(); indexUploads.clear(); freeSlots.clear(); pendingSlotAllocs.clear();
         dirtyIndicesScratch.clear();
         capture=null; this.epoch=epoch; residentCount=0; nextSlotId=1;
+        visibleVersion=0; originsVersion=0; instancesVersion=0;
         lastVisCount=0; lastInstCount=0; lastReuseFlags=0;
         hasDeferredUploads=false; lastFrameCommitted=false; lastInstancesCommitted=false; uncommittedPrepare=false;
     }
@@ -94,19 +96,15 @@ final class TerrainResidency {
         for(int i=0;i<indexUploads.size();i++) {
             var update=indexUploads.get(i);
             long slotId=Integer.toUnsignedLong(update.section.layers[2].slotId);
-            if(update.snapshot.hasDirectBuffer()) {
-                frame.indexPooled(slotId,update.snapshot);
-            } else {
-                frame.index(slotId,update.snapshot.values());
-            }
+            frame.indexPooled(slotId,update.snapshot);
         }
     }
     int reuseFlags() { return lastReuseFlags; }
     int effectiveVisibleCount() { return lastVisCount; }
-    void prepare(TerrainCapture.Buffer capture,NativeFrameBuffer frame,int albedo,int lightmap) {
+    void prepare(TerrainCapture.Buffer capture,NativeFrameBuffer frame,long albedo,long lightmap) {
         prepare(capture,frame,albedo,lightmap,false);
     }
-    void prepare(TerrainCapture.Buffer capture,NativeFrameBuffer frame,int albedo,int lightmap,boolean allowReuse) {
+    void prepare(TerrainCapture.Buffer capture,NativeFrameBuffer frame,long albedo,long lightmap,boolean allowReuse) {
         if(uncommittedPrepare) {
             lastFrameCommitted=false;
             lastInstancesCommitted=false;
@@ -129,7 +127,6 @@ final class TerrainResidency {
             }
         }
         if(canReuse) {
-            long indexDataBytes=0;
             for(int i=0;i<dirtyIndicesScratch.size();i++) {
                 var p=dirtyIndicesScratch.get(i);
                 if(p.uploadedEpoch!=epoch || p.layers[2]==null) continue;
@@ -139,30 +136,39 @@ final class TerrainResidency {
                     p.dirtyIndexFrame=frameId;
                     indexUploads.add(new IndexUpload(p,idx));
                     uploadBytes+=idx.byteSize();
-                    if(!idx.hasDirectBuffer()) indexDataBytes+=NativeFrameBuffer.alignedBytes(idx.byteSize());
                 }
             }
-            boolean needInstUpload=capture.instancesChanged || !lastInstancesCommitted;
-            if(!needInstUpload) {
+            boolean activeInstancesChanged=false;
+            if(capture.instancesChanged) {
+                for(int i=0;i<capture.updatedFadingSlots.size();i++) {
+                    int slot=capture.updatedFadingSlots.getInt(i);
+                    if(slot>=0 && slot<sectionToInstance.length) {
+                        int instIdx=sectionToInstance[slot];
+                        if(instIdx>=0 && instIdx<lastInstCount) {
+                            int bits=Float.floatToRawIntBits(capture.visibility[slot]);
+                            int off=instIdx*4+3;
+                            if(instScratch[off]!=bits) {
+                                instScratch[off]=bits;
+                                activeInstancesChanged=true;
+                            }
+                        }
+                    }
+                }
+                if(activeInstancesChanged) instancesVersion=frameId;
+            }
+            if(!activeInstancesChanged && lastInstancesCommitted) {
                 lastReuseFlags=NativeRenderer.REUSE_VISIBLE|NativeRenderer.REUSE_INSTANCES;
-                frame.begin(0,0,0,indexUploads.size(),indexDataBytes);
+                frame.begin(0,0,0,indexUploads.size(),0);
                 frame.terrain(albedo,lightmap,capture.anisotropy);
+                frame.versions(visibleVersion,originsVersion,instancesVersion);
                 emitIndexUploads(frame);
                 frame.setVisibleAndInstanceCounts(0,0);
                 return;
             }
-            for(int i=0;i<capture.updatedFadingSlots.size();i++) {
-                int slot=capture.updatedFadingSlots.getInt(i);
-                if(slot<sectionToInstance.length) {
-                    int instIdx=sectionToInstance[slot];
-                    if(instIdx>=0 && instIdx<lastInstCount) {
-                        instScratch[instIdx*4+3]=Float.floatToRawIntBits(capture.visibility[slot]);
-                    }
-                }
-            }
             lastReuseFlags=NativeRenderer.REUSE_VISIBLE;
-            frame.begin(lastInstCount,0,0,indexUploads.size(),indexDataBytes);
+            frame.begin(lastInstCount,0,0,indexUploads.size(),0);
             frame.terrain(albedo,lightmap,capture.anisotropy);
+            frame.versions(visibleVersion,originsVersion,instancesVersion);
             emitIndexUploads(frame);
             if(lastInstCount>0) {
                 MemorySegment.copy(instScratch,0,frame.instanceSegment(),JAVA_INT,0,lastInstCount*4);
@@ -237,10 +243,6 @@ final class TerrainResidency {
             }
         }
         hasDeferredUploads=staged.size()<candidates.size();
-        for(int i=0;i<indexUploads.size();i++) {
-            var snap=indexUploads.get(i).snapshot;
-            if(!snap.hasDirectBuffer()) dataBytes+=NativeFrameBuffer.alignedBytes(snap.byteSize());
-        }
         frame.begin(count*3,pendingRemovals.size()*3,meshes,indexUploads.size(),dataBytes);
         frame.terrain(albedo,lightmap,capture.anisotropy);
         emitIndexUploads(frame);
@@ -249,7 +251,12 @@ final class TerrainResidency {
                 frame.meshPooled(Integer.toUnsignedLong(layer.slotId),layer);
             }
         }
+        int[] previousInstances=instScratch;
+        int[] previousVisible=visScratch;
         ensureScratchCapacity(count);
+        boolean originsChanged=previousInstances!=instScratch || originsVersion==0;
+        boolean instancesChanged=previousInstances!=instScratch || instancesVersion==0;
+        boolean visibleChanged=previousVisible!=visScratch || visibleVersion==0 || !staged.isEmpty();
         final int[] instArr=instScratch;
         final int[] visArr=visScratch;
         final int[] secToInst=sectionToInstance;
@@ -271,15 +278,23 @@ final class TerrainResidency {
             if(mask==0) { secToInst[i]=-1; continue; }
             int instance=instCount++;
             secToInst[i]=instance;
-            instArr[instOff]=originX[i];
-            instArr[instOff+1]=originY[i];
-            instArr[instOff+2]=originZ[i];
-            instArr[instOff+3]=Float.floatToRawIntBits(visibility[i]);
+            int ox=originX[i], oy=originY[i], oz=originZ[i];
+            int visBits=Float.floatToRawIntBits(visibility[i]);
+            boolean originDiff=instArr[instOff]!=ox || instArr[instOff+1]!=oy || instArr[instOff+2]!=oz;
+            originsChanged|=originDiff;
+            instancesChanged|=originDiff || instArr[instOff+3]!=visBits;
+            instArr[instOff]=ox;
+            instArr[instOff+1]=oy;
+            instArr[instOff+2]=oz;
+            instArr[instOff+3]=visBits;
             instOff+=4;
             var layers=p.layers;
             var l0=layers[0];
             if(l0!=null && (mask&127)!=0) {
-                visArr[visOff]=l0.slotId;
+                int slotId=l0.slotId;
+                visibleChanged|=visArr[visOff]!=slotId || visArr[visOff+1]!=0 || visArr[visOff+2]!=-1 ||
+                    visArr[visOff+3]!=0 || visArr[visOff+4]!=instance || visArr[visOff+5]!=1;
+                visArr[visOff]=slotId;
                 visArr[visOff+1]=0;
                 visArr[visOff+2]=-1;
                 visArr[visOff+3]=0;
@@ -289,7 +304,10 @@ final class TerrainResidency {
             }
             var l1=layers[1];
             if(l1!=null && ((mask>>>8)&127)!=0) {
-                visArr[visOff]=l1.slotId;
+                int slotId=l1.slotId;
+                visibleChanged|=visArr[visOff]!=slotId || visArr[visOff+1]!=0 || visArr[visOff+2]!=-1 ||
+                    visArr[visOff+3]!=0 || visArr[visOff+4]!=instance || visArr[visOff+5]!=1;
+                visArr[visOff]=slotId;
                 visArr[visOff+1]=0;
                 visArr[visOff+2]=-1;
                 visArr[visOff+3]=0;
@@ -299,20 +317,19 @@ final class TerrainResidency {
             }
             var l2=layers[2];
             if(l2!=null && ((mask>>>16)&127)!=0) {
-                visArr[visOff]=l2.slotId;
+                int slotId=l2.slotId;
+                int sortKey=count-i;
+                visibleChanged|=visArr[visOff]!=slotId || visArr[visOff+1]!=0 || visArr[visOff+2]!=-1 ||
+                    visArr[visOff+3]!=sortKey || visArr[visOff+4]!=instance || visArr[visOff+5]!=1;
+                visArr[visOff]=slotId;
                 visArr[visOff+1]=0;
                 visArr[visOff+2]=-1;
-                visArr[visOff+3]=count-i;
+                visArr[visOff+3]=sortKey;
                 visArr[visOff+4]=instance;
                 visArr[visOff+5]=1;
                 visOff+=6; visCount++;
             }
         }
-        if(instCount>0) MemorySegment.copy(instArr,0,frame.instanceSegment(),JAVA_INT,0,instOff);
-        if(visCount>0) MemorySegment.copy(visArr,0,frame.visibleSegment(),JAVA_INT,0,visOff);
-        frame.setVisibleAndInstanceCounts(visCount,instCount);
-        lastVisCount=visCount;
-        lastInstCount=instCount;
         for(int i=pendingRemovals.size()-1;i>=0;i--) {
             var p=pendingRemovals.get(i);
             if(p.uploadedEpoch!=epoch) {
@@ -328,6 +345,15 @@ final class TerrainResidency {
                 frame.removeMesh(Integer.toUnsignedLong(layer.slotId));
             }
         }
+        if(instCount>0) MemorySegment.copy(instArr,0,frame.instanceSegment(),JAVA_INT,0,instOff);
+        if(visCount>0) MemorySegment.copy(visArr,0,frame.visibleSegment(),JAVA_INT,0,visOff);
+        frame.setVisibleAndInstanceCounts(visCount,instCount);
+        if(visibleChanged || lastVisCount!=visCount || !evicting.isEmpty()) visibleVersion=frameId;
+        if(originsChanged || lastInstCount!=instCount) originsVersion=frameId;
+        if(instancesChanged || lastInstCount!=instCount) instancesVersion=frameId;
+        frame.versions(visibleVersion,originsVersion,instancesVersion);
+        lastVisCount=visCount;
+        lastInstCount=instCount;
     }
     record ViewTransition(Runnable submitted,Runnable rollback) {}
     void commit() { stageCommit().submitted().run(); }
@@ -368,7 +394,7 @@ final class TerrainResidency {
             var previous=update.section.uploadedIndices;
             undo.add(()->{ update.section.uploadedIndices=previous; TerrainCapture.recordDirtyIndices(update.section); });
             update.section.uploadedIndices=update.snapshot;
-            if(update.snapshot.hasDirectBuffer()) uploadedIdx.add(update.snapshot);
+            uploadedIdx.add(update.snapshot);
         }
         ObjectArrayList<SectionPayload> evictedCopy=evicting.isEmpty()?null:new ObjectArrayList<>(evicting);
         for(int i=0;i<evicting.size();i++) {

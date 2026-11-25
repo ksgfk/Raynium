@@ -9,20 +9,24 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.function.Supplier;
+import org.lwjgl.system.MemoryUtil;
 import static java.lang.foreign.ValueLayout.*;
 
 public final class NativeBuffer implements GpuBuffer {
     public enum WriteSource { HOST_SHADOW, TRANSIENT, MAPPABLE_RING, STAGED_VERTEX }
+    private static final Runnable NOOP_CLOSE=()->{};
     private final WriteSource writeSource;
     private final NativeRenderer owner;
     private final Supplier<CommandTape> batch;
-    private final int id,usage;
+    private final long handle;
+    private final int usage;
     private final long size,address;
-    private final ArrayList<Mapping> views=new ArrayList<>();
+    private final ArrayList<OpenView> openWrites=new ArrayList<>();
+    private final ArrayList<StagingView> openStaging=new ArrayList<>();
     private final Arena bufferArena;
     private final MemorySegment base;
-    private Mapping cachedWrite;
     private boolean trackedDirty;
     private long[] ranges;
     private int rangeCount;
@@ -50,18 +54,18 @@ public final class NativeBuffer implements GpuBuffer {
         desc.set(JAVA_LONG,8,size); desc.set(ADDRESS,16,initial);
         var result=owner.bufferResult;
         NativeBindings.call(owner.bindings.createBuffer,"create buffer",renderer,desc,result);
-        return new NativeBuffer(owner,batch,result.get(JAVA_INT,0),usage,size,result.get(ADDRESS,8).address(),source);
+        return new NativeBuffer(owner,batch,result.get(JAVA_LONG,0),usage,size,result.get(ADDRESS,8).address(),source);
     }
-    private NativeBuffer(NativeRenderer owner,Supplier<CommandTape> batch,int id,int usage,long size,long address,WriteSource source) {
+    private NativeBuffer(NativeRenderer owner,Supplier<CommandTape> batch,long handle,int usage,long size,long address,WriteSource source) {
         this.writeSource=source;
-        this.owner=owner; this.batch=batch; this.id=id; this.usage=usage&1023; this.size=size; this.address=address;
+        this.owner=owner; this.batch=batch; this.handle=handle; this.usage=usage&1023; this.size=size; this.address=address;
         bufferArena=address==0?null:Arena.ofConfined();
         base=address==0?null:MemorySegment.ofAddress(address).reinterpret(size,bufferArena,null);
     }
     @Override public boolean isClosed() { return closed; }
     @Override public int usage() { return usage; }
     @Override public long size() { return size; }
-    public int id() { return id; }
+    public long handle() { return handle; }
     public void checkRange(NativeRenderer renderer,long offset,long length,int requiredUsage) {
         owner.checkOpen();
         checkLiveRange(renderer,offset,length,requiredUsage);
@@ -82,7 +86,7 @@ public final class NativeBuffer implements GpuBuffer {
     private void retire() {
         if(closed && references==0 && !released) {
             if(bufferArena!=null) bufferArena.close();
-            owner.destroyBuffer(id);
+            owner.destroyBuffer(handle);
             owner.bufferReleased(this);
             released=true;
         }
@@ -94,9 +98,11 @@ public final class NativeBuffer implements GpuBuffer {
     }
     void endRenderer() {
         closed=released=true;
-        for(var view:views) view.arena.close();
+        for(var staging:openStaging) staging.abort();
+        openStaging.clear();
+        for(var view:openWrites) view.closed=true;
+        openWrites.clear();
         if(bufferArena!=null) bufferArena.close();
-        views.clear();
     }
     @Override public GpuBufferSlice.MappedView map(long offset,long length,boolean read,boolean write) {
         if(read==write || length>Integer.MAX_VALUE) throw new IllegalArgumentException("Invalid buffer mapping");
@@ -105,23 +111,57 @@ public final class NativeBuffer implements GpuBuffer {
             checkLiveRange(owner,offset,length,USAGE_MAP_READ);
             if(!owner.isPoisoned()) owner.pollCompleted();
         } else checkRange(owner,offset,length,USAGE_MAP_WRITE);
-        boolean persistent=write && base!=null;
-        Mapping mapping;
-        if(persistent && cachedWrite==null) cachedWrite=new Mapping();
-        if(persistent && cachedWrite.arena==null) mapping=cachedWrite;
-        else mapping=new Mapping();
-        var view=mapping.open(offset,length,read);
-        views.add(mapping);
-        retainRecording();
-        if(persistent) {
-            addRange(offset,length);
-            if(!trackedDirty) {
-                trackedDirty=true;
-                retainRecording();
-                owner.trackWritable(this);
+        if(address!=0) {
+            var bytes=MemoryUtil.memByteBuffer(address+offset,(int)length);
+            if(read) bytes=bytes.asReadOnlyBuffer();
+            bytes.order(ByteOrder.nativeOrder());
+            var open=new OpenView(offset,length,write);
+            if(write) {
+                openWrites.add(open);
+                trackRange(offset,length);
             }
+            retainRecording();
+            return new GpuBufferSlice.MappedView(new GpuBufferSlice(this,offset,length),bytes,open);
         }
-        return view;
+        var staging=new StagingView(offset,length);
+        openStaging.add(staging);
+        retainRecording();
+        return new GpuBufferSlice.MappedView(new GpuBufferSlice(this,offset,length),staging.bytes(),staging);
+    }
+
+    /** Maps a transient fence-rotated slice directly without per-view tracking; dirty range is recorded immediately. */
+    public GpuBufferSlice.MappedView mapTransient(long offset,long length) {
+        if(length>Integer.MAX_VALUE) throw new IllegalArgumentException("Invalid buffer mapping");
+        checkRange(owner,offset,length,USAGE_MAP_WRITE);
+        if(address==0 || writeSource!=WriteSource.TRANSIENT)
+            throw new IllegalArgumentException("Invalid transient mapping");
+        trackRange(offset,length);
+        var bytes=MemoryUtil.memByteBuffer(address+offset,(int)length).order(ByteOrder.nativeOrder());
+        return new GpuBufferSlice.MappedView(new GpuBufferSlice(this,offset,length),bytes,NOOP_CLOSE);
+    }
+
+    /** Fills a fence-rotated slice, including partial allocator grants. Source positions are preserved. */
+    public void writePersistent(long offset,long length,List<ByteBuffer> chunks,long alignment) {
+        checkRange(owner,offset,length,USAGE_MAP_WRITE);
+        if(base==null || writeSource!=WriteSource.TRANSIENT || alignment<=0)
+            throw new IllegalArgumentException("Invalid persistent upload");
+        long cursor=0;
+        for(var chunk:chunks) {
+            if(cursor>=length) break;
+            long count=Math.min(chunk.remaining(),length-cursor);
+            MemorySegment.copy(MemorySegment.ofBuffer(chunk),0,base,offset+cursor,count);
+            cursor+=count;
+            cursor+=Math.min((alignment-cursor%alignment)%alignment,length-cursor);
+        }
+        trackRange(offset,length);
+    }
+    private void trackRange(long offset,long length) {
+        addRange(offset,length);
+        if(!trackedDirty) {
+            trackedDirty=true;
+            retainRecording();
+            owner.trackWritable(this);
+        }
     }
 
     private void addRange(long start,long length) {
@@ -144,7 +184,7 @@ public final class NativeBuffer implements GpuBuffer {
     int rangeCount() { return rangeCount; }
     long encodeRanges(MemorySegment dirty,long at) {
         for(int i=0;i<rangeCount;i++,at+=24) {
-            dirty.set(JAVA_INT,at,id); dirty.set(JAVA_INT,at+4,0);
+            dirty.set(JAVA_LONG,at,handle);
             dirty.set(JAVA_LONG,at+8,ranges[2*i]);
             dirty.set(JAVA_LONG,at+16,ranges[2*i+1]-ranges[2*i]);
         }
@@ -157,9 +197,9 @@ public final class NativeBuffer implements GpuBuffer {
     }
     boolean afterSubmit() {
         rangeCount=0;
-        for(int i=0;i<views.size();i++) {
-            var view=views.get(i);
-            addRange(view.offset,view.memory.byteSize());
+        for(int i=0;i<openWrites.size();i++) {
+            var view=openWrites.get(i);
+            addRange(view.offset,view.length);
         }
         if(rangeCount!=0) return false;
         trackedDirty=false;
@@ -167,31 +207,53 @@ public final class NativeBuffer implements GpuBuffer {
         return true;
     }
 
-    private final class Mapping {
+    private final class OpenView implements Runnable {
+        final long offset,length;
+        final boolean write;
+        boolean closed;
+        OpenView(long offset,long length,boolean write) {
+            this.offset=offset; this.length=length; this.write=write;
+        }
+        @Override public void run() {
+            owner.checkThread();
+            if(closed) return;
+            closed=true;
+            if(write) openWrites.remove(this);
+            releaseRecording();
+        }
+    }
+
+    private final class StagingView implements Runnable {
         private Arena arena;
         private MemorySegment memory;
-        private long offset;
-        GpuBufferSlice.MappedView open(long offset,long length,boolean read) {
+        private final long offset;
+        StagingView(long offset,long length) {
             this.offset=offset;
-            // The returned ByteBuffer must become inaccessible even when other slices remain mapped.
-            Arena scope=Arena.ofConfined();
-            arena=scope;
-            memory=base==null?scope.allocate(length,8):base.asSlice(offset,length).reinterpret(length,scope,null);
-            var bytes=memory.asByteBuffer();
-            if(read) bytes=bytes.asReadOnlyBuffer();
-            return new GpuBufferSlice.MappedView(new GpuBufferSlice(NativeBuffer.this,offset,length),
-                bytes.order(ByteOrder.nativeOrder()),()->close(scope));
-        }
-        private void close(Arena scope) {
-            owner.checkThread();
-            if(arena!=scope || !scope.scope().isAlive()) return;
+            this.arena=Arena.ofConfined();
             try {
-                if(address==0 && !closed) batch.get().writeBuffer(NativeBuffer.this,offset,memory);
+                this.memory=arena.allocate(length,8);
+            } catch(Throwable failure) {
+                abort();
+                throw failure;
+            }
+        }
+        ByteBuffer bytes() { return memory.asByteBuffer().order(ByteOrder.nativeOrder()); }
+        @Override public void run() {
+            owner.checkThread();
+            if(arena==null) return;
+            try {
+                if(!closed) batch.get().writeBuffer(NativeBuffer.this,offset,memory);
             } finally {
-                scope.close();
-                arena=null; memory=null;
-                views.remove(this);
+                abort();
+                openStaging.remove(this);
                 releaseRecording();
+            }
+        }
+        void abort() {
+            if(arena!=null) {
+                arena.close();
+                arena=null;
+                memory=null;
             }
         }
     }

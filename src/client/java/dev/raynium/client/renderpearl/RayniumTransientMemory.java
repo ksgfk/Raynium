@@ -9,7 +9,6 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.function.Supplier;
 import org.lwjgl.system.MemoryUtil;
@@ -20,8 +19,6 @@ final class RayniumTransientMemory implements TransientMemory,AutoCloseable {
     }
     private final TransientBlockAllocator<Allocator.CpuBlock> cpu=new TransientBlockAllocator<>(524288,16,Allocator.CpuBlock.memalloc());
     private final HashMap<Integer,TransientBlockAllocator<Block>> gpu=new HashMap<>();
-    private final HashSet<Runnable> pending=new HashSet<>();
-    private final ArrayList<GpuBufferSlice.MappedView> scopedViews=new ArrayList<>();
     private final NativeRenderer renderer;
     private final Supplier<CommandTape> batch;
 
@@ -55,9 +52,8 @@ final class RayniumTransientMemory implements TransientMemory,AutoCloseable {
         return mapped(size,alignment,usage,minimum,element);
     }
     private GpuBufferSlice.MappedView mapped(long size,long alignment,int usage,long minimum,long element) {
-        var view=allocateGpu(size,alignment,usage|GpuBuffer.USAGE_MAP_WRITE,minimum,element).map(false,true);
-        scopedViews.add(view);
-        return view;
+        var slice=allocateGpu(size,alignment,usage|GpuBuffer.USAGE_MAP_WRITE,minimum,element);
+        return ((NativeBuffer)slice.buffer()).mapTransient(slice.offset(),slice.length());
     }
     private static long allocationAlignment(long alignment,long atomSize) {
         long a=alignment,b=atomSize;
@@ -75,16 +71,9 @@ final class RayniumTransientMemory implements TransientMemory,AutoCloseable {
     private GpuBufferSlice upload(List<ByteBuffer> data,long alignment,int usage,long minimum,long element,boolean staging) {
         long size=0;
         for(var bytes:data) size=align(Math.addExact(size,bytes.remaining()),alignment);
-        try(var view=staging?allocateStaging(size,alignment,usage,minimum,element):allocateGpuMapped(size,alignment,usage,minimum,element)) {
-            long offset=0;
-            for(var bytes:data) {
-                if(offset>=view.slice().length()) break;
-                int count=(int)Math.min(bytes.remaining(),view.slice().length()-offset);
-                view.data().slice(Math.toIntExact(offset),count).put(bytes.slice(bytes.position(),count));
-                offset=align(offset+count,alignment);
-            }
-            return view.slice();
-        }
+        var slice=allocateGpu(size,alignment,usage|GpuBuffer.USAGE_MAP_WRITE|(staging?GpuBuffer.USAGE_COPY_SRC:0),minimum,element);
+        ((NativeBuffer)slice.buffer()).writePersistent(slice.offset(),slice.length(),data,alignment);
+        return slice;
     }
     @Override public GpuBufferSlice uploadStaging(List<ByteBuffer> data,long alignment,int usage,long minimum,long element) {
         return upload(data,alignment,usage,minimum,element,true);
@@ -93,26 +82,20 @@ final class RayniumTransientMemory implements TransientMemory,AutoCloseable {
         return upload(data,alignment,usage,minimum,element,false);
     }
     @Override public List<GpuBufferSlice> multiUploadStaging(List<ByteBuffer> data,long alignment,int usage) {
-        return data.stream().map(bytes->uploadStaging(bytes,alignment,usage)).toList();
+        var slices=new ArrayList<GpuBufferSlice>(data.size());
+        for(var bytes:data) slices.add(uploadStaging(bytes,alignment,usage));
+        return slices;
     }
     @Override public List<GpuBufferSlice> multiUploadGpu(List<ByteBuffer> data,long alignment,int usage) {
-        return data.stream().map(bytes->uploadGpu(bytes,alignment,usage)).toList();
+        var slices=new ArrayList<GpuBufferSlice>(data.size());
+        for(var bytes:data) slices.add(uploadGpu(bytes,alignment,usage));
+        return slices;
     }
     void seal(CommandTape tape) {
-        scopedViews.forEach(GpuBufferSlice.MappedView::close);
-        scopedViews.clear();
         cpu.rotate().run();
-        for(var allocator:gpu.values()) {
-            var recycle=allocator.rotate();
-            pending.add(recycle);
-            tape.onCompleted(()->{ if(pending.remove(recycle)) recycle.run(); });
-        }
+        for(var allocator:gpu.values()) tape.recycleAfterBatch(allocator.rotate());
     }
     @Override public void close() {
-        scopedViews.forEach(GpuBufferSlice.MappedView::close);
-        scopedViews.clear();
-        pending.forEach(Runnable::run);
-        pending.clear();
         gpu.values().forEach(TransientBlockAllocator::close);
         cpu.close();
     }

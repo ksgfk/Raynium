@@ -41,15 +41,16 @@ public final class NativeTexture implements com.mojang.renderpearl.api.textures.
     }
     public static final int CUBE=1, ATTACHMENT=2, READBACK=4;
     private final NativeRenderer owner;
-    private final int id,width,height,mips,layers,flags;
+    private final long handle;
+    private final int width,height,mips,layers,flags;
     private int recordingReferences;
     private long lastRetainedTapeId;
     private final Format format;
     private final String label;
     private final int usage;
     private boolean closed;
-    NativeTexture(NativeRenderer owner,int id,int width,int height,int mips,int layers,Format format,int flags,int usage,String label) {
-        this.owner=owner; this.id=id; this.width=width; this.height=height; this.mips=mips; this.layers=layers; this.format=format; this.flags=flags; this.usage=usage; this.label=label;
+    NativeTexture(NativeRenderer owner,long handle,int width,int height,int mips,int layers,Format format,int flags,int usage,String label) {
+        this.owner=owner; this.handle=handle; this.width=width; this.height=height; this.mips=mips; this.layers=layers; this.format=format; this.flags=flags; this.usage=usage; this.label=label;
     }
     @Override public String getLabel() { return label; }
     @Override public int usage() { return usage; }
@@ -70,9 +71,9 @@ public final class NativeTexture implements com.mojang.renderpearl.api.textures.
     public void releaseRecording() {
         owner.checkThread();
         if(recordingReferences<=0) throw new IllegalStateException("Unbalanced texture recording reference");
-        if(--recordingReferences==0 && closed && !owner.isClosed()) owner.destroyTexture(id);
+        if(--recordingReferences==0 && closed && !owner.isClosed()) owner.destroyTexture(handle);
     }
-    public int id() { checkOpen(); return id; }
+    public long handle() { checkOpen(); return handle; }
     public int width() { return width; }
     public int height() { return height; }
     public int mipLevels() { return mips; }
@@ -88,10 +89,10 @@ public final class NativeTexture implements com.mojang.renderpearl.api.textures.
                 var copied=arena.allocate(pixels.byteSize(),1);
                 copied.copyFrom(pixels); pixels=copied;
             }
-            var desc=arena.allocate(56,8); desc.set(JAVA_INT,0,56); desc.set(JAVA_INT,4,id);
-            desc.set(JAVA_INT,8,mip); desc.set(JAVA_INT,12,x); desc.set(JAVA_INT,16,y); desc.set(JAVA_INT,20,width);
-            desc.set(JAVA_INT,24,height); desc.set(JAVA_INT,28,rowPitch); desc.set(ADDRESS,32,pixels); desc.set(JAVA_LONG,40,pixels.byteSize());
-            desc.set(JAVA_INT,48,layer);
+            var desc=arena.allocate(56,8); desc.set(JAVA_INT,0,56); desc.set(JAVA_INT,4,mip);
+            desc.set(JAVA_LONG,8,handle); desc.set(JAVA_INT,16,x); desc.set(JAVA_INT,20,y); desc.set(JAVA_INT,24,width);
+            desc.set(JAVA_INT,28,height); desc.set(JAVA_INT,32,rowPitch); desc.set(JAVA_INT,36,layer);
+            desc.set(ADDRESS,40,pixels); desc.set(JAVA_LONG,48,pixels.byteSize());
             owner.uploadTexture(desc);
         }
     }
@@ -101,7 +102,7 @@ public final class NativeTexture implements com.mojang.renderpearl.api.textures.
     private void checkOpen() { owner.checkOpen(); if(closed) throw new IllegalStateException("Texture is closed"); }
     @Override public void close() {
         owner.checkThread(); if(closed) return;
-        if(recordingReferences==0 && !owner.isClosed()) owner.destroyTexture(id);
+        if(recordingReferences==0 && !owner.isClosed()) owner.destroyTexture(handle);
         closed=true;
     }
 }

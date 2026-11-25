@@ -19,4 +19,19 @@ class CommandTapeStorageTest {
             assertTrue(instances.scope().isAlive());
         }
     }
+
+    @Test void closeReleasesAllFiveOffHeapStreams() {
+        var storage=new CommandTape.Storage();
+        var commands=storage.commands.append(16);
+        var uploads=storage.uploads.append(16);
+        var instances=storage.instanceUploads.append(16);
+        var captures=storage.captureIds.append(8);
+        var queries=storage.queryWrites.append(16);
+        storage.close();
+        assertFalse(commands.scope().isAlive());
+        assertFalse(uploads.scope().isAlive());
+        assertFalse(instances.scope().isAlive());
+        assertFalse(captures.scope().isAlive());
+        assertFalse(queries.scope().isAlive());
+    }
 }

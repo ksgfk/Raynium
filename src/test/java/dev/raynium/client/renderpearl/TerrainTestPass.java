@@ -10,7 +10,7 @@ import org.joml.Vector4f;
 public final class TerrainTestPass {
     private TerrainTestPass() {}
     public static long submitMeasured(CommandTape tape) { return tape.submit(true).sequence(); }
-    public static int queryPoolId(RayniumQueryPool pool) { return pool.id(); }
+    public static long queryPoolHandle(RayniumQueryPool pool) { return pool.handle(); }
     public static CommandTape batch(RayniumGpuDevice device) { return device.currentBatch(); }
     public static void record(CommandTape tape,CommandTape.TerrainView view,NativeTexture color,NativeTexture depth,
                               NativeTexture atlas,NativeTexture light) {
@@ -20,7 +20,8 @@ public final class TerrainTestPass {
             var pass=RenderPassDescriptor.builder(()->"retained view").withColorAttachment(target,Optional.of(new Vector4f(0,0,0,1)))
                 .withDepthAttachment(z,OptionalDouble.of(0)).build();
             tape.beginRaster(pass);
-            for(int layer=0;layer<3;++layer) tape.terrain(view,layer,pass.renderArea(),new TextureViewAndSampler(block,sampler),
+            var area=pass.renderArea();
+            for(int layer=0;layer<3;++layer) tape.terrain(view,layer,area.x(),area.y(),area.width(),area.height(),new TextureViewAndSampler(block,sampler),
                 new TextureViewAndSampler(lighting,sampler),new GpuTextureView[0]);
             tape.endRaster();
         }

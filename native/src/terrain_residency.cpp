@@ -1,4 +1,5 @@
 #include <raynium/terrain_residency.h>
+#include <raynium/frame_plan.h>
 #include <radray/types.h>
 #include <raynium/exception.h>
 #include <radray/logger.h>
@@ -47,16 +48,16 @@ radray::MeshDrawCommand BuildFastTerrainCommand(
     return cmd;
 }
 const TerrainWireframe* WireIndices(TerrainMesh& mesh,uint32_t mask,radray::IndexBufferPool& pool,
-    radray::vector<GeometryUpload>& uploads,uint64_t& uploadBytes) {
+    std::pmr::vector<GeometryUpload>& uploads,uint64_t& uploadBytes) {
     for(auto& wire:mesh.wireframes) if(wire.mask==mask) return &wire;
     uint32_t count=0;
     for(size_t i=0;i<mesh.layout.ranges.size();++i) if(mask&(1u<<i)) count+=mesh.layout.ranges[i].count;
     auto alloc=pool.Allocate(count);
     if(!alloc) { RADRAY_ERR_LOG("Cannot allocate terrain wireframe indices"); return nullptr; }
-    radray::vector<radray::byte> bytes(alloc->GetByteSize());
+    auto bytes=FrameArray<radray::byte>(*uploads.get_allocator().resource(),alloc->GetByteSize());
     if(!WriteWireframeIndices(bytes,mesh.layout,mask)) return nullptr;
     uploadBytes+=bytes.size();
-    uploads.push_back({alloc->GetGpuBuffer(),alloc->GetByteOffset(),radray::RDGUploadSource::OwnedBytes(std::move(bytes))});
+    uploads.push_back({alloc->GetGpuBuffer(),alloc->GetByteOffset(),radray::RDGUploadSource::BorrowedBytes(bytes)});
     return &mesh.wireframes.emplace_back(TerrainWireframe{mask,std::move(*alloc)});
 }
 }  // namespace
@@ -329,7 +330,7 @@ bool SlotPromotedBuffer::Prepare(Device& device,bool unchanged,uint64_t bytes,Bu
     return true;
 }
 
-bool TerrainResidency::EnsureQuadIndices(uint32_t vertexCount,radray::vector<GeometryUpload>& uploads,
+bool TerrainResidency::EnsureQuadIndices(uint32_t vertexCount,std::pmr::vector<GeometryUpload>& uploads,
     radray::FrameSlot* retireSlot,uint64_t* uploadBytesOut,bool* grewOut) {
     if(grewOut) *grewOut=false;
     if(vertexCount<=_quadVertexCapacity) return true;
@@ -417,7 +418,7 @@ bool TerrainResidency::ValidateAndSyncHotSlot(uint32_t slotId) {
     return true;
 }
 
-bool TerrainResidency::PrepareFrame(const TextureRegistry& uploaded,const rn_terrain_view_desc& f,
+bool TerrainResidency::PrepareFrame(rn_renderer* renderer,const rn_terrain_view_desc& f,
     const MeshPassResources& resources,SlotUploads slot,TerrainFrame& frame) {
     RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.Prepare");
 
@@ -452,9 +453,9 @@ bool TerrainResidency::PrepareFrame(const TextureRegistry& uploaded,const rn_ter
     }
     const bool hasVisibleItems=reuseVisible?!cache.visible.empty():(f.visible_count!=0);
     if(hasVisibleItems) {
-        if(f.terrain_anisotropy>16 || f.terrain_albedo_texture<16 || f.terrain_light_texture<16 ||
-           !uploaded.Find(f.terrain_albedo_texture) || !uploaded.Find(f.terrain_light_texture))
-            { RADRAY_ERR_LOG("Invalid terrain texture binding: albedo={} light={} anisotropy={}",f.terrain_albedo_texture,f.terrain_light_texture,f.terrain_anisotropy); return false; }
+        if(f.terrain_anisotropy>16 ||
+           !ResolveHandle(renderer,f.terrain_albedo_texture) || !ResolveHandle(renderer,f.terrain_light_texture))
+            { RADRAY_ERR_LOG("Invalid terrain texture binding: anisotropy={}",f.terrain_anisotropy); return false; }
     }
 
     auto& state=_state;
@@ -498,7 +499,7 @@ bool TerrainResidency::PrepareFrame(const TextureRegistry& uploaded,const rn_ter
     uint32_t needed=_quadVertexCapacity;
     uint32_t maxMeshSlot=0;
     for(const auto& x:std::span{f.meshes,f.mesh_count}) {
-        if(!x.id || x.id>kMaxMeshSlot || !x.vertices || !x.vertex_count || x.vertex_count%4 || x.vertex_count>1048576 || x.layer>RN_MATERIAL_TRANSLUCENT)
+        if(!x.id || x.id>kMaxMeshSlot || !x.vertices || !x.layout || !x.vertex_count || x.vertex_count%4 || x.vertex_count>1048576 || x.layer>RN_MATERIAL_TRANSLUCENT)
             { RADRAY_ERR_LOG("Invalid terrain mesh: id={} vertices={} layer={}",x.id,x.vertex_count,uint32_t(x.layer)); return false; }
         maxMeshSlot=std::max(maxMeshSlot,uint32_t(x.id));
         if(x.layer!=RN_MATERIAL_TRANSLUCENT) needed=std::max(needed,x.vertex_count);
@@ -535,26 +536,14 @@ bool TerrainResidency::PrepareFrame(const TextureRegistry& uploaded,const rn_ter
             mesh.active=true;
             const std::span<const radray::byte> vertexBytes{static_cast<const radray::byte*>(x.vertices),size_t(x.vertex_count)*28};
             auto& pool=x.layer==RN_MATERIAL_TRANSLUCENT?*_translucentVertices:*_vertices;
-            if(x.layout) {
-                if(!BuildPreanalyzedTerrainMeshLayout(*x.layout,x.vertex_count,x.layer,mesh.layout)) return false;
-                auto allocation=pool.Allocate(x.vertex_count);
-                if(!allocation) { RADRAY_ERR_LOG("Cannot allocate terrain vertices"); return false; }
-                mesh.geometry=std::move(*allocation);
-                mesh.vertexPageId=mesh.geometry.GetPageIndex();
-                uploadBytes+=vertexBytes.size();
-                slot.geometry.push_back({mesh.geometry.GetGpuBuffer(),mesh.geometry.GetByteOffset(),
-                    radray::RDGUploadSource::BorrowedBytes(vertexBytes)});
-            } else {
-                auto* upload=slot.frame.Emplace<TerrainMeshUpload>(slot.frame.GetMemoryResource());
-                if(!AnalyzeTerrainMesh(vertexBytes,x.layer,mesh.layout,*upload)) return false;
-                auto allocation=pool.Allocate(x.vertex_count);
-                if(!allocation) { RADRAY_ERR_LOG("Cannot allocate terrain vertices"); return false; }
-                mesh.geometry=std::move(*allocation);
-                mesh.vertexPageId=mesh.geometry.GetPageIndex();
-                uploadBytes+=upload->source.size();
-                slot.geometry.push_back({mesh.geometry.GetGpuBuffer(),mesh.geometry.GetByteOffset(),radray::RDGUploadSource::Generated(upload->source.size(),upload,
-                    +[](TerrainMeshUpload* const& source,radray::RDGUploadWriteContext& context) noexcept { return source->Write(context.Bytes); })});
-            }
+            if(!BuildPreanalyzedTerrainMeshLayout(*x.layout,x.vertex_count,x.layer,mesh.layout)) return false;
+            auto allocation=pool.Allocate(x.vertex_count);
+            if(!allocation) { RADRAY_ERR_LOG("Cannot allocate terrain vertices"); return false; }
+            mesh.geometry=std::move(*allocation);
+            mesh.vertexPageId=mesh.geometry.GetPageIndex();
+            uploadBytes+=vertexBytes.size();
+            slot.geometry.push_back({mesh.geometry.GetGpuBuffer(),mesh.geometry.GetByteOffset(),
+                radray::RDGUploadSource::BorrowedBytes(vertexBytes)});
             const uint32_t slotId=uint32_t(x.id);
             auto& previous=state.meshesBySlot[slotId];
             if(previous.active) {
@@ -601,44 +590,23 @@ bool TerrainResidency::PrepareFrame(const TextureRegistry& uploaded,const rn_ter
 
     std::span<const rn_visible_item> activeVisible;
     std::span<const rn_instance> activeInstances;
-    bool visibleIdentical=false;
-    bool instancesIdentical=false;
-    bool originsIdentical=false;
-    {
-        if(reuseVisible) {
-            visibleIdentical=true;
-        } else {
-            visibleIdentical=warm && f.visible_count==cache.visible.size() &&
-                (f.visible_count==0 || std::memcmp(f.visible,cache.visible.data(),size_t(f.visible_count)*sizeof(rn_visible_item))==0);
-            if(!visibleIdentical) {
-                cache.visible.assign(f.visible,f.visible+f.visible_count);
-                cache.partitionVersion=0;
-            }
-        }
-        activeVisible=cache.visible;
-
-        if(reuseInstances) {
-            instancesIdentical=true;
-            originsIdentical=true;
-        } else {
-            instancesIdentical=warm && f.instance_count==cache.instances.size() &&
-                (f.instance_count==0 || std::memcmp(f.instances,cache.instances.data(),size_t(f.instance_count)*sizeof(rn_instance))==0);
-            if(instancesIdentical) {
-                originsIdentical=true;
-            } else {
-                if(visibleIdentical && warm && f.instance_count==cache.instances.size()) {
-                    originsIdentical=true;
-                    for(uint32_t i=0;i<f.instance_count;++i) {
-                        const auto& a=f.instances[i].origin;
-                        const auto& b=cache.instances[i].origin;
-                        if(a[0]!=b[0] || a[1]!=b[1] || a[2]!=b[2]) { originsIdentical=false; break; }
-                    }
-                }
-                cache.instances.assign(f.instances,f.instances+f.instance_count);
-            }
-        }
-        activeInstances=cache.instances;
+    const bool visibleIdentical=reuseVisible || cache.MatchesVisible(f);
+    const bool originsIdentical=reuseInstances || cache.MatchesOrigins(f);
+    const bool instancesIdentical=reuseInstances || cache.MatchesInstances(f);
+    if(!visibleIdentical) {
+        if(f.visible_count) cache.visible.assign(f.visible,f.visible+f.visible_count); else cache.visible.clear();
+        cache.partitionVersion=0;
     }
+    if(!reuseVisible) cache.visibleVersion=f.visible_version;
+    if(!instancesIdentical) {
+        if(f.instance_count) cache.instances.assign(f.instances,f.instances+f.instance_count); else cache.instances.clear();
+    }
+    if(!reuseInstances) {
+        cache.originsVersion=f.origins_version;
+        cache.instancesVersion=f.instances_version;
+    }
+    activeVisible=cache.visible;
+    activeInstances=cache.instances;
 
     frame.instances=activeInstances;
     radray::array<size_t,3> visibleCounts{};

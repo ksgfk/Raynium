@@ -23,20 +23,20 @@ class NativeFrameBufferTest {
     }
     @Test void clearsEveryArrayPointerAndCountOnTheNextEmptyFrame() {
         try(var buffer=new NativeFrameBuffer()) {
-            var frame=new NativeRenderer.Frame();
-            frame.indices=List.of(new NativeRenderer.Index(1,new int[]{0,1,2,2,3,0}));
-            frame.meshes=List.of(new NativeRenderer.Mesh(1,new byte[112],4,0));
-            frame.visible=List.of(new NativeRenderer.Visible(1,1,7,0,1));
-            frame.instances=List.of(new NativeRenderer.Instance(1,2,3,.5f));
+            var frame=new TerrainFixture();
+            frame.indices=List.of(new TerrainFixture.Index(1,new int[]{0,1,2,2,3,0}));
+            frame.meshes=List.of(new TerrainFixture.Mesh(1,new byte[112],4,0));
+            frame.visible=List.of(new TerrainFixture.Visible(1,1,7,0,1));
+            frame.instances=List.of(new TerrainFixture.Instance(1,2,3,.5f));
             frame.removedMeshes=new long[]{2};
-            var descriptor=buffer.marshal(frame);
-            assertEquals(280,descriptor.byteSize()); assertEquals(280,descriptor.get(JAVA_INT,0));
+            var descriptor=frame.marshal(buffer);
+            assertEquals(312,descriptor.byteSize()); assertEquals(312,descriptor.get(JAVA_INT,0));
             for(int i=0;i<5;i++) {
                 assertNotEquals(MemorySegment.NULL,descriptor.get(ADDRESS,24+i*8L));
                 assertEquals(1,descriptor.get(JAVA_INT,64+i*4L));
             }
-            var next=new NativeRenderer.Frame(); next.epoch=2; next.outputSequence=8;
-            assertSame(descriptor,buffer.marshal(next));
+            var next=new TerrainFixture(); next.epoch=2; next.outputSequence=8;
+            assertSame(descriptor,next.marshal(buffer));
             for(int i=0;i<5;i++) {
                 assertEquals(MemorySegment.NULL,descriptor.get(ADDRESS,24+i*8L));
                 assertEquals(0,descriptor.get(JAVA_INT,64+i*4L));
@@ -44,23 +44,23 @@ class NativeFrameBufferTest {
             assertEquals(2,descriptor.get(JAVA_LONG,8)); assertEquals(8,descriptor.get(JAVA_LONG,16));
         }
     }
-    @Test void uploadStorageGrowsPastBudgetWithIndexAlignmentAndIsReused() {
+    @Test void pooledUploadPreservesLargeMeshBytesAndLayout() {
         try(var buffer=new NativeFrameBuffer()) {
-            var frame=new NativeRenderer.Frame(); byte[] vertices=new byte[11_200_000];
+            var frame=new TerrainFixture(); byte[] vertices=new byte[11_200_000];
             vertices[0]=17; vertices[vertices.length-1]=29;
-            frame.indices=List.of(new NativeRenderer.Index(1,new int[]{7,8,9}));
-            frame.meshes=List.of(new NativeRenderer.Mesh(1,vertices,400_000,0));
-            var descriptor=buffer.marshal(frame);
+            frame.indices=List.of(new TerrainFixture.Index(1,new int[]{7,8,9}));
+            frame.meshes=List.of(new TerrainFixture.Mesh(1,vertices,400_000,0));
+            var descriptor=frame.marshal(buffer);
             var indices=descriptor.get(ADDRESS,24).reinterpret(24);
             var mesh=descriptor.get(ADDRESS,32).reinterpret(32);
             var copied=mesh.get(ADDRESS,8).reinterpret(vertices.length);
-            assertEquals(16,copied.address()-indices.get(ADDRESS,8).address());
+            assertEquals(0,copied.address()%8);
             assertEquals(17,copied.get(JAVA_BYTE,0)); assertEquals(29,copied.get(JAVA_BYTE,vertices.length-1));
             assertEquals(400_000,mesh.get(JAVA_INT,16));
-            assertEquals(MemorySegment.NULL,mesh.get(ADDRESS,24));
-            long address=copied.address();
-            buffer.marshal(frame);
-            assertEquals(address,mesh.get(ADDRESS,8).address());
+            assertNotEquals(MemorySegment.NULL,mesh.get(ADDRESS,24));
+
+            frame.marshal(buffer);
+            assertEquals(29,mesh.get(ADDRESS,8).reinterpret(vertices.length).get(JAVA_BYTE,vertices.length-1));
         }
     }
     @Test void publicDirectMeshAndIndexOwnBytesAndKeepPreanalyzedLayout() {
@@ -78,7 +78,7 @@ class NativeFrameBufferTest {
                 buffer.indexDirect(9L,indices,6,source);
                 vertices.fill((byte)0); indices.fill((byte)0);
             }
-            var descriptor=buffer.finish(new NativeRenderer.Frame());
+            var descriptor=buffer.finish(new TerrainFixture());
             var idxUpdate=descriptor.get(ADDRESS,24).reinterpret(24);
             assertEquals(9L,idxUpdate.get(JAVA_LONG,0));
             assertEquals(39,idxUpdate.get(ADDRESS,8).reinterpret(4).get(JAVA_INT,0));
@@ -103,7 +103,7 @@ class NativeFrameBufferTest {
             buffer.begin(2,0,0,0,0);
             buffer.instance(3,4,5,.75f); buffer.instance(6,7,8,1);
             buffer.visible(9,0x80000001,123,0,2);
-            var descriptor=buffer.finish(new NativeRenderer.Frame());
+            var descriptor=buffer.finish(new TerrainFixture());
             var visible=descriptor.get(ADDRESS,48).reinterpret(24);
             assertEquals(0x80000001,visible.get(JAVA_INT,8));
             assertEquals(123,visible.get(JAVA_INT,12)); assertEquals(2,visible.get(JAVA_INT,20));

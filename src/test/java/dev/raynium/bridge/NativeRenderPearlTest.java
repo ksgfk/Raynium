@@ -85,8 +85,9 @@ class NativeRenderPearlTest {
                 previousPass.setPipeline(shader);
                 previousPass.close();
                 try(var pass=encoder.createRenderPass(()->"push",view,Optional.of(new Vector4f(0,0,0,1)))) {
-                    assertThrows(IllegalStateException.class,()->previousPass.setPipeline(shader));
+                    assertThrows(IllegalStateException.class,()->previousPass.draw(3,1,0,0));
                     assertThrows(IllegalStateException.class,()->RayniumGpuDevice.activeTape(previousPass));
+                    assertThrows(IllegalStateException.class,()->RayniumGpuDevice.recordTerrain(previousPass,null,0,null,null));
                     pass.setPipeline(shader);
                     var push=ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
                     push.putFloat(4,1f).putFloat(12,1f); pass.pushConstants(push); pass.draw(3,1,0,0);
@@ -134,12 +135,12 @@ class NativeRenderPearlTest {
             var storageByView=new NativeFrameBuffer[height];
             for(int i=0;i<height;++i) {
                 var f=NativeTestSupport.solidFrame(i+1);
-                f.terrainAlbedoTexture=atlas.id(); f.terrainLightTexture=light.id();
-                f.meshes=List.of(new NativeRenderer.Mesh(i+1,terrainQuad((i+1)*32),8,0));
-                f.instances=List.of(new NativeRenderer.Instance(0,0,0,1));
-                f.visible=List.of(new NativeRenderer.Visible(i+1,-1,0,0,1));
+                f.terrainAlbedoTexture=atlas.handle(); f.terrainLightTexture=light.handle();
+                f.meshes=List.of(new TerrainFixture.Mesh(i+1,terrainQuad((i+1)*32),8,0));
+                f.instances=List.of(new TerrainFixture.Instance(0,0,0,1));
+                f.visible=List.of(new TerrainFixture.Visible(i+1,-1,0,0,1));
                 var storage=storageByView[i]=batch.acquireViewStorage();
-                views[i]=batch.addView(storage,storage.marshal(f),atlas,light);
+                views[i]=batch.addView(storage,f.marshal(storage),atlas,light);
             }
             var desc=RenderPassDescriptor.builder(()->"immediate and retained")
                 .withColorAttachment(color,Optional.of(new Vector4f(0,0,0,1))).withDepthAttachment(z,OptionalDouble.of(0)).build();
@@ -165,8 +166,8 @@ class NativeRenderPearlTest {
                 var reused=next.acquireViewStorage();
                 assertSame(storageByView[0],reused);
                 var empty=NativeTestSupport.solidFrame(100);
-                empty.terrainAlbedoTexture=atlas.id(); empty.terrainLightTexture=light.id();
-                next.addView(reused,reused.marshal(empty),atlas,light);
+                empty.terrainAlbedoTexture=atlas.handle(); empty.terrainLightTexture=light.handle();
+                next.addView(reused,empty.marshal(reused),atlas,light);
                 encoder.submit();
                 assertTrue(done.awaitCompletion(-1));
             }

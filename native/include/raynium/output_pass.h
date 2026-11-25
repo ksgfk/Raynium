@@ -2,7 +2,7 @@
 #include <raynium/shader_pack.h>
 #include <radray/runtime/rdg.h>
 #include <radray/runtime/frame_slot.h>
-#include <raynium/texture_registry.h>
+#include <raynium/resource_uploads.h>
 
 namespace raynium {
 class OutputPassResources final {

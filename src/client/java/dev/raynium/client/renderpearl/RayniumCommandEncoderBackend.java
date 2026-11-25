@@ -21,7 +21,7 @@ final class RayniumCommandEncoderBackend implements CommandEncoderBackend, AutoC
     private final CommandTape.ViewPool freeViews = new CommandTape.ViewPool();
     private final ArrayDeque<CommandTape.Storage> freeStorage = new ArrayDeque<>();
     private CommandTape tape;
-    private RayniumRenderPassBackend.Lease activePass;
+    private RayniumRenderPassBackend activePass;
 
     RayniumCommandEncoderBackend(NativeRenderer renderer,long hostCoherentAtomSize) {
         this.renderer=renderer;

@@ -36,7 +36,7 @@ public final class RetainedTerrain {
         try {
             TerrainCapture.drainRemoved(residency.pendingRemovals);
             boolean allowReuse=batch.viewCount()==0;
-            residency.prepare(snapshot,storage,atlas.id(),light.id(),allowReuse);
+            residency.prepare(snapshot,storage,atlas.handle(),light.handle(),allowReuse);
             var f=frameScratch;
             f.epoch=renderEpoch; f.outputSequence=NativeRenderer.nextFrameId();
             f.flags=(snapshot.rgss?NativeRenderer.RGSS:0)|(snapshot.improvedTransparency?NativeRenderer.IMPROVED_TRANSPARENCY:0)|

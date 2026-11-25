@@ -11,7 +11,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import static org.junit.jupiter.api.Assertions.*;
 
 class NativeBindingsTest {
-    @ParameterizedTest @ValueSource(ints={19,20,21,22,23,25})
+    @ParameterizedTest @ValueSource(ints={19,20,21,22,23,24,26})
     void rejectsIncompatibleDllBeforeLookingUpVersionSpecificExports(int version) {
         try(var arena=Arena.ofConfined()) {
             var versionAddress=Linker.nativeLinker().upcallStub(MethodHandles.constant(int.class,version),

@@ -60,7 +60,7 @@ class BenchmarkSessionFinishTest {
             if(fault==Failure.ALREADY_TERMINAL) {
                 var bad=arena.allocate(8,8);
                 bad.set(ValueLayout.JAVA_INT,0,-1); bad.set(ValueLayout.JAVA_INT,4,8);
-                assertThrows(IllegalStateException.class,()->renderer.submitFrame(bad,MemorySegment.NULL,null));
+                assertThrows(IllegalStateException.class,()->{ renderer.submitFrame(bad,MemorySegment.NULL,null); renderer.flush(); });
                 session.finish(true,"Route completed",false,()->renderer,stops::incrementAndGet);
             } else {
                 var original=new AssertionError("completion failure");

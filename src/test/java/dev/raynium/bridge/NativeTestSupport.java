@@ -28,8 +28,8 @@ final class NativeTestSupport implements AutoCloseable {
         } catch(IOException failure) { throw new java.io.UncheckedIOException(failure); }
     }
     static final int[] SOLID_COLOR={64,128,191,0};
-    static NativeRenderer.Frame solidFrame(long sequence) {
-        var frame=new NativeRenderer.Frame(); frame.outputSequence=sequence;
+    static TerrainFixture solidFrame(long sequence) {
+        var frame=new TerrainFixture(); frame.outputSequence=sequence;
         frame.fogColor=new float[]{.25f,.5f,.75f,1};
 
         return frame;

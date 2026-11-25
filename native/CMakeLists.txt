@@ -154,11 +154,11 @@ endif()
 
 add_library(rayniumruntime SHARED
     src/bridge.cpp include/raynium/bridge.h include/raynium/exception.h
-    src/render_thread_session.cpp include/raynium/render_thread_session.h
-    src/frame_packet.cpp include/raynium/frame_packet.h
-    src/frame_queue.cpp include/raynium/frame_queue.h
+    src/render_channel.cpp include/raynium/render_channel.h
+    src/batch_envelope.cpp include/raynium/batch_envelope.h
+    src/renderer_frontend.cpp include/raynium/renderer_frontend.h
     src/surface_submission.cpp include/raynium/surface_submission.h
-    src/buffer_registry.cpp include/raynium/buffer_registry.h
+    src/buffer_pool.cpp include/raynium/buffer_pool.h
     src/frame_readbacks.cpp include/raynium/frame_readbacks.h
     src/timestamp_queries.cpp include/raynium/timestamp_queries.h
     src/terrain_feature.cpp
@@ -175,7 +175,7 @@ add_library(rayniumruntime SHARED
     src/frame_upload.cpp include/raynium/frame_upload.h
     src/render_resources.cpp include/raynium/render_resources.h
     src/device_info.cpp
-    src/texture_registry.cpp include/raynium/texture_registry.h
+    src/resource_uploads.cpp include/raynium/resource_uploads.h
     src/output_pass.cpp include/raynium/output_pass.h
     src/render_program.cpp include/raynium/render_program.h
     src/mesh_pass.cpp include/raynium/mesh_pass.h
@@ -200,8 +200,9 @@ if(RAYNIUM_BUILD_TESTS)
     find_package(GTest CONFIG REQUIRED)
     enable_testing()
     include(GoogleTest)
-    add_executable(test_raynium_terrain tests/test_terrain_draw.cpp tests/test_surface_submission.cpp src/surface_submission.cpp src/terrain_draw.cpp src/frame_upload.cpp src/terrain_residency.cpp src/static_geometry_registry.cpp src/world_features.cpp src/buffer_registry.cpp src/immediate_pipeline.cpp src/render_program.cpp src/shader_pack.cpp src/texture_registry.cpp src/render_resources.cpp)
+    add_executable(test_raynium_terrain tests/test_terrain_draw.cpp tests/test_surface_submission.cpp src/surface_submission.cpp src/terrain_draw.cpp src/frame_upload.cpp src/terrain_residency.cpp src/mesh_pass.cpp src/static_geometry_registry.cpp src/world_features.cpp src/buffer_pool.cpp src/immediate_pipeline.cpp src/render_program.cpp src/shader_pack.cpp src/resource_uploads.cpp src/render_resources.cpp)
     target_compile_features(test_raynium_terrain PRIVATE cxx_std_20)
+    target_compile_definitions(test_raynium_terrain PRIVATE RAYNIUM_SHADER_PACK_PATH="${RAYNIUM_ROOT}/src/client/resources/assets/raynium/shaderpacks/default.rnsp")
     target_include_directories(test_raynium_terrain PRIVATE include "${RADRAY_SOURCE_DIR}/modules/runtime/tests")
     target_compile_options(test_raynium_terrain PRIVATE /W4 /permissive- /Zc:preprocessor /utf-8)
     target_link_libraries(test_raynium_terrain PRIVATE RadRay::runtime RadRay::shader GTest::gtest)

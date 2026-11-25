@@ -4,7 +4,7 @@
 #include <radray/runtime/gpu_device.h>
 #include <radray/runtime/gpu_env.h>
 #include <raynium/renderer.h>
-#include <raynium/frame_queue.h>
+#include <raynium/renderer_frontend.h>
 #include <atomic>
 #include <raynium/exception.h>
 #include <radray/logger.h>
@@ -56,8 +56,8 @@ static_assert(sizeof(rn_batch_telemetry)==152 && offsetof(rn_batch_telemetry,fla
               offsetof(rn_batch_telemetry,rdg_ns)==40 && offsetof(rn_batch_telemetry,present_ns)==48 && offsetof(rn_batch_telemetry,metrics)==56);
 static_assert(sizeof(rn_capture_info)==32 && offsetof(rn_capture_info,byte_size)==16);
 static_assert(sizeof(rn_device_info)==600 && offsetof(rn_device_info,host_coherent_atom_size)==592 && offsetof(rn_device_info,max_buffer_size)==488 && offsetof(rn_device_info,timestamp_period_ns)==584 && offsetof(rn_device_info,name)==40 && offsetof(rn_device_info,driver)==360);
-static_assert(sizeof(rn_uploaded_texture_desc)==32 && offsetof(rn_uploaded_texture_desc,array_layers)==24);
-static_assert(sizeof(rn_texture_upload_desc)==56 && offsetof(rn_texture_upload_desc,pixels)==32 && offsetof(rn_texture_upload_desc,byte_size)==40 && offsetof(rn_texture_upload_desc,array_layer)==48);
+static_assert(sizeof(rn_texture_desc)==32 && offsetof(rn_texture_desc,array_layers)==20);
+static_assert(sizeof(rn_texture_upload_desc)==56 && offsetof(rn_texture_upload_desc,pixels)==40 && offsetof(rn_texture_upload_desc,byte_size)==48 && offsetof(rn_texture_upload_desc,texture)==8);
 static_assert(sizeof(rn_renderer_desc)==24 && offsetof(rn_renderer_desc,shader_pack)==8 && offsetof(rn_renderer_desc,shader_pack_size)==16);
 static_assert(sizeof(rn_terrain_mesh_layout)==72 && alignof(rn_terrain_mesh_layout)==8);
 static_assert(offsetof(rn_terrain_mesh_layout,flags)==28 && offsetof(rn_terrain_mesh_layout,minimum)==32 &&
@@ -69,12 +69,15 @@ static_assert(offsetof(rn_mesh_update,vertex_count)==16 && offsetof(rn_mesh_upda
 static_assert(sizeof(rn_visible_item)==24);
 static_assert(offsetof(rn_visible_item,mesh)==0 && offsetof(rn_visible_item,element_mask)==8);
 static_assert(offsetof(rn_visible_item,sort_key)==12 && offsetof(rn_visible_item,first_instance)==16 && offsetof(rn_visible_item,instance_count)==20);
-static_assert(sizeof(rn_terrain_view_desc)==280 && sizeof(rn_texture_sampling)==16);
-static_assert(offsetof(rn_terrain_view_desc,projection)==96);
+static_assert(sizeof(rn_terrain_view_desc)==312 && sizeof(rn_texture_sampling)==16);
+static_assert(offsetof(rn_terrain_view_desc,projection)==104);
 static_assert(offsetof(rn_terrain_view_desc,indices)==24);
 static_assert(offsetof(rn_terrain_view_desc,index_count)==64);
-static_assert(offsetof(rn_terrain_view_desc,camera_block)==224);
-static_assert(offsetof(rn_terrain_view_desc,fog_distances)==264);
+static_assert(offsetof(rn_terrain_view_desc,camera_block)==232);
+static_assert(offsetof(rn_terrain_view_desc,fog_distances)==272);
+static_assert(offsetof(rn_terrain_view_desc,visible_version)==288);
+static_assert(offsetof(rn_terrain_view_desc,origins_version)==296);
+static_assert(offsetof(rn_terrain_view_desc,instances_version)==304);
 static_assert(sizeof(rn_instance)==16);
 static_assert(!std::is_default_constructible_v<raynium::Renderer>);
 
@@ -87,7 +90,7 @@ struct rn_renderer {
     rn_runtime* owner;
     radray::unique_ptr<raynium::Renderer> renderer;
     rn_swapchain* swapchain{};
-    radray::unique_ptr<raynium::FrameQueue> frames;
+    radray::unique_ptr<raynium::RendererFrontend> frames;
     bool wireframe{};
 };
 struct rn_swapchain { rn_renderer* owner; uint64_t hwnd; radray::unique_ptr<raynium::Swapchain> swapchain; };
@@ -95,7 +98,7 @@ struct rn_swapchain { rn_renderer* owner; uint64_t hwnd; radray::unique_ptr<rayn
 namespace {
 
 std::atomic_flag claimed = ATOMIC_FLAG_INIT;
-thread_local raynium::RenderThreadSession* frontend = nullptr;
+thread_local raynium::RenderChannel* frontend = nullptr;
 radray::unique_ptr<radray::Environment> environment;
 rn_runtime* activeRuntime = nullptr;
 
@@ -175,7 +178,7 @@ rn_status rn_init_env(const rn_env_desc* desc) noexcept {
         }
         if(claimed.test_and_set()) { RADRAY_ERR_LOG("Native environment is already initialized"); return false; }
         auto releaseClaim = radray::MakeScopeGuard([]() noexcept { if (!frontend) claimed.clear(); });
-        auto session = raynium::RenderThreadSession::Create();
+        auto session = raynium::RenderChannel::Create();
         if (!session) return false;
         const bool started = session->Barrier([&] {
 #ifdef RADRAY_ENABLE_PROFILER
@@ -199,7 +202,7 @@ rn_status rn_destroy_env(void) noexcept {
             RADRAY_ERR_LOG("Native environment belongs to another thread"); return false;
         }
         if(activeRuntime) { RADRAY_ERR_LOG("Destroy the active runtime before destroying the environment"); return false; }
-        radray::unique_ptr<raynium::RenderThreadSession> session(std::exchange(frontend, nullptr));
+        radray::unique_ptr<raynium::RenderChannel> session(std::exchange(frontend, nullptr));
         session->Barrier([] {
 #ifdef RADRAY_ENABLE_PROFILER
         // Join profiler workers before FFM unloads the DLL under the Windows loader lock.
@@ -263,7 +266,7 @@ rn_status rn_create_renderer(rn_runtime* runtime,const rn_renderer_desc* desc,rn
         auto owned=radray::unique_ptr<rn_renderer>(new rn_renderer{runtime,{},{}});
         const std::span shaders{static_cast<const radray::byte*>(desc->shader_pack),size_t(desc->shader_pack_size)};
         if(!raynium::Renderer::Create(*runtime->runtime,shaders,desc->flags,owned->renderer)) return false;
-        owned->frames = radray::make_unique<raynium::FrameQueue>(*session, *owned->renderer);
+        owned->frames = radray::make_unique<raynium::RendererFrontend>(owned.get(),*session, *owned->renderer);
         owned->wireframe=owned->renderer->SupportsWireframe();
         runtime->renderer=owned.release(); *output=runtime->renderer; return true;
     });
@@ -293,8 +296,7 @@ rn_status rn_create_swapchain(rn_renderer* renderer,const rn_swapchain_desc* des
         if(!Owner(renderer)) return false;
         if(!renderer->frames->Open() || !desc || !output || renderer->swapchain) { RADRAY_ERR_LOG("Invalid swapchain output or existing swapchain"); return false; }
         auto owned=radray::unique_ptr<rn_swapchain>(new rn_swapchain{renderer,desc->hwnd,{}});
-        if(!renderer->renderer->PrepareOutput(radray::gpu::TextureFormat::BGRA8_UNORM) ||
-           !raynium::Swapchain::Create(renderer->renderer->Runtime(),*desc,owned->swapchain)) {
+        if(!raynium::Swapchain::Create(renderer->renderer->Runtime(),*desc,owned->swapchain)) {
             if(renderer->renderer->IsTerminal()) renderer->frames->DeviceFailure();
             return false;
         }
@@ -331,9 +333,10 @@ rn_status rn_destroy_swapchain(rn_swapchain* chain) noexcept {
         chain->owner->swapchain=nullptr; delete chain; return true;
     });
 }
-rn_status rn_create_texture(rn_renderer* renderer,const rn_uploaded_texture_desc* desc) noexcept {
+rn_status rn_create_texture(rn_renderer* renderer,const rn_texture_desc* desc,rn_texture** out) noexcept {
+    if(out) *out=nullptr;
     return Invoke("rn_create_texture",[&] {
-        return FrontOwner(renderer) && desc && renderer->frames->CreateTexture(*desc);
+        return FrontOwner(renderer) && desc && out && renderer->frames->CreateTexture(*desc,*out);
     });
 }
 rn_status rn_upload_texture(rn_renderer* renderer,const rn_texture_upload_desc* desc) noexcept {
@@ -341,7 +344,7 @@ rn_status rn_upload_texture(rn_renderer* renderer,const rn_texture_upload_desc* 
         return FrontOwner(renderer) && desc && renderer->frames->UploadTexture(*desc);
     });
 }
-rn_status rn_destroy_texture(rn_renderer* renderer,uint32_t id) noexcept {
+rn_status rn_destroy_texture(rn_renderer* renderer,rn_texture* id) noexcept {
     return Invoke("rn_destroy_texture",[&] {
         return FrontOwner(renderer) && renderer->frames->RemoveTexture(id);
     });
@@ -356,6 +359,7 @@ rn_status rn_upsert_model_mesh(rn_renderer* renderer,int32_t mesh_id,const void*
     }
     return Barrier("rn_upsert_model_mesh",[&] {
         if(!renderer->frames->Open()) return false;
+        renderer->frames->ApplyModelRemovals();
         if(renderer->renderer->UpsertModelMesh(mesh_id,{static_cast<const radray::byte*>(vertex_data),vertex_bytes},vertex_count,index_count,*out_page_id))
             return true;
         if(renderer->renderer->IsTerminal()) renderer->frames->DeviceFailure();
@@ -365,33 +369,35 @@ rn_status rn_upsert_model_mesh(rn_renderer* renderer,int32_t mesh_id,const void*
 rn_status rn_remove_model_mesh(rn_renderer* renderer,int32_t mesh_id) noexcept {
     return Invoke("rn_remove_model_mesh",[&] {
         if(!FrontOwner(renderer) || mesh_id<16) return false;
-        frontend->Post([=] { renderer->renderer->RemoveModelMesh(mesh_id); });
+        renderer->frames->RemoveModelMesh(mesh_id);
         return true;
     });
 }
-rn_status rn_create_query_pool(rn_renderer* renderer,uint32_t count,uint32_t* id) noexcept {
+rn_status rn_create_query_pool(rn_renderer* renderer,uint32_t count,rn_query_pool** id) noexcept {
+    if(id) *id=nullptr;
     return Invoke("rn_create_query_pool",[&] {
         return FrontOwner(renderer) && id && renderer->frames->CreateQueryPool(count,*id);
     });
 }
-rn_status rn_destroy_query_pool(rn_renderer* renderer,uint32_t id) noexcept {
+rn_status rn_destroy_query_pool(rn_renderer* renderer,rn_query_pool* id) noexcept {
     return Invoke("rn_destroy_query_pool",[&] {
         return FrontOwner(renderer) && renderer->frames->RemoveQueryPool(id);
     });
 }
-rn_status rn_sync_query_pool(rn_renderer* renderer,uint32_t id,uint32_t first,uint32_t count,rn_query_sample* samples,rn_wait_result* result) noexcept {
+rn_status rn_sync_query_pool(rn_renderer* renderer,rn_query_pool* id,uint32_t first,uint32_t count,rn_query_sample* samples,rn_wait_result* result) noexcept {
     return Invoke("rn_sync_query_pool",[&] {
         if(!result) return false;
         *result={};
         return FrontOwner(renderer) && (!count || samples) && renderer->frames->Query(id,first,{samples,count},*result);
     });
 }
-rn_status rn_register_pipeline(rn_renderer* renderer,const rn_pipeline_desc* desc,uint32_t* id) noexcept {
+rn_status rn_register_pipeline(rn_renderer* renderer,const rn_pipeline_desc* desc,rn_pipeline** id) noexcept {
+    if(id) *id=nullptr;
     return Invoke("rn_register_pipeline",[&] {
         return FrontOwner(renderer) && desc && id && renderer->frames->RegisterPipeline(*desc,*id);
     });
 }
-rn_status rn_destroy_pipeline(rn_renderer* renderer,uint32_t id) noexcept {
+rn_status rn_destroy_pipeline(rn_renderer* renderer,rn_pipeline* id) noexcept {
     return Invoke("rn_destroy_pipeline",[&] {
         return FrontOwner(renderer) && renderer->frames->RemovePipeline(id);
     });
@@ -403,13 +409,13 @@ rn_status rn_create_buffer(rn_renderer* renderer,const rn_buffer_desc* desc,rn_b
         return renderer->frames->CreateBuffer(*desc,*result);
     });
 }
-rn_status rn_destroy_buffer(rn_renderer* renderer,uint32_t id) noexcept {
+rn_status rn_destroy_buffer(rn_renderer* renderer,rn_buffer* id) noexcept {
     return Invoke("rn_destroy_buffer",[&] {
         return FrontOwner(renderer) && renderer->frames->RemoveBuffer(id);
     });
 }
 static_assert(sizeof(rn_buffer_desc)==24 && sizeof(rn_buffer_result)==16 && sizeof(rn_mapped_range)==24);
-static_assert(sizeof(rn_batch_desc)==96 && sizeof(rn_submit_result)==56 && offsetof(rn_submit_result,progress)==8);
+static_assert(sizeof(rn_batch_desc)==128 && sizeof(rn_submit_result)==56 && offsetof(rn_submit_result,progress)==8);
 static_assert(offsetof(rn_batch_desc,instance_uploads)==48 && offsetof(rn_batch_desc,dirty_ranges)==64 && offsetof(rn_batch_desc,views)==80);
 rn_status rn_submit_frame(rn_renderer* renderer,const rn_batch_desc* batch,rn_submit_result* result) noexcept {
     return Invoke("rn_submit_frame",[&] {

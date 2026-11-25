@@ -4,7 +4,7 @@ import dev.raynium.bridge.NativeFrameBuffer;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Off-heap pre-analyzed terrain mesh payload.
@@ -13,13 +13,11 @@ import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
  */
 public final class MeshPayload {
     private static final ThreadLocal<byte[]> GROUP_SCRATCH = ThreadLocal.withInitial(() -> new byte[4096]);
-    private static final AtomicReferenceFieldUpdater<MeshPayload, ByteBuffer> DIRECT_VERTICES_UPDATER =
-            AtomicReferenceFieldUpdater.newUpdater(MeshPayload.class, ByteBuffer.class, "directVertices");
 
     /** Render-thread dense slot ID (1..maxSlot) assigned by TerrainResidency while staged/resident; 0 when unassigned. */
     public int slotId;
     public final long epoch;
-    private volatile ByteBuffer directVertices;
+    private final PinnedBytes vertices;
     public final int vertexCount;
     public final int mode;
     public final int[] groupQuadCounts = new int[7];
@@ -29,86 +27,61 @@ public final class MeshPayload {
     public byte[] originalQuadGroups;
     public volatile IndexSnapshot indices;
 
-    /** Holds one immutable byte range until the consumer has finished reading it. */
-    public static final class UploadLease implements AutoCloseable {
-        private final MemorySegment bytes;
-        private Runnable release;
-
-        private UploadLease(ByteBuffer buffer, int length, Runnable release) {
-            bytes = MemorySegment.ofBuffer(buffer).asSlice(0, length).asReadOnly();
-            this.release = release;
+    /** The thread dropping the last pin after release owns the sole return to the pool. */
+    private static final class PinnedBytes {
+        private static final int RELEASED=Integer.MIN_VALUE;
+        private final AtomicInteger state=new AtomicInteger();
+        private volatile ByteBuffer buffer;
+        private MemorySegment bytes;
+        PinnedBytes(ByteBuffer buffer,int size) {
+            this.buffer=buffer;
+            bytes=MemorySegment.ofBuffer(buffer).asSlice(0,size).asReadOnly();
         }
-
-        public MemorySegment bytes() { return bytes; }
-
-        @Override public synchronized void close() {
-            if (release == null) return;
-            release.run();
-            release = null;
+        MemorySegment pin() {
+            int current;
+            do {
+                current=state.get();
+                if(current<0 || current==0x3fff_ffff) throw new IllegalStateException("Terrain upload cannot be pinned");
+            } while(!state.compareAndSet(current,current+1));
+            return bytes;
         }
-    }
-
-    private static ByteBuffer readable(ByteBuffer buffer, int size) {
-        return buffer == null ? null : buffer.slice(0, size).asReadOnlyBuffer().order(ByteOrder.nativeOrder());
+        boolean unpin() {
+            int current;
+            do {
+                current=state.get();
+                if((current&Integer.MAX_VALUE)==0) throw new IllegalStateException("Unbalanced terrain upload pin");
+            } while(!state.compareAndSet(current,current-1));
+            return current==RELEASED+1 && recycle();
+        }
+        boolean release() {
+            return state.getAndUpdate(value->value|RELEASED)==0 && recycle();
+        }
+        private boolean recycle() {
+            var retired=buffer;
+            buffer=null;
+            bytes=null;
+            DirectUploadPool.release(retired);
+            return true;
+        }
+        ByteBuffer readable(int size) {
+            var current=buffer;
+            return current==null?null:current.slice(0,size).asReadOnlyBuffer().order(ByteOrder.nativeOrder());
+        }
     }
 
     public static final class IndexSnapshot {
-        private static final AtomicReferenceFieldUpdater<IndexSnapshot, ByteBuffer> DIRECT_BUF_UPDATER =
-                AtomicReferenceFieldUpdater.newUpdater(IndexSnapshot.class, ByteBuffer.class, "directBuffer");
         public final int count;
-        private final int[] heapValues;
-        private volatile ByteBuffer directBuffer;
-
-        public IndexSnapshot(int[] values) {
-            this.count = values.length;
-            this.heapValues = values;
-            this.directBuffer = null;
+        private final PinnedBytes indices;
+        IndexSnapshot(ByteBuffer directBuffer,int count) {
+            this.count=count;
+            indices=new PinnedBytes(directBuffer,count*4);
         }
-
-        IndexSnapshot(ByteBuffer directBuffer, int count) {
-            this.count = count;
-            this.heapValues = null;
-            this.directBuffer = directBuffer;
-        }
-
-        boolean hasData() { return heapValues!=null || directBuffer!=null; }
-
-        public int byteSize() {
-            return count * 4;
-        }
-
-        boolean hasDirectBuffer() { return directBuffer != null; }
-
-        public ByteBuffer directBuffer() {
-            return readable(directBuffer, byteSize());
-        }
-
-        public int[] values() {
-            if (heapValues != null) return heapValues;
-            ByteBuffer buf = directBuffer;
-            if (buf == null) return new int[0];
-            int[] out = new int[count];
-            for (int i = 0; i < count; i++) out[i] = buf.getInt(i * 4);
-            return out;
-        }
-
-        private int pins;
-        private boolean releaseRequested;
-        public synchronized UploadLease pinIndices() {
-            if(directBuffer==null) throw new IllegalStateException("Terrain upload was released");
-            var lease = new UploadLease(directBuffer, byteSize(), this::unpinIndices);
-            ++pins;
-            return lease;
-        }
-        private synchronized void unpinIndices() {
-            if(pins<=0) throw new IllegalStateException("Unbalanced terrain upload pin");
-            if(--pins==0 && releaseRequested) releaseBuffer();
-        }
-        public synchronized void releaseBuffer() {
-            if(pins!=0) { releaseRequested=true; return; }
-            ByteBuffer buf = DIRECT_BUF_UPDATER.getAndSet(this, null);
-            if (buf != null) DirectUploadPool.release(buf);
-        }
+        boolean hasData() { return indices.buffer!=null; }
+        public int byteSize() { return count*4; }
+        public ByteBuffer directBuffer() { return indices.readable(byteSize()); }
+        public MemorySegment pin() { return indices.pin(); }
+        public void unpin() { indices.unpin(); }
+        public void releaseBuffer() { indices.release(); }
     }
 
     public MeshPayload(long epoch, ByteBuffer source) {
@@ -126,7 +99,7 @@ public final class MeshPayload {
         this.vertexCount = quadCount * 4;
         if (quadCount == 0) {
             this.layoutFlags = 0;
-            this.directVertices = null;
+            this.vertices = null;
             return;
         }
 
@@ -158,7 +131,7 @@ public final class MeshPayload {
             groupQuadCounts[6] = quadCount;
             ByteBuffer direct = DirectUploadPool.acquire(byteSize);
             MemorySegment.copy(MemorySegment.ofBuffer(data), 0L, MemorySegment.ofBuffer(direct), 0L, byteSize);
-            this.directVertices = direct;
+            this.vertices = new PinnedBytes(direct,byteSize);
             if (finite) {
                 minBounds[0] = minX; minBounds[1] = minY; minBounds[2] = minZ;
                 maxBounds[0] = maxX; maxBounds[1] = maxY; maxBounds[2] = maxZ;
@@ -237,7 +210,7 @@ public final class MeshPayload {
             }
             this.originalQuadGroups = packed;
         }
-        this.directVertices = direct;
+        this.vertices = new PinnedBytes(direct,byteSize);
         int flags = 0;
         if (finite) {
             minBounds[0] = minX; minBounds[1] = minY; minBounds[2] = minZ;
@@ -250,7 +223,6 @@ public final class MeshPayload {
         this.layoutFlags = flags;
     }
 
-    /** Exact mirror of native TerrainQuadGroup in terrain_draw.cpp. */
     private static int classifyQuad(
             float x0, float y0, float z0,
             float x1, float y1, float z1,
@@ -287,30 +259,16 @@ public final class MeshPayload {
     }
 
     public ByteBuffer directVertices() {
-        return readable(directVertices, vertexCount * 28);
+        return vertices==null?null:vertices.readable(vertexCount*28);
     }
-
-    public boolean hasVertices() {
-        return directVertices != null;
+    public boolean hasVertices() { return vertices!=null && vertices.buffer!=null; }
+    public MemorySegment pin() {
+        if(vertices==null) throw new IllegalStateException("Empty terrain mesh");
+        return vertices.pin();
     }
-
-    private int pins;
-    private boolean releaseRequested;
-    public synchronized UploadLease pinVertices() {
-        if(directVertices==null) throw new IllegalStateException("Terrain upload was released");
-        var lease = new UploadLease(directVertices, vertexCount * 28, this::unpinVertices);
-        ++pins;
-        return lease;
-    }
-    private synchronized void unpinVertices() {
-        if(pins<=0) throw new IllegalStateException("Unbalanced terrain upload pin");
-        if(--pins==0 && releaseRequested) releaseVertices();
-    }
-    public synchronized void releaseVertices() {
-        if(pins!=0) { releaseRequested=true; return; }
-        ByteBuffer buf = DIRECT_VERTICES_UPDATER.getAndSet(this, null);
-        if (buf != null) DirectUploadPool.release(buf);
-        originalQuadGroups = null;
+    public void unpin() { if(vertices.unpin()) originalQuadGroups=null; }
+    public void releaseVertices() {
+        if(vertices!=null && vertices.release()) originalQuadGroups=null;
     }
 
     public IndexSnapshot copyIndices(ByteBuffer source, int stride) {

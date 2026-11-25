@@ -11,9 +11,10 @@ inline bool SubmitPreparedTerrainDirectDraws(radray::gpu::GraphicsCommandEncoder
 }
 
 struct TerrainView {
+    explicit TerrainView(std::pmr::memory_resource& memory):uploads(&memory) {}
     TerrainViewDrawData* draws{};
     TerrainFrame frame;
-    radray::vector<GeometryUpload> uploads;
+    std::pmr::vector<GeometryUpload> uploads;
     radray::RDGBufferHandle constants,instances;
     radray::array<radray::RDGBufferHandle,3> indirectByLayer;
     const MeshPassResources* mesh{};
@@ -29,11 +30,11 @@ struct TerrainFeature {
     TerrainView* view{};
     uint32_t stage{};
     radray::Rect scissor{};
-    radray::array<radray::IntrusivePtr<radray::GpuTexture>,3> sources;
+    radray::array<const rn_texture*,3> sources;
     radray::array<uint32_t,3> mips{};
     radray::array<radray::RDGTextureHandle,3> reads;
     struct MaterialBinding {
-        radray::IntrusivePtr<radray::GpuTexture> image;
+        const rn_texture* image;
         rn_texture_sampling sampling{};
         uint32_t flags{};
         radray::RDGTextureHandle handle;
@@ -45,7 +46,7 @@ struct TerrainFeature {
     radray::gpu::ShaderParameterSet* material{};
     radray::gpu::ShaderParameterSet* oit{};
     bool active{};
-    bool Decode(std::span<const radray::byte>,std::span<TerrainView>,const TextureRegistry&,const radray::Rect&);
+    bool Decode(std::span<const radray::byte>,std::span<TerrainView>,rn_renderer* owner,const radray::Rect&);
     void Import(radray::RDGBuilder&,FrameTextureImports&);
     void Declare(radray::RDGRasterPassBuilder&) const;
     bool Prepare(radray::RDGPrepareContext&);

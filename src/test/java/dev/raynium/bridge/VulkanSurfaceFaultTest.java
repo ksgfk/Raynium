@@ -101,7 +101,7 @@ class VulkanSurfaceFaultTest {
             verticesView.position(verticesView.limit());
             indicesView.position(indicesView.limit());
             storage.begin(0,0,1,1,0);
-            storage.terrain(texture.id(),texture.id(),1);
+            storage.terrain(texture.handle(),texture.handle(),1);
             storage.meshPooled(1,mesh);
             storage.indexPooled(1,indices);
             batch.addPooledView(storage,NativeTestSupport.solidFrame(1),texture,texture);
@@ -123,8 +123,8 @@ class VulkanSurfaceFaultTest {
                 // Both pools must return a live allocation while the worker is still inside AcquireNext.
                 try(var shadow=renderer.createBuffer(source,192,null,null);
                     var rotated=renderer.createFenceRotatedBuffer(source,512*1024,null,NativeBuffer.WriteSource.TRANSIENT)) {
-                    assertTrue(shadow.id()>0);
-                    assertTrue(rotated.id()>0);
+                    assertTrue(shadow.handle()>0);
+                    assertTrue(rotated.handle()>0);
                 }
                 assertTrue(renderer.pollCapture(73).isEmpty());
                 assertTrue(pool.getValue(0).isEmpty());
@@ -250,12 +250,12 @@ class VulkanSurfaceFaultTest {
                 var pooled = second.acquireViewStorage();
                 try (var external = new NativeFrameBuffer()) {
                     var frame = NativeTestSupport.solidFrame(2);
-                    frame.terrainAlbedoTexture = atlas.id();
-                    frame.terrainLightTexture = light.id();
-                    frame.instances = List.of(new NativeRenderer.Instance(0, 0, 0, 1));
-                    frame.visible = List.of(new NativeRenderer.Visible(9, -1, 0, 0, 1));
-                    frame.meshes = List.of(new NativeRenderer.Mesh(9, NativeRenderPearlTest.terrainQuad(128), 8, 0));
-                    var view = second.addView(pooled, external.marshal(frame), atlas, light);
+                    frame.terrainAlbedoTexture = atlas.handle();
+                    frame.terrainLightTexture = light.handle();
+                    frame.instances = List.of(new TerrainFixture.Instance(0, 0, 0, 1));
+                    frame.visible = List.of(new TerrainFixture.Visible(9, -1, 0, 0, 1));
+                    frame.meshes = List.of(new TerrainFixture.Mesh(9, NativeRenderPearlTest.terrainQuad(128), 8, 0));
+                    var view = second.addView(pooled, frame.marshal(external), atlas, light);
                     TerrainTestPass.record(second, view, color, depth, atlas, light);
                     second.captureColor(region, 61);
                     encoder.submit();
@@ -297,8 +297,9 @@ class VulkanSurfaceFaultTest {
             assertEquals(0,completed.get());
             var bad=arena.allocate(8,8);
             bad.set(JAVA_INT,0,-1); bad.set(JAVA_INT,4,8);
-            var release=gate.releaseDuring("submitFrame");
-            assertThrows(IllegalStateException.class,()->renderer.submitFrame(bad,MemorySegment.NULL,null));
+            renderer.submitFrame(bad,MemorySegment.NULL,null);
+            var release=gate.releaseDuring("flush");
+            assertThrows(IllegalStateException.class,renderer::flush);
             release.join();
             assertEquals(1,completed.get());
             assertTrue(pool.getValue(0).isPresent());
@@ -414,7 +415,7 @@ class VulkanSurfaceFaultTest {
                 var sample = arena.allocate(16, 8);
                 var progress = arena.allocate(NativeBindings.WAIT_BYTES, 8);
                 assertEquals(0, (int)renderer.bindings.syncQueryPool.invokeExact(NativeTestSupport.handle(renderer),
-                        TerrainTestPass.queryPoolId(pool), 1, 1, sample, progress));
+                        TerrainTestPass.queryPoolHandle(pool), 1, 1, sample, progress));
                 assertEquals(0L, sample.get(ValueLayout.JAVA_LONG, 0));
                 assertTrue(pool.getValue(1).isEmpty());
             } finally {
@@ -557,7 +558,11 @@ class VulkanSurfaceFaultTest {
                     var measured = new ArrayList<Long>();
                     renderer.drainTelemetry(record->measured.add(record.get(ValueLayout.JAVA_LONG,0)));
                     assertEquals(List.of(previous),measured);
-                    assertEquals(255,Byte.toUnsignedInt(renderer.pollCapture(81).orElseThrow().rgba()[0]));
+                    if (fault == TailFault.READBACK_MAP) {
+                        assertEquals(255,Byte.toUnsignedInt(renderer.pollCapture(81).orElseThrow().rgba()[0]));
+                    } else {
+                        assertThrows(IllegalStateException.class,()->renderer.pollCapture(81));
+                    }
                     assertThrows(IllegalStateException.class,()->renderer.pollCapture(82));
                 } finally {
                     probe.inject(9,0);
@@ -679,7 +684,7 @@ class VulkanSurfaceFaultTest {
             var probe = Probe.load(arena);
             var handle = NativeTestSupport.handle(renderer);
             var result = arena.allocate(NativeBindings.WAIT_BYTES, 8);
-            var blit = arena.allocateFrom(JAVA_INT, 6, 16, color.id(), 0);
+            var blit = arena.allocateFrom(ValueLayout.JAVA_LONG,(24L<<32)|6,color.handle(),0);
             var empty = MemorySegment.NULL;
             // Observe both C results without publishing either snapshot to the Java surface.
             probe.inject(4, SURFACE_LOST);
@@ -745,13 +750,13 @@ class VulkanSurfaceFaultTest {
                     var image = (NativeTexture)texture;
                     batch.clearColor(new CommandTape.Region(image, 0, 0, 0, 0, 8, 4), 1, 0, 0, 1);
                     var frame = NativeTestSupport.solidFrame(pass + 1);
-                    frame.terrainAlbedoTexture = atlas.id();
-                    frame.terrainLightTexture = light.id();
-                    frame.instances = List.of(new NativeRenderer.Instance(0, 0, 0, 1));
-                    frame.visible = List.of(new NativeRenderer.Visible(9, -1, 0, 0, 1));
-                    if (pass == 0) frame.meshes = List.of(new NativeRenderer.Mesh(9, NativeRenderPearlTest.terrainQuad(128), 8, 0));
+                    frame.terrainAlbedoTexture = atlas.handle();
+                    frame.terrainLightTexture = light.handle();
+                    frame.instances = List.of(new TerrainFixture.Instance(0, 0, 0, 1));
+                    frame.visible = List.of(new TerrainFixture.Visible(9, -1, 0, 0, 1));
+                    if (pass == 0) frame.meshes = List.of(new TerrainFixture.Mesh(9, NativeRenderPearlTest.terrainQuad(128), 8, 0));
                     var storage = batch.acquireViewStorage();
-                    var snapshot = batch.addView(storage, storage.marshal(frame), atlas, light);
+                    var snapshot = batch.addView(storage, frame.marshal(storage), atlas, light);
                     TerrainTestPass.record(batch, snapshot, image, depth, atlas, light);
                     encoder.writeTimestamp(queries, 0);
                     encoder.copyTextureToBuffer(texture, read, 0, () -> {}, 0);

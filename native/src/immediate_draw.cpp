@@ -5,53 +5,56 @@
 
 namespace raynium {
 using namespace radray::gpu;
-bool ImmediateDraw::Decode(std::span<const radray::byte> bytes,const ImmediatePipelineRegistry& pipelines,
-    const BufferRegistry& buffers,const TextureRegistry& textures,std::span<const TextureFormat> colors,const radray::Rect& area) {
+ImmediateDraw::Binding ImmediateDraw::ReadBinding(const radray::byte* base,size_t index) noexcept {
+    Binding b{};
+    std::memcpy(&b,base+index*sizeof(Binding),sizeof(Binding));
+    return b;
+}
+bool ImmediateDraw::Decode(std::pmr::memory_resource& memory,std::span<const radray::byte> bytes,rn_renderer* owner,std::span<const TextureFormat> colors,const radray::Rect& area) {
     static_assert(sizeof(Binding)==48);
     wire::Draw h{};
     if(!wire::ReadRasterHeader(bytes,h) || h.scissor.X<area.X || h.scissor.Y<area.Y ||
        uint64_t(h.scissor.X)+h.scissor.Width>uint64_t(area.X)+area.Width || uint64_t(h.scissor.Y)+h.scissor.Height>uint64_t(area.Y)+area.Height) return false;
-    _pipeline=pipelines.Find(h.pipeline);
+    auto* pipeline=ResolveHandle(owner,h.pipeline);
+    _pipeline=pipeline?pipeline->impl.get():nullptr;
     if(!_pipeline || colors.size()!=_pipeline->state.colors.size()) return false;
     for(size_t i=0;i<colors.size();++i) if(colors[i]!=_pipeline->state.colors[i].Format) return false;
     _kind=h.kind; _count=h.count; _instances=h.instances; _first=h.first; _firstInstance=h.firstInstance; _base=h.base; _scissor=h.scissor;
     if(_kind==4 && (_count<3 || _count>UINT32_MAX/3)) return false;
     bytes=bytes.subspan(sizeof(h));
-    _resources.reserve(h.bindings);
+    _bindingBytes=bytes.data();
+    _resources=FrameArray<Resource>(memory,h.bindings);
+    bool hasIndirect=false;
     for(uint32_t i=0;i<h.bindings;++i) {
-        Resource r{};
-        auto& b=r.binding;
-        std::memcpy(&b,bytes.data(),sizeof(b));
-        bytes=bytes.subspan(sizeof(b));
+        auto& r=_resources[i];
+        const auto b=ReadBinding(_bindingBytes,i);
+        r.kind=b.kind;
         if(b.kind==5) {
-            auto* image=textures.Find(b.id);
+            auto* image=ResolveHandle(owner,reinterpret_cast<rn_texture*>(b.resource));
             if(!image || !b.sampling.mip_count || b.sampling.base_mip>=image->desc.mip_levels ||
                b.sampling.mip_count>image->desc.mip_levels-b.sampling.base_mip) return false;
-            r.texture=image->texture;
+            r.texture=image;
         } else {
             constexpr uint32_t usage[]{RN_BUFFER_VERTEX,RN_BUFFER_INDEX,RN_BUFFER_INDIRECT,RN_BUFFER_UNIFORM,RN_BUFFER_TEXEL};
-            r.buffer=buffers.Find(b.id);
+            r.buffer=ResolveHandle(owner,reinterpret_cast<rn_buffer*>(b.resource));
             if(b.kind>=5 || !r.buffer || !(r.buffer->usage&usage[b.kind]) || !r.buffer->Contains(b.offset,b.size)) return false;
             if(b.kind==1 && ((b.format!=2 && b.format!=4) || b.offset>UINT32_MAX ||
                (_kind==1 && (uint64_t(_first)+_count)>b.size/b.format))) return false;
-            if(b.kind==2 && ((_kind!=2 && _kind!=3) || _count>b.size/(_kind==2?16:20))) return false;
+            if(b.kind==2) {
+                if((_kind!=2 && _kind!=3) || _count>b.size/(_kind==2?16:20)) return false;
+                hasIndirect=true;
+            }
         }
-        _resources.push_back(std::move(r));
     }
-    if((_kind==2 || _kind==3) && std::none_of(_resources.begin(),_resources.end(),[](const Resource& r){return r.binding.kind==2;})) return false;
-    if(auto size=_pipeline->program->pushBytes) {
-        const auto copySize=std::min(size,h.push);
-        _push.clear();
-        _push.reserve(size);
-        for(uint32_t i=0;i<copySize;++i) _push.push_back(bytes[i]);
-        for(uint32_t i=copySize;i<size;++i) _push.push_back(radray::byte{});
-    }
+    if((_kind==2 || _kind==3) && !hasIndirect) return false;
+    bytes=bytes.subspan(size_t(h.bindings)*sizeof(Binding));
+    _push=FramePushConstants(memory,bytes.first(h.push),_pipeline->program->pushBytes);
     return true;
 }
 
 void ImmediateDraw::Import(radray::RDGBuilder& graph,FrameTextureImports& imports) {
     for(auto& r:_resources) {
-        if(r.texture) r.imageHandle=imports.Import(r.texture);
+        if(r.kind==5) r.imageHandle=imports.Import(r.texture);
         else r.bufferHandle=r.buffer->Import(graph);
     }
     if(_pipeline->program->drawBasesLayout) {
@@ -59,9 +62,12 @@ void ImmediateDraw::Import(radray::RDGBuilder& graph,FrameTextureImports& import
         if(indirect) {
             _drawBases=graph.CreateBuffer({.Size=uint64_t(_count)*256,.Memory=MemoryType::Device,
                 .Usage=BufferUse::CopyDestination|BufferUse::CBuffer});
-            const auto& args=*std::find_if(_resources.begin(),_resources.end(),[](const Resource& r) { return r.binding.kind==2; });
+            size_t argIndex=0;
+            while(argIndex<_resources.size() && _resources[argIndex].kind!=2) ++argIndex;
+            const auto& args=_resources[argIndex];
+            const auto argBinding=ReadBinding(_bindingBytes,argIndex);
             struct CopyBases { radray::RDGBufferHandle from,to; uint64_t offset; uint32_t count,stride; };
-            graph.AddCopyPass("Draw argument bases",CopyBases{args.bufferHandle,_drawBases,args.binding.offset,_count,_kind==2?16u:20u},
+            graph.AddCopyPass("Draw argument bases",CopyBases{args.bufferHandle,_drawBases,argBinding.offset,_count,_kind==2?16u:20u},
                 +[](const CopyBases& op,radray::RDGCopyPassContext& ctx) noexcept {
                     const auto src=ctx.ResolveBuffer(op.from),dst=ctx.ResolveBuffer(op.to);
                     for(uint32_t i=0;i<op.count;++i) ctx.GetCommandBuffer().CopyBufferToBuffer(dst.Buffer.Get(),dst.Offset+uint64_t(i)*256,
@@ -69,10 +75,13 @@ void ImmediateDraw::Import(radray::RDGBuilder& graph,FrameTextureImports& import
                     return true;
                 }).ReadBuffer(args.bufferHandle).WriteBuffer(_drawBases);
         } else {
-            struct DrawBaseBuffers { radray::unordered_map<uint64_t,radray::RDGBufferHandle> buffers; };
+            struct DrawBaseBuffers {
+                explicit DrawBaseBuffers(std::pmr::memory_resource* memory):buffers(memory) {}
+                std::pmr::unordered_map<uint64_t,radray::RDGBufferHandle> buffers;
+            };
             auto& blackboard=graph.GetBlackboard();
             auto cache=blackboard.Get<DrawBaseBuffers>();
-            if(!cache) cache=blackboard.Emplace<DrawBaseBuffers>();
+            if(!cache) cache=blackboard.Emplace<DrawBaseBuffers>(imports.Scratch());
             radray::array<uint32_t,2> bases{_kind==0?_first:uint32_t(_base),_firstInstance};
             auto [it,fresh]=cache.Get()->buffers.try_emplace(uint64_t(bases[1])<<32 | bases[0]);
             if(fresh) it->second=graph.CreateBuffer({.MaxSize=256,.Usage=BufferUse::CBuffer},radray::RDGUploadSource::Generated(256,bases,
@@ -95,8 +104,8 @@ void ImmediateDraw::Import(radray::RDGBuilder& graph,FrameTextureImports& import
 void ImmediateDraw::Declare(radray::RDGRasterPassBuilder& pass) const {
     constexpr BufferState states[]{BufferState::Vertex,BufferState::Index,BufferState::Indirect,BufferState::CBuffer,BufferState::ShaderRead};
     for(const auto& r:_resources) {
-        if(r.texture) pass.ReadTexture(r.imageHandle);
-        else pass.ReadBuffer(r.bufferHandle,states[r.binding.kind]);
+        if(r.kind==5) pass.ReadTexture(r.imageHandle);
+        else pass.ReadBuffer(r.bufferHandle,states[r.kind]);
     }
     if(_drawBases.IsValid()) pass.ReadBuffer(_drawBases,BufferState::CBuffer);
     if(_fan.IsValid()) pass.ReadBuffer(_fan,BufferState::Index);
@@ -107,23 +116,29 @@ bool ImmediateDraw::Prepare(radray::RDGPrepareContext& ctx,TextureFormat depth) 
     _pso=_pipeline->Resolve(device,depth);
     if(!_pso) return false;
     const auto& program=*_pipeline->program;
-    radray::array<radray::InlineVector<radray::TransientParameterBinding,16>,2> groups;
-    for(auto& r:_resources) {
-        const auto& b=r.binding;
-        if(b.kind==5) {
+    FrameParameterBindings bindings(slot);
+    auto& groups=bindings.groups;
+    size_t vertexCount=0;
+    for(const auto& r:_resources) vertexCount+=r.kind==0;
+    _vertices=FrameArray<VertexBufferBinding>(slot.GetMemoryResource(),vertexCount);
+    size_t vertex=0;
+    for(size_t i=0;i<_resources.size();++i) {
+        const auto& r=_resources[i];
+        const auto b=ReadBinding(_bindingBytes,i);
+        if(r.kind==5) {
             if(program.RequiresBinding(1,b.slot)) {
-                auto* view=GetSamplingView(device,*r.texture,b.sampling);
+                auto* view=GetSamplingView(device,*r.texture->texture,b.sampling);
                 if(!view) return false;
                 groups[1].push_back({b.slot,0,view});
             }
-            if(program.HasSampler(b.slot+1)) {
+            if(program.HasSampler(b.slot+1u)) {
                 auto* sampler=GetTextureSampler(device,b.format,b.sampling);
                 if(!sampler) return false;
-                groups[1].push_back({b.slot+1,0,sampler});
+                groups[1].push_back({b.slot+1u,0,sampler});
             }
             continue;
         }
-        if(b.kind==3) {
+        if(r.kind==3) {
             if(program.RequiresBinding(0,b.slot)) {
                 auto slice=ctx.ResolveBuffer(r.bufferHandle);
                 slice.Offset+=b.offset; slice.Size=b.size;
@@ -131,7 +146,7 @@ bool ImmediateDraw::Prepare(radray::RDGPrepareContext& ctx,TextureFormat depth) 
             }
             continue;
         }
-        if(b.kind==4) {
+        if(r.kind==4) {
             if(program.RequiresBinding(1,b.slot)) {
                 auto slice=ctx.ResolveBuffer(r.bufferHandle);
                 slice.Offset+=b.offset; slice.Size=b.size;
@@ -141,8 +156,8 @@ bool ImmediateDraw::Prepare(radray::RDGPrepareContext& ctx,TextureFormat depth) 
         }
         auto slice=ctx.ResolveBuffer(r.bufferHandle);
         slice.Offset+=b.offset; slice.Size=b.size;
-        switch(b.kind) {
-        case 0: _vertices.push_back({b.slot,FrameVertexView(slice)}); break;
+        switch(r.kind) {
+        case 0: _vertices[vertex++]={b.slot,FrameVertexView(slice)}; break;
         case 1:
             if(slice.Offset>UINT32_MAX) return false;
             _indices={slice.Buffer.Get(),uint32_t(slice.Offset),b.format}; break;
@@ -153,12 +168,12 @@ bool ImmediateDraw::Prepare(radray::RDGPrepareContext& ctx,TextureFormat depth) 
         auto slice=ctx.ResolveBuffer(_drawBases);
         uint32_t count=(_kind==2 || _kind==3)?_count:1;
         slice.Size=256;
-        _drawBaseSets.reserve(count);
+        _drawBaseSets=FrameArray<ShaderParameterSet*>(slot.GetMemoryResource(),count);
         for(uint32_t i=0;i<count;++i,slice.Offset+=256) {
             auto binding=FrameConstantBinding(0,slice);
             auto set=slot.AcquireParameterSet(program.drawBasesLayout,{&binding,1});
             if(!set) return false;
-            _drawBaseSets.push_back(set.Get());
+            _drawBaseSets[i]=set.Get();
         }
     }
     if(_fan.IsValid()) _indices=FrameIndexView(ctx.ResolveBuffer(_fan));

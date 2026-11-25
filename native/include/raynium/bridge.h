@@ -7,7 +7,7 @@
 #else
 #define RAYNIUM_API __declspec(dllimport)
 #endif
-#define RN_ABI_VERSION 24u
+#define RN_ABI_VERSION 25u
 
 enum rn_submit_flags : uint32_t { RN_SUBMIT_FLAG_DEVICE_LOST = 1u, RN_SUBMIT_FLAG_TERMINAL_ERROR = 2u };
 struct rn_wait_result {
@@ -18,6 +18,10 @@ struct rn_wait_result {
 struct rn_runtime;
 struct rn_renderer;
 struct rn_swapchain;
+struct rn_texture;
+struct rn_buffer;
+struct rn_pipeline;
+struct rn_query_pool;
 
 // Fixed-width unscoped enums preserve the Java FFM integer layout.
 enum rn_status : uint32_t {
@@ -113,11 +117,12 @@ enum rn_pixel_format : uint32_t {
     RN_PIXEL_D32_FLOAT_S8_UINT = 40, RN_PIXEL_D24_UNORM_S8_UINT = 41, RN_PIXEL_D16_UNORM = 42
  };
 enum rn_texture_flags : uint32_t { RN_TEXTURE_CUBE = 1, RN_TEXTURE_ATTACHMENT = 2, RN_TEXTURE_READBACK = 4 };
-struct rn_uploaded_texture_desc { uint32_t struct_size, id, width, height, mip_levels; rn_pixel_format format; uint32_t array_layers, flags; };
+struct rn_texture_desc { uint32_t struct_size, width, height, mip_levels; rn_pixel_format format; uint32_t array_layers, flags, reserved; };
 struct rn_texture_upload_desc {
-    uint32_t struct_size, id, mip_level, x, y, width, height, row_pitch;
+    uint32_t struct_size, mip_level;
+    rn_texture* texture;
+    uint32_t x, y, width, height, row_pitch, array_layer;
     const void* pixels; uint64_t byte_size;
-    uint32_t array_layer, reserved;
 };
 // IDs are nonzero and scoped to the frame epoch.
 enum rn_material_mode : uint32_t { RN_MATERIAL_OPAQUE = 0, RN_MATERIAL_CUTOUT = 1, RN_MATERIAL_TRANSLUCENT = 2 };
@@ -149,11 +154,12 @@ struct rn_terrain_view_desc {
     const rn_visible_item* visible;
     const rn_instance* instances;
     uint32_t index_count, mesh_count, removed_mesh_count, visible_count, instance_count;
-    uint32_t terrain_albedo_texture, terrain_light_texture, terrain_anisotropy;
+    uint32_t terrain_anisotropy;
+    rn_texture *terrain_albedo_texture, *terrain_light_texture;
     float projection[16], view[16];
     int32_t camera_block[3];
     float camera_fraction[3], fog_color[4], fog_distances[4];
-
+    uint64_t visible_version, origins_version, instances_version;
 };
 
 extern "C" {
@@ -202,8 +208,8 @@ enum rn_buffer_usage : uint32_t {
     RN_BUFFER_FENCE_ROTATED=1024
 };
 struct rn_buffer_desc { uint32_t struct_size,usage; uint64_t size; const void* initial; };
-struct rn_buffer_result { uint32_t id,reserved; void* mapped; };
-struct rn_mapped_range { uint32_t id,reserved; uint64_t offset,length; };
+struct rn_buffer_result { rn_buffer* buffer; void* mapped; };
+struct rn_mapped_range { rn_buffer* buffer; uint64_t offset,length; };
 struct rn_pipeline_desc {
     uint32_t struct_size,word_count;
     const char* program;
@@ -211,10 +217,11 @@ struct rn_pipeline_desc {
     const void* shader_pack;
     uint64_t shader_pack_size;
 };
-RAYNIUM_API rn_status rn_register_pipeline(rn_renderer*,const rn_pipeline_desc*,uint32_t*) noexcept;
-RAYNIUM_API rn_status rn_destroy_pipeline(rn_renderer*,uint32_t) noexcept;
+RAYNIUM_API rn_status rn_register_pipeline(rn_renderer*,const rn_pipeline_desc*,rn_pipeline**) noexcept;
+RAYNIUM_API rn_status rn_destroy_pipeline(rn_renderer*,rn_pipeline*) noexcept;
 RAYNIUM_API rn_status rn_create_buffer(rn_renderer*,const rn_buffer_desc*,rn_buffer_result*) noexcept;
-RAYNIUM_API rn_status rn_destroy_buffer(rn_renderer*,uint32_t id) noexcept;
+RAYNIUM_API rn_status rn_destroy_buffer(rn_renderer*,rn_buffer* buffer) noexcept;
+struct rn_timestamp_write { rn_query_pool* pool; uint32_t slot, reserved; };
 struct rn_batch_desc {
     uint32_t struct_size, flags;
     rn_swapchain* surface;
@@ -228,6 +235,10 @@ struct rn_batch_desc {
     uint32_t dirty_count,reserved;
     const rn_terrain_view_desc* views;
     uint32_t view_count,view_reserved;
+    const uint64_t* captures;
+    uint32_t capture_count,capture_reserved;
+    const rn_timestamp_write* queries;
+    uint32_t query_count,query_reserved;
 };
 enum rn_batch_flags : uint32_t { RN_BATCH_MEASURE=1, RN_BATCH_BORROW_POOLED=2 };
 struct rn_submit_result {
@@ -248,13 +259,13 @@ RAYNIUM_API rn_status rn_drain_telemetry(rn_renderer*, rn_batch_telemetry*, uint
 // and all arrays and bytes referenced by views alive and unchanged until consumed_sequence reaches the returned sequence.
 RAYNIUM_API rn_status rn_submit_frame(rn_renderer*, const rn_batch_desc*, rn_submit_result*) noexcept;
 struct rn_query_sample { uint64_t sequence,ticks; }; // Zero sequence denotes an unavailable slot.
-RAYNIUM_API rn_status rn_create_query_pool(rn_renderer*,uint32_t count,uint32_t* id) noexcept;
-RAYNIUM_API rn_status rn_destroy_query_pool(rn_renderer*,uint32_t id) noexcept;
-RAYNIUM_API rn_status rn_sync_query_pool(rn_renderer*,uint32_t id,uint32_t first,uint32_t count,rn_query_sample*,rn_wait_result*) noexcept;
-// Uploaded IDs >=16 are never reused during this renderer's lifetime. Upload copies bytes during the call.
-RAYNIUM_API rn_status rn_create_texture(rn_renderer*, const rn_uploaded_texture_desc*) noexcept;
+RAYNIUM_API rn_status rn_create_query_pool(rn_renderer*,uint32_t count,rn_query_pool** pool) noexcept;
+RAYNIUM_API rn_status rn_destroy_query_pool(rn_renderer*,rn_query_pool* pool) noexcept;
+RAYNIUM_API rn_status rn_sync_query_pool(rn_renderer*,rn_query_pool* pool,uint32_t first,uint32_t count,rn_query_sample*,rn_wait_result*) noexcept;
+// Resource handles belong to the creating renderer. Keep resources referenced by commands alive until consumed.
+RAYNIUM_API rn_status rn_create_texture(rn_renderer*, const rn_texture_desc*, rn_texture**) noexcept;
 RAYNIUM_API rn_status rn_upload_texture(rn_renderer*, const rn_texture_upload_desc*) noexcept;
-RAYNIUM_API rn_status rn_destroy_texture(rn_renderer*, uint32_t id) noexcept;
+RAYNIUM_API rn_status rn_destroy_texture(rn_renderer*, rn_texture* texture) noexcept;
 // User mesh IDs start at 16. Vertex bytes are copied during the call (24 B/vertex, quad-indexed).
 RAYNIUM_API rn_status rn_upsert_model_mesh(rn_renderer*, int32_t mesh_id, const void* vertex_data, uint32_t vertex_bytes, uint32_t vertex_count, uint32_t index_count, uint32_t* out_page_id) noexcept;
 RAYNIUM_API rn_status rn_remove_model_mesh(rn_renderer*, int32_t mesh_id) noexcept;

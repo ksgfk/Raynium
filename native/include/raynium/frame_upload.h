@@ -6,6 +6,18 @@
 #include <algorithm>
 
 namespace raynium {
+struct FrameParameterBindings {
+    explicit FrameParameterBindings(radray::FrameSlot& slot)
+        :memory(storage.data(),storage.size(),&slot.GetScratchMemoryResource()),
+         groups{std::pmr::vector<radray::TransientParameterBinding>(&memory),
+                std::pmr::vector<radray::TransientParameterBinding>(&memory)} {
+        for(auto& group:groups) group.reserve(16);
+    }
+    alignas(radray::TransientParameterBinding) radray::array<radray::byte,32*sizeof(radray::TransientParameterBinding)> storage;
+    std::pmr::monotonic_buffer_resource memory;
+    radray::array<std::pmr::vector<radray::TransientParameterBinding>,2> groups;
+};
+
 struct ImmediatePassStateCache {
     radray::gpu::GraphicsPipelineState* pso{};
     radray::gpu::PipelineLayout* layout{};
@@ -55,8 +67,7 @@ struct ImmediatePassStateCache {
     }
 };
 
-template<size_t N>
-inline void EnsureOrderedBindings(radray::InlineVector<radray::TransientParameterBinding,N>& group) noexcept {
+inline void EnsureOrderedBindings(std::span<radray::TransientParameterBinding> group) noexcept {
     if(group.size()<=1) return;
     bool sorted=true;
     for(size_t i=1;i<group.size();++i) {

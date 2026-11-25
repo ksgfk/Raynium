@@ -30,6 +30,51 @@ bool ModularFramePipeline::Create(radray::DeviceContext& device,std::span<const 
 bool ModularFramePipeline::HasInFlightReadbacks(uint64_t sequence) const noexcept {
     return std::ranges::any_of(_slots,[sequence](const auto& slot) { return slot.readbacks.Sequence()==sequence; });
 }
+bool ModularFramePipeline::RegisterCaptures(std::span<const uint64_t> ids,uint64_t sequence) {
+    if(ids.empty()) return true;
+    std::lock_guard lock(_readbackMutex);
+    if(ids.size()>4096 || _readback.GetActiveRequestCount()+_unreservedCaptures.size()>4096-ids.size()) return false;
+    size_t inserted=0;
+    for(auto id:ids) {
+        if(!id || _readback.HasRequest(id) || !_unreservedCaptures.emplace(id,sequence).second) {
+            for(size_t i=0;i<inserted;++i) _unreservedCaptures.erase(ids[i]);
+            return false;
+        }
+        ++inserted;
+    }
+    return true;
+}
+bool ModularFramePipeline::ReserveCapture(uint64_t id,uint32_t width,uint32_t height) {
+    std::lock_guard lock(_readbackMutex);
+    auto it=_unreservedCaptures.find(id);
+    if(it==_unreservedCaptures.end()) return false;
+    if(!_readback.ReserveTexture(id,{width,height,TextureFormat::RGBA8_UNORM,1})) return false;
+    _unreservedCaptures.erase(it);
+    return true;
+}
+void ModularFramePipeline::CancelUnsubmittedCaptures(std::span<const uint64_t> ids) noexcept {
+    std::lock_guard lock(_readbackMutex);
+    for(auto id:ids) _unreservedCaptures.erase(id);
+    _readback.CancelUnsubmitted();
+}
+bool ModularFramePipeline::PollCapture(uint64_t id,uint64_t completed,bool open,rn_capture_info& info,void* dst,uint64_t capacity) {
+    std::lock_guard lock(_readbackMutex);
+    if(_unreservedCaptures.contains(id)) {
+        info={sizeof(info)};
+        return open;
+    }
+    radray::ReadbackResultInfo result{};
+    const auto status=_readback.Poll(id,completed,result,static_cast<radray::byte*>(dst),capacity);
+    if(status==radray::ReadbackStatus::Ready) {
+        info={sizeof(info),1,result.Texture.Width,result.Texture.Height,result.PackedByteSize,uint32_t(result.PackedRowPitch),0};
+        return true;
+    }
+    if(status==radray::ReadbackStatus::Pending) {
+        info={sizeof(info)};
+        return open;
+    }
+    return false;
+}
 bool ModularFramePipeline::Collect(uint64_t sequence,radray::vector<HostBufferWrite>& writes,radray::vector<PublishedTimestamp>& timestamps) {
     for(auto& slot:_slots) {
         if(!slot.timestamps.Collect(sequence,timestamps) || !slot.readbacks.Collect(sequence,writes)) return false;
@@ -39,23 +84,13 @@ bool ModularFramePipeline::Collect(uint64_t sequence,radray::vector<HostBufferWr
 void ModularFramePipeline::Finish(Device& device) {
     while(_submitted && !device.IsDeviceLost() && WaitFence(_submitted,1'000'000'000ull)==FenceStatus::Timeout) {}
 }
-bool ModularFramePipeline::PollCapture(uint64_t sequence,uint64_t completed,rn_capture_info& info,void* pixels,uint64_t capacity) {
-    radray::ReadbackResultInfo result{};
-    const auto status=_readback.Poll(sequence,completed,result,static_cast<radray::byte*>(pixels),capacity);
-    if(status!=radray::ReadbackStatus::Ready && status!=radray::ReadbackStatus::Pending) {
-        RADRAY_ERR_LOG("Cannot poll capture: id={} capacity={}",sequence,capacity); return false;
-    }
-    info={sizeof(info),result.Ready?1u:0u,result.Texture.Width,result.Texture.Height,result.PackedByteSize,uint32_t(result.PackedRowPitch),0};
-    return true;
-}
 void ModularFramePipeline::ExtractFrameData(radray::FrameSlot&) noexcept {}
 void ModularFramePipeline::SetupGraph(radray::RDGBuilder& graph,radray::FrameSlot& slot) noexcept {
     auto& resources=_slots[slot.GetIndex()];
     resources.timestamps.Reset(graph);
-    _buffers->AddInitialUploads(graph);
     const auto& detail=slot.GetDevice().GetDetail();
     FrameTextureImports imports{graph,slot.GetScratchMemoryResource(),&detail};
-    _pending->textures->AddUploads(graph,imports,nullptr);
+    _pending->uploads->AddUploads(graph,imports,_pending->shadowWrites);
     _tape->Replay(graph,imports,_readback,*_output,resources.timestamps,resources.readbacks,_pending->color);
     resources.timestamps.Resolve(graph);
 }
@@ -72,7 +107,7 @@ bool ModularFramePipeline::SubmitFrame(radray::FrameSlot& slot,CommandBuffer& gr
             .WaitToExecute={acquire,input.waitToDraw?1u:0u},.ReadyToPresent={present,input.readyToPresent?1u:0u}})) return false;
     }
     _inFlight[slot.GetIndex()]=++_submitted;
-    _readback.MarkSubmitted(_submitted);
+    if(_hasCaptures) _readback.MarkSubmitted(_submitted);
     _slots[slot.GetIndex()].timestamps.Submitted(_submitted);
     _slots[slot.GetIndex()].readbacks.Submitted(_submitted);
     return true;

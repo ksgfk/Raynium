@@ -7,6 +7,7 @@
 #include <raynium/output_pass.h>
 #include <radray/runtime/render_graph_pipeline.h>
 #include <radray/runtime/readback_queue.h>
+#include <mutex>
 #include <span>
 #include <utility>
 
@@ -17,25 +18,29 @@ public:
     bool UsesIndirect() const { return _indirect; }
     MeshPassResources& Resources() { return *_resources; }
     RenderProgramLibrary& Programs() { return *_programs; }
-    void SetTape(const TerrainFrame& input,CommandTape& tape,BufferRegistry& buffers) noexcept { _pending=&input; _tape=&tape; _buffers=&buffers; }
-    void ClearInput() noexcept { _pending=nullptr; _tape=nullptr; _buffers=nullptr; }
+    void SetTape(const TerrainFrame& input,FrameTapePlan& tape,bool hasCaptures) noexcept { _pending=&input; _tape=&tape; _hasCaptures=hasCaptures; }
+    void ClearInput() noexcept { _pending=nullptr; _tape=nullptr; _hasCaptures=false; }
     uint64_t SubmittedSequence() const noexcept { return _submitted; }
-    bool PrepareTape(radray::FrameSlot& slot,CommandTape& tape) {
-        return tape.PrepareReadbacks(slot.GetDevice(),_slots[slot.GetIndex()].readbacks) && tape.ReserveReadbacks(_readback) && _slots[slot.GetIndex()].timestamps.Prepare(slot.GetDevice(),slot.GetQueue(),tape.Timestamps());
+    bool CompileTape(radray::FrameSlot& slot,TapeCompiler& compiler,const rn_batch_desc& batch,rn_renderer* owner,
+        const StaticGeometryRegistry& meshes,const TerrainResidency& terrain) {
+        auto& resources=_slots[slot.GetIndex()];
+        return compiler.Compile(batch,owner,meshes,terrain,resources.readbacks,
+            [this](uint64_t id,uint32_t width,uint32_t height) { return ReserveCapture(id,width,height); },
+            resources.timestamps);
     }
     void Finish(radray::gpu::Device& device);
     radray::gpu::FenceStatus WaitFence(uint64_t sequence,uint64_t timeoutNs) noexcept { return _completion->WaitForStatus(sequence,timeoutNs); }
     uint64_t SampleFence() const noexcept { return _completion->GetCompletedValue(); }
     bool HasInFlightReadbacks(uint64_t sequence) const noexcept;
-    void CancelUnsubmittedReadbacks() noexcept { _readback.CancelUnsubmitted(); }
+    bool RegisterCaptures(std::span<const uint64_t> ids,uint64_t sequence);
+    bool ReserveCapture(uint64_t id,uint32_t width,uint32_t height);
+    void CancelUnsubmittedCaptures(std::span<const uint64_t> ids) noexcept;
+    std::unique_lock<std::mutex> LockReadbacks() { return std::unique_lock<std::mutex>(_readbackMutex); }
     bool Collect(uint64_t sequence,radray::vector<HostBufferWrite>& writes,radray::vector<PublishedTimestamp>& timestamps);
-    bool PollCapture(uint64_t id, uint64_t completed, rn_capture_info&, void*, uint64_t capacity);
+    bool PollCapture(uint64_t id,uint64_t completed,bool open,rn_capture_info& info,void* dst,uint64_t capacity);
     void MeasureBatch(radray::FrameSlot& slot, bool enabled);
     void RecordTelemetry(rn_batch_telemetry report);
     bool PopTelemetry(rn_batch_telemetry&);
-    bool PrepareOutput(radray::gpu::TextureFormat format,radray::gpu::Device&) const {
-        return format==radray::gpu::TextureFormat::BGRA8_UNORM;
-    }
     void Wait(radray::FrameSlot&) noexcept override;
 private:
     void OnFrameSlotRetired(radray::FrameSlot&,const radray::RDGGpuTimingSnapshot&) noexcept override;
@@ -51,17 +56,19 @@ private:
         radray::unique_ptr<OutputPassResources> output,radray::unique_ptr<RenderProgramLibrary> programs,
         radray::unique_ptr<radray::gpu::Fence> completion,bool indirect)
         :RenderGraphFramePipeline(device,2,8u<<20),_resources(std::move(resources)),_output(std::move(output)),
-         _programs(std::move(programs)),_completion(std::move(completion)),_readback(device.GetDevice()),_indirect(indirect) {}
+         _programs(std::move(programs)),_completion(std::move(completion)),_readback(device.GetDevice(),4096),_indirect(indirect) {}
     radray::unique_ptr<MeshPassResources> _resources;
     radray::unique_ptr<OutputPassResources> _output;
     radray::unique_ptr<RenderProgramLibrary> _programs;
     radray::array<SlotResources,2> _slots;
     radray::unique_ptr<radray::gpu::Fence> _completion;
+    std::mutex _readbackMutex;
     radray::AsyncReadbackQueue _readback;
+    radray::unordered_map<uint64_t,uint64_t> _unreservedCaptures;
     bool _indirect;
+    bool _hasCaptures{};
     const TerrainFrame* _pending{};
-    CommandTape* _tape{};
-    BufferRegistry* _buffers{};
+    FrameTapePlan* _tape{};
     struct Measurement { rn_batch_telemetry report; bool retired{}; };
     radray::deque<Measurement> _inFlightTelemetry;
     radray::deque<rn_batch_telemetry> _readyTelemetry;

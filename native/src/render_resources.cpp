@@ -11,19 +11,6 @@
 
 namespace raynium {
 using namespace radray::gpu;
-RenderBuffer CreateBuffer(Device& d,uint64_t bytes,MemoryType memory,BufferUses uses) {
-    RADRAY_PROFILE_SCOPE_N("Raynium.Buffer.Create");
-    if(memory==MemoryType::Upload) uses|=BufferUse::MapWrite;
-    return d.CreateBuffer({.Size=bytes,.Memory=memory,.Usage=uses}).Release();
-}
-void TextureBarrier(CommandBuffer& c,Texture* texture,TextureStates before,TextureStates after) {
-    const ResourceBarrierDescriptor b=BarrierTextureDescriptor{.Target=texture,.Before=before,.After=after,
-        .BeforeStages=ShaderStage::Vertex|ShaderStage::Pixel,.AfterStages=ShaderStage::Vertex|ShaderStage::Pixel};
-    c.ResourceBarrier({&b,1});
-}
-void BufferBarrier(CommandBuffer& c,Buffer* buffer,BufferStates before,BufferStates after) {
-    const ResourceBarrierDescriptor b=BarrierBufferDescriptor{.Target=buffer,.Before=before,.After=after}; c.ResourceBarrier({&b,1});
-}
 bool ValidSwapchainDesc(const rn_swapchain_desc& desc) {
     if(desc.struct_size!=sizeof(desc) || !desc.width || !desc.height || desc.width>16384 || desc.height>16384 ||
        desc.present_mode>RN_PRESENT_FIFO || !IsWindow(reinterpret_cast<HWND>(desc.hwnd))) {
