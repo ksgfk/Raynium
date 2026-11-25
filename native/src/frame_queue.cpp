@@ -46,7 +46,8 @@ void FrameQueue::FailInput(rn_submit_result& out) {
 
 bool FrameQueue::Submit(const rn_batch_desc& desc, Swapchain* target, rn_submit_result& out) {
     RADRAY_PROFILE_SCOPE_N("Raynium.Frontend.Freeze");
-    auto packet = radray::shared_ptr<FramePacket>(FramePacket::Create(desc));
+    TryAdvanceFrontendProgress();
+    auto packet = FramePacket::Create(desc);
     if (!packet) { FailInput(out); return false; }
     {
         RADRAY_PROFILE_SCOPE_N("Raynium.Frontend.QueueCapacity");
@@ -101,19 +102,63 @@ bool FrameQueue::Submit(const rn_batch_desc& desc, Swapchain* target, rn_submit_
         FrameExecution result{};
         bool ok = _renderer.SubmitFrame(packet->batch, target, result, [&](uint64_t submitted) {
             if (submitted != seq) RADRAY_ABORT("Render queue sequence mismatch");
-            _pending.push_back({seq, packet->captures, packet->queries});
             std::lock_guard lock(_mutex);
+            if (!packet->captures.empty() || !packet->queries.empty() || _renderer.Pipeline().HasInFlightReadbacks(seq))
+                _readbackBatches.push_back({seq, std::move(packet->captures)});
             _progress.consumed_sequence = _progress.submitted_sequence = seq;
             _session.NotifyProgress();
-        }, [this] { return Collect(); });
-        if (packet->batch.surface && !target && ok) result.outcome = RN_PRESENT_SURFACE_LOST;
+        }, [this] { return OnSlotAvailable(); });
         if (ok && packet->batch.surface) Present(result.outcome);
         if (!ok) Collect(true);
     });
     return true;
 }
 
+void FrameQueue::RefreshCompletedLocked(uint64_t hardwareDone) {
+    const auto ceiling = _readbackBatches.empty() ? _progress.submitted_sequence : _readbackBatches.front().sequence - 1;
+    _progress.completed_sequence = std::max(_progress.completed_sequence, std::min(hardwareDone, ceiling));
+}
+
+void FrameQueue::SettleDeviceLoss() {
+    if (_renderer.Runtime().GetDevice().IsDeviceLost()) _session.Barrier([this] { return Collect(true); });
+}
+
+void FrameQueue::TryAdvanceFrontendProgress() {
+    {
+        std::lock_guard lock(_mutex);
+        if (_closing) return;
+    }
+    const auto done = _renderer.Pipeline().SampleFence();
+    if (_renderer.Runtime().GetDevice().IsDeviceLost()) {
+        SettleDeviceLoss();
+        return;
+    }
+    std::lock_guard lock(_mutex);
+    if (_closing) return;
+    AdvanceFrontendLocked(done);
+}
+
+void FrameQueue::AdvanceFrontendLocked(uint64_t done) {
+    RefreshCompletedLocked(done);
+    if (!_collectScheduled && !_readbackBatches.empty() && _readbackBatches.front().sequence <= done) {
+        _collectScheduled = true;
+        _session.Post([this] {
+            Collect();
+            std::lock_guard lock(_mutex);
+            _collectScheduled = false;
+        });
+    }
+}
+
 bool FrameQueue::Wait(uint64_t sequence, int64_t timeout, rn_wait_result& out) {
+    const auto start = std::chrono::steady_clock::now();
+    auto remaining = [&]() -> int64_t {
+        if (timeout < 0) return -1;
+        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();
+        return std::max<int64_t>(0,timeout-elapsed);
+    };
+    TryAdvanceFrontendProgress();
+    bool submitted;
     {
         std::lock_guard lock(_mutex);
         if (sequence > _enqueued) { SnapshotLocked(out); return false; }
@@ -121,23 +166,49 @@ bool FrameQueue::Wait(uint64_t sequence, int64_t timeout, rn_wait_result& out) {
             SnapshotLocked(out);
             return !out.flags;
         }
+        submitted = sequence <= _progress.submitted_sequence;
     }
-    // A blocked owner cannot post the next frame to wake the idle worker.
-    // Let the GPU signal this wait as soon as the requested submission finishes.
-    const auto waitLimit = std::chrono::nanoseconds(timeout < 0 ? 1'000'000'000 : std::min<int64_t>(timeout,1'000'000'000));
-    const auto until = std::chrono::steady_clock::now() + waitLimit;
-    _session.Post([this,sequence,until] {
-        auto& pipeline = _renderer.Pipeline();
-        if (!Open() || sequence <= pipeline.CompletedSequence() || sequence > pipeline.SubmittedSequence()) return;
-        RADRAY_PROFILE_SCOPE_N("Raynium.Worker.RequestedFenceWait");
-        const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(until - std::chrono::steady_clock::now());
-        if (remaining.count() > 0) pipeline.WaitForFence(sequence,static_cast<uint64_t>(remaining.count()));
-        Collect();
-    });
-    _session.WaitUntil([&] {
+    if (!submitted) {
+        RADRAY_PROFILE_SCOPE_N("Raynium.Frontend.WaitForSubmission");
+        _session.WaitUntil([&] {
+            std::lock_guard lock(_mutex);
+            submitted = sequence <= _progress.submitted_sequence;
+            return submitted || _progress.flags;
+        }, remaining());
+    }
+    while (submitted) {
+        const auto left = remaining();
+        if (!left) break;
+        constexpr uint64_t sliceNs = 2'000'000;
+        radray::gpu::FenceStatus status;
+        {
+            RADRAY_PROFILE_SCOPE_N("Raynium.Frontend.WaitForGpu");
+            status = _renderer.Pipeline().WaitFence(sequence, left < 0 ? sliceNs : std::min<uint64_t>(left, sliceNs));
+        }
+        if (status == radray::gpu::FenceStatus::DeviceLost) {
+            _session.Barrier([this] { return Collect(true); });
+            break;
+        }
+        if (status == radray::gpu::FenceStatus::Completed) {
+            {
+                std::lock_guard lock(_mutex);
+                if (!_closing) AdvanceFrontendLocked(sequence);
+                if (_progress.flags || sequence <= _progress.completed_sequence) {
+                    SnapshotLocked(out);
+                    return !out.flags;
+                }
+            }
+            RADRAY_PROFILE_SCOPE_N("Raynium.Frontend.WaitForReadbacks");
+            _session.WaitUntil([&] {
+                std::lock_guard lock(_mutex);
+                return _progress.completed_sequence >= sequence || _progress.flags;
+            }, remaining());
+            break;
+        }
+        _session.PumpSentMessages();
         std::lock_guard lock(_mutex);
-        return _progress.completed_sequence >= sequence || _progress.flags;
-    }, timeout);
+        if (_progress.flags || sequence <= _progress.completed_sequence) break;
+    }
     Snapshot(out);
     return !out.flags;
 }
@@ -164,14 +235,13 @@ bool FrameQueue::Collect(bool terminal) {
     auto& device = _renderer.Runtime().GetDevice();
     auto& pipe = _renderer.Pipeline();
     const auto done = pipe.SampleFence();
-    struct QueryValue { PacketQuery query; rn_query_sample value; };
-    radray::vector<QueryValue> values;
-    radray::vector<std::pair<uint64_t,Capture>> captures;
-    radray::vector<HostBufferWrite> writes;
-    auto safe = pipe.CompletedSequence();
-    while (!device.IsDeviceLost() && !_pending.empty() && _pending.front().sequence <= done) {
-        const auto& batch = _pending.front();
-        auto begin = captures.size();
+    const bool sampledHealthy = !device.IsDeviceLost();
+    // Publish each batch as a unit. A failed invalidation cannot expose earlier fields of that batch.
+    while (!device.IsDeviceLost() && !_readbackBatches.empty() && _readbackBatches.front().sequence <= done) {
+        const auto& batch = _readbackBatches.front();
+        radray::vector<std::pair<uint64_t,Capture>> captures;
+        radray::vector<HostBufferWrite> writes;
+        radray::vector<PublishedTimestamp> timestamps;
         bool ok = true;
         for (auto id : batch.captures) {
             auto& capture = captures.emplace_back(id, Capture{batch.sequence}).second;
@@ -179,42 +249,49 @@ bool FrameQueue::Collect(bool terminal) {
             capture.pixels.resize(capture.info.byte_size);
             if (!pipe.PollCapture(id, done, capture.info, capture.pixels.data(), capture.pixels.size())) { ok = false; break; }
         }
-        if (!ok || device.IsDeviceLost()) { captures.resize(begin); terminal = true; break; }
-        auto writeBegin = writes.size();
-        pipe.Collect(batch.sequence, writes);
-        if (device.IsDeviceLost()) { writes.resize(writeBegin); captures.resize(begin); terminal = true; break; }
-        for (auto q : batch.queries) values.push_back({q, _renderer.Query(q.pool, q.slot)});
-        safe = batch.sequence;
-        _pending.pop_front();
+        if (!ok || !pipe.Collect(batch.sequence,writes,timestamps) || device.IsDeviceLost()) { terminal=true; break; }
+        std::lock_guard lock(_mutex);
+        for (auto& [id, capture] : captures) _captures.at(id) = std::move(capture);
+        for (const auto& value : timestamps) {
+            auto it = _queries.find(value.pool);
+            if (it != _queries.end() && it->second[value.slot].sequence == value.sequence)
+                it->second[value.slot] = {value.sequence,value.ticks,true};
+        }
+        for (auto& write : writes) _writes.push_back(std::move(write));
+        _progress.completed_sequence = batch.sequence;
+        _readbackBatches.pop_front();
     }
     const bool lost = device.IsDeviceLost();
     terminal |= lost;
-    rn_batch_telemetry report{};
     {
         std::lock_guard lock(_mutex);
-        for (auto& [id, capture] : captures) _captures.at(id) = std::move(capture);
-        for (const auto& [q, value] : values) {
-            auto it = _queries.find(q.pool);
-            if (it != _queries.end() && it->second[q.slot].sequence == value.sequence && value.sequence)
-                it->second[q.slot] = {value.sequence,value.ticks,true};
-        }
-        for (auto& write : writes) _writes.push_back(std::move(write));
-        while (pipe.PopTelemetry(report)) _telemetry.push_back(report);
-        _progress.completed_sequence = safe;
+        if (sampledHealthy) RefreshCompletedLocked(done);
+        PublishTelemetryLocked();
         if (terminal) {
             _closing = true;
             _progress.flags = RN_SUBMIT_FLAG_TERMINAL_ERROR | (lost ? RN_SUBMIT_FLAG_DEVICE_LOST : 0);
             _progress.consumed_sequence = _enqueued;
-            std::erase_if(_captures, [safe](const auto& pair) { return pair.second.sequence > safe; });
+            std::erase_if(_captures, [this](const auto& pair) { return pair.second.sequence > _progress.completed_sequence; });
         }
     }
     _session.NotifyProgress();
     return !terminal;
 }
 
+void FrameQueue::PublishTelemetryLocked() {
+    rn_batch_telemetry report{};
+    while (_renderer.Pipeline().PopTelemetry(report)) _telemetry.push_back(report);
+}
+
+bool FrameQueue::OnSlotAvailable() {
+    if (!_readbackBatches.empty()) return Collect();
+    std::lock_guard lock(_mutex);
+    PublishTelemetryLocked();
+    return !_closing;
+}
+
 bool FrameQueue::Poll() {
-    if (_pending.empty()) return false;
-    return Collect() && !_pending.empty();
+    return !_readbackBatches.empty() && Collect() && !_readbackBatches.empty();
 }
 void FrameQueue::DeviceFailure() { Collect(true); }
 
@@ -237,21 +314,22 @@ bool FrameQueue::CreateQueryPool(uint32_t count, uint32_t& id) {
     if (_closing || !_timestamps || !count || !_nextQueryPool) return false;
     id = _nextQueryPool++;
     _queries.try_emplace(id, count);
-    _session.Post([this,id,count] { if (Open()) _renderer.RegisterQueryPool(id,count); });
     return true;
 }
 
 bool FrameQueue::CreateTexture(const rn_uploaded_texture_desc& desc) {
-    return _session.Barrier([&] {
-        if (!Open()) return false;
-        if (!_renderer.CreateTexture(desc)) {
-            if (_renderer.IsTerminal()) DeviceFailure();
-            return false;
-        }
-        std::lock_guard lock(_mutex);
-        _textures.emplace(desc.id,desc);
-        return true;
+    auto& device=_renderer.Runtime().GetDevice();
+    if (!Open() || _usedTextureIds.contains(desc.id) || !TextureRegistry::ValidateDesc(device.GetCapabilities(),desc)) return false;
+    auto texture=CreateSceneTexture(device,desc);
+    if (!texture) { SettleDeviceLoss(); return false; }
+    std::lock_guard lock(_mutex);
+    if (_closing) return false;
+    _usedTextureIds.insert(desc.id);
+    _textures.emplace(desc.id,desc);
+    _session.Post([this,desc,texture=std::move(texture)]() mutable {
+        _renderer.Textures().Register(desc,std::move(texture));
     });
+    return true;
 }
 bool FrameQueue::RemoveTexture(uint32_t id) {
     std::lock_guard lock(_mutex);
@@ -277,21 +355,21 @@ bool FrameQueue::UploadTexture(const rn_texture_upload_desc& desc) {
     return true;
 }
 bool FrameQueue::RegisterPipeline(const rn_pipeline_desc& desc,uint32_t& id) {
-    return _session.Barrier([&] {
-        if (!Open()) return false;
-        if (!_renderer.RegisterPipeline(desc,id)) {
-            if (_renderer.IsTerminal()) DeviceFailure();
-            return false;
-        }
-        std::lock_guard lock(_mutex);
-        _pipelines.emplace(id);
-        return true;
-    });
+    if (!Open() || !_nextPipeline) return false;
+    auto& runtime=_renderer.Runtime();
+    auto pipeline=ImmediatePipeline::Create(runtime.GetDevice(),_renderer.Programs(),desc,runtime.GetPipelineCache());
+    if (!pipeline) { SettleDeviceLoss(); return false; }
+    std::lock_guard lock(_mutex);
+    if (_closing) return false;
+    id=_nextPipeline++;
+    _pipelines.insert(id);
+    _session.Post([this,id,pipeline=std::move(pipeline)]() mutable { _renderer.Pipelines().Insert(id,std::move(pipeline)); });
+    return true;
 }
 bool FrameQueue::RemovePipeline(uint32_t id) {
     std::lock_guard lock(_mutex);
     if (!_pipelines.erase(id)) return false;
-    _session.Post([this,id] { _renderer.DestroyPipeline(id); });
+    _session.Post([this,id] { _renderer.Pipelines().Destroy(id); });
     return true;
 }
 bool FrameQueue::RemoveQueryPool(uint32_t id) {
@@ -299,6 +377,7 @@ bool FrameQueue::RemoveQueryPool(uint32_t id) {
     return _queries.erase(id) != 0;
 }
 bool FrameQueue::Query(uint32_t id, uint32_t first, std::span<rn_query_sample> samples, rn_wait_result& out) {
+    TryAdvanceFrontendProgress();
     std::lock_guard lock(_mutex);
     SnapshotLocked(out);
     auto pool = _queries.find(id);
@@ -313,31 +392,22 @@ bool FrameQueue::Query(uint32_t id, uint32_t first, std::span<rn_query_sample> s
 bool FrameQueue::CreateBuffer(const rn_buffer_desc& desc, rn_buffer_result& result) {
     if(!BufferRegistry::Valid(desc,_maxBufferSize)) return false;
     const auto usage=desc.usage & ~RN_BUFFER_CLIENT_STORAGE;
+    TryAdvanceFrontendProgress();
     std::unique_lock lock(_mutex);
     if(_closing || !_nextBuffer) return false;
-    radray::shared_ptr<BufferEntry> entry;
-    if(usage&RN_BUFFER_MAP_READ) {
-        entry=radray::make_shared<BufferEntry>();
-        entry->usage=usage; entry->size=desc.size;
-    } else {
-        entry=_renderer.Buffers().Take(usage,desc.size,_progress.completed_sequence);
-        if(!entry) {
-            lock.unlock();
-            if(!_session.Barrier([&] {
-                if(!Open() || _renderer.IsTerminal()) return false;
-                entry=BufferRegistry::Allocate(_renderer.Runtime().GetDevice(),usage,desc.size);
-                if(!entry && _renderer.IsTerminal()) DeviceFailure();
-                return bool(entry);
-            })) return false;
-            lock.lock();
-            if(_closing) {
-                _session.Post([discard=std::move(entry)]{});
-                return false;
-            }
+    auto entry=_renderer.Buffers().Take(usage,desc.size,_progress.completed_sequence);
+    if(!entry) {
+        lock.unlock();
+        entry=BufferRegistry::Allocate(_renderer.Runtime().GetDevice(),usage,desc.size);
+        if(!entry) { SettleDeviceLoss(); return false; }
+        lock.lock();
+        if(_closing) {
+            _session.Post([discard=std::move(entry)] {});
+            return false;
         }
     }
     auto id=_nextBuffer++;
-    auto& buffer=_buffers.emplace(id,FrontBuffer{usage,desc.size}).first->second;
+    auto& buffer=_buffers.emplace(id,FrontBuffer{usage,desc.size,entry->upload}).first->second;
     result={id,0,entry->mapped};
     if((usage&RN_BUFFER_MAP_READ) || ((usage&RN_BUFFER_MAP_WRITE) && !(usage&(RN_BUFFER_COPY_DST|RN_BUFFER_FENCE_ROTATED)))) {
         buffer.host.resize(desc.size);
@@ -351,13 +421,15 @@ bool FrameQueue::CreateBuffer(const rn_buffer_desc& desc, rn_buffer_result& resu
         initial.assign(first,first+desc.size);
     }
     _session.Post([this,id,entry=std::move(entry),initial=std::move(initial),flush]() mutable {
-        if(Open()) _renderer.Buffers().Register(id,std::move(entry),std::move(initial),flush);
+        if(Open() && !_renderer.Buffers().Register(id,std::move(entry),std::move(initial),flush)) Collect(true);
     });
     return true;
 }
 bool FrameQueue::RemoveBuffer(uint32_t id) {
     std::lock_guard lock(_mutex);
-    return _buffers.erase(id) != 0;
+    if (!_buffers.erase(id)) return false;
+    _session.Post([this,id] { _renderer.Buffers().Destroy(id); });
+    return true;
 }
 
 void FrameQueue::Present(rn_present_outcome outcome) {
@@ -374,10 +446,6 @@ void FrameQueue::SurfaceConfigured() {
     _progress.surface_recovery_state = 0;
 }
 void FrameQueue::SurfaceLost() { Present(RN_PRESENT_SURFACE_LOST); }
-bool FrameQueue::NeedsNewSurface() {
-    std::lock_guard lock(_mutex);
-    return _progress.surface_recovery_state == RN_PRESENT_SURFACE_LOST;
-}
 uint32_t FrameQueue::Drain(std::span<rn_batch_telemetry> out) {
     std::lock_guard lock(_mutex);
     auto count = std::min(out.size(), _telemetry.size());

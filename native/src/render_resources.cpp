@@ -11,10 +11,10 @@
 
 namespace raynium {
 using namespace radray::gpu;
-RenderBuffer CreateBuffer(Device& d,uint64_t bytes,MemoryType memory,BufferUses uses,ResourceHints hints) {
+RenderBuffer CreateBuffer(Device& d,uint64_t bytes,MemoryType memory,BufferUses uses) {
     RADRAY_PROFILE_SCOPE_N("Raynium.Buffer.Create");
     if(memory==MemoryType::Upload) uses|=BufferUse::MapWrite;
-    return d.CreateBuffer({.Size=bytes,.Memory=memory,.Usage=uses,.Hints=hints}).Release();
+    return d.CreateBuffer({.Size=bytes,.Memory=memory,.Usage=uses}).Release();
 }
 void TextureBarrier(CommandBuffer& c,Texture* texture,TextureStates before,TextureStates after) {
     const ResourceBarrierDescriptor b=BarrierTextureDescriptor{.Target=texture,.Before=before,.After=after,
@@ -51,10 +51,9 @@ bool Swapchain::Create(radray::DeviceContext& runtime,const rn_swapchain_desc& d
 bool Swapchain::Resize(const rn_swapchain_desc& desc) {
     if(!ValidSwapchainDesc(desc)) return false;
     if(desc.hwnd!=_hwnd) { RADRAY_ERR_LOG("Swapchain HWND cannot change"); return false; }
-    if(!_chain->Recreate(desc.width,desc.height,TextureFormat::BGRA8_UNORM,Mode(desc.present_mode))) {
-        RADRAY_ERR_LOG("Cannot recreate BGRA8 swapchain; close the renderer"); return false;
-    }
-    return true;
+    _broken=!_chain->Recreate(desc.width,desc.height,TextureFormat::BGRA8_UNORM,Mode(desc.present_mode));
+    if(_broken) RADRAY_ERR_LOG("Cannot recreate BGRA8 swapchain");
+    return !_broken;
 }
 bool Swapchain::IsPresentable() const noexcept {
     const auto window=reinterpret_cast<HWND>(_hwnd); RECT bounds{};

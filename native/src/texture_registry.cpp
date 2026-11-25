@@ -143,20 +143,20 @@ radray::RDGTextureHandle FrameTextureImports::Import(const radray::IntrusivePtr<
         _graph.AddClearColor(handle,{{0,0,0,0}});
     return handle;
 }
-bool TextureRegistry::Create(radray::DeviceContext& runtime,const rn_uploaded_texture_desc& desc) {
+bool TextureRegistry::ValidateDesc(const GpuDeviceCapabilities& caps,const rn_uploaded_texture_desc& desc) {
     uint32_t levels=1;
     for(uint32_t side=std::max(desc.width,desc.height);side>1;side>>=1) ++levels;
-    auto& device=runtime.GetDevice();
-    if(desc.struct_size!=sizeof(desc) || desc.id<16 || _used.contains(desc.id) || ToTextureFormat(desc.format)==TextureFormat::UNKNOWN ||
-       !desc.width || !desc.height || !desc.array_layers || desc.array_layers>device.GetCapabilities().Limits.MaxTextureArrayLayers || (desc.flags&~7u) ||
+    if(desc.struct_size!=sizeof(desc) || desc.id<16 || ToTextureFormat(desc.format)==TextureFormat::UNKNOWN ||
+       !desc.width || !desc.height || !desc.array_layers || desc.array_layers>caps.Limits.MaxTextureArrayLayers || (desc.flags&~7u) ||
        ((desc.flags&RN_TEXTURE_CUBE) && (desc.array_layers%6 || desc.width!=desc.height)) ||
-       desc.width>device.GetCapabilities().Limits.MaxTexture2DDimension ||
-       desc.height>device.GetCapabilities().Limits.MaxTexture2DDimension || !desc.mip_levels || desc.mip_levels>levels) {
+       desc.width>caps.Limits.MaxTexture2DDimension ||
+       desc.height>caps.Limits.MaxTexture2DDimension || !desc.mip_levels || desc.mip_levels>levels) {
         RADRAY_ERR_LOG("Invalid uploaded texture descriptor, format or reused ID: id={} size={}x{} mips={} format={}",desc.id,desc.width,desc.height,desc.mip_levels,uint32_t(desc.format)); return false;
     }
-    UploadedTexture value{desc,CreateSceneTexture(device,desc)};
-    if(!value.texture) { RADRAY_ERR_LOG("Cannot create uploaded texture: id={}",desc.id); return false; }
-    _textures.emplace(desc.id,std::move(value)); _used.insert(desc.id); return true;
+    return true;
+}
+void TextureRegistry::Register(const rn_uploaded_texture_desc& desc,radray::IntrusivePtr<radray::GpuTexture> texture) {
+    _textures.emplace(desc.id,UploadedTexture{desc,std::move(texture)});
 }
 const UploadedTexture* TextureRegistry::Find(uint32_t id) const {
     auto found=_textures.find(id); return found==_textures.end()?nullptr:&found->second;

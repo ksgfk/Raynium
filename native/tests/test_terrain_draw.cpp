@@ -27,14 +27,10 @@ public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
     void SetDebugName(std::string_view) noexcept override {}
-    void* Map(uint64_t, uint64_t) noexcept override { ++maps; return nullptr; }
-    void Unmap() noexcept override { ++unmaps; }
-    void FlushMappedRange(BufferRange) noexcept override { ++flushes; }
-    void InvalidateMappedRange(BufferRange) noexcept override { ++invalidates; }
+    radray::Nullable<void*> GetMappedData() noexcept override { return nullptr; }
+    bool FlushMappedRange(BufferRange) noexcept override { return true; }
+    bool InvalidateMappedRange(BufferRange) noexcept override { return true; }
     BufferDescriptor GetDesc() const noexcept override { return _desc; }
-    Device* GetDevice() const noexcept override { ++deviceQueries; return nullptr; }
-    uint32_t maps{}, unmaps{}, flushes{}, invalidates{};
-    mutable uint32_t deviceQueries{};
 private:
     BufferDescriptor _desc{};
 };
@@ -111,7 +107,7 @@ TEST(BufferRegistry, ReuseRequiresCompletedSubmissionAndLastSlotReference) {
     auto* original=allocation.get();
     registry.Register(1,std::move(allocation),{},false);
     auto retained=registry.Find(1);
-    registry.Advance(5,3);
+    registry.Advance(5);
     ASSERT_TRUE(registry.Destroy(1));
     EXPECT_FALSE(registry.Find(1));
     EXPECT_FALSE(registry.Take(usage,256,3));
@@ -122,7 +118,7 @@ TEST(BufferRegistry, ReuseRequiresCompletedSubmissionAndLastSlotReference) {
     ASSERT_EQ(reused.get(),original);
     registry.Register(2,std::move(reused),{},false);
     ASSERT_TRUE(registry.Destroy(2));
-    registry.Advance(125,125);
+    registry.Advance(125);
     EXPECT_FALSE(registry.Take(usage,256,125));
 }
 
@@ -166,6 +162,38 @@ TEST(BufferRegistry, FlushesInitialAndDirtyRangesOnPooledMappedStorage) {
         EXPECT_EQ(flushes[i+1].Offset,dirty[i].offset);
         EXPECT_EQ(flushes[i+1].Size,dirty[i].length);
     }
+}
+
+TEST(BufferRegistry, FailedFlushDoesNotRegisterOrPublishWrites) {
+    radray::test::FakeDevice device;
+    device.EnableHostBuffers=true;
+    const auto usage=RN_BUFFER_MAP_WRITE|RN_BUFFER_COPY_SRC|RN_BUFFER_FENCE_ROTATED;
+    auto entry=BufferRegistry::Allocate(device,usage,256);
+    ASSERT_TRUE(entry);
+    BufferRegistry registry;
+    device.Lost=true;
+    EXPECT_FALSE(registry.Register(1,entry,{},true));
+    EXPECT_FALSE(registry.Find(1));
+    ASSERT_TRUE(registry.Register(2,std::move(entry),{},false));
+    const radray::array dirty{rn_mapped_range{2,0,0,16}};
+    EXPECT_FALSE(registry.Flush(dirty));
+}
+
+TEST(BufferRegistry, GraphRecognizesPersistentUploadAfterRegistryRelease) {
+    radray::test::FakeGpu gpu;
+    gpu.Device->EnableHostBuffers=true;
+    auto scheduler=radray::FrameScheduler::Create(gpu.Context,radray::make_unique<radray::test::CallbackPipeline>(),1).Unwrap();
+    radray::RDGBuilder graph{scheduler->BeginFrame()};
+    auto entry=BufferRegistry::Allocate(*gpu.Device,RN_BUFFER_FENCE_ROTATED|RN_BUFFER_MAP_WRITE|RN_BUFFER_VERTEX,256);
+    ASSERT_TRUE(entry);
+    ASSERT_EQ(entry->upload->UseCount(),1u);
+    auto handle=entry->Import(graph);
+    ASSERT_GT(entry->upload->UseCount(),1u);
+    entry.reset();
+    const radray::array<radray::byte,4> bytes{};
+    graph.UploadBuffer(handle,0,radray::RDGUploadSource::SnapshotBytes(bytes));
+    graph.MarkOutput(handle);
+    EXPECT_FALSE(graph.Compile());
 }
 
 TEST(TerrainBounds, OnlyStrictlySeparatedScreenBoundsCanCross) {

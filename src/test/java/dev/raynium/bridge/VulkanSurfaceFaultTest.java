@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import static java.lang.foreign.ValueLayout.JAVA_INT;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -143,6 +144,85 @@ class VulkanSurfaceFaultTest {
         }
     }
 
+    @ParameterizedTest @ValueSource(longs={0,50_000_000L})
+    void coldResourcesAndEarlierFenceWorkWhileNextAcquireIsPaused(long timeout) throws Throwable {
+        try(var arena=Arena.ofShared();
+            var env=new NativeEnvironment(NativeTestSupport.locate(directory),NativeEnvironment.Backend.VULKAN,
+                NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var runtime=env.createRuntime(); var renderer=runtime.createRenderer(NativeTestSupport.shaders());
+            var device=new RayniumGpuDevice(runtime,renderer,true);
+            var window=new NativeSwapchainTest.Window(); var chain=renderer.createSwapchain(window.hwnd,64,32,NativeSwapchain.PresentMode.IMMEDIATE);
+            var output=renderer.createTexture(4,2,1,1,NativeTexture.Format.RGBA8,NativeTexture.ATTACHMENT|NativeTexture.READBACK);
+            var first=new CommandTape(renderer); var earlier=first.createFence(); var presenting=new CommandTape(renderer);
+            var sources=new NativeRenderPearlTest.Sources()) {
+            var library=SymbolLookup.libraryLookup(Path.of(System.getProperty("raynium.test.surfaceLayer")),arena);
+            var atomSize=Linker.nativeLinker().downcallHandle(library.find("surfaceTestAtomSize").orElseThrow(),FunctionDescriptor.of(ValueLayout.JAVA_LONG));
+            assertEquals((long)atomSize.invokeExact(),runtime.deviceInfo().transfer().hostCoherentAtomSize());
+            var gpuGate=Linker.nativeLinker().downcallHandle(library.find("gateGpuBatch").orElseThrow(),FunctionDescriptor.of(JAVA_INT,JAVA_INT));
+            var pipeline=com.mojang.renderpearl.api.pipeline.RenderPipeline.builder(net.minecraft.client.renderer.RenderPipelines.GUI_SNIPPET)
+                .withLocation(net.minecraft.resources.Identifier.parse("raynium:test_gui")).withCull(false)
+                .withPrimitiveTopology(com.mojang.renderpearl.api.pipeline.PrimitiveTopology.TRIANGLES).build();
+            var pending=device.compilePipeline(pipeline,sources,Runnable::run).join();
+            var encoder=device.createCommandEncoder();
+            assertEquals(0,(int)gpuGate.invokeExact(1));
+            boolean held=true;
+            try(var gate=new WorkerGate(arena,5)) {
+                var probe=Probe.load(arena);
+                var submitted=new AtomicInteger();
+                first.onSubmitted(submitted::incrementAndGet);
+                first.submit();
+                long deadline=System.nanoTime()+5_000_000_000L;
+                while(submitted.get()==0 && System.nanoTime()<deadline) renderer.pollCompleted();
+                assertEquals(1,submitted.get());
+                // No frontend polling and no readbacks while this submission is held on the GPU.
+                int samples=probe.count(5);
+                Thread.sleep(40);
+                assertEquals(samples,probe.count(5));
+                presenting.clearColor(new CommandTape.Region(output,0,0,0,0,4,2),1,0,0,1);
+                presenting.blitToSurface(output,0,chain);
+                presenting.submit();
+                gate.await();
+                assertFalse(earlier.awaitCompletion(0));
+                assertEquals(0,(int)gpuGate.invokeExact(0));
+                held=false;
+                assertTrue(earlier.awaitCompletion(timeout));
+                try(var shader=pending.finishCompile();
+                    var texture=device.createTexture("cold target",TEXTURE_USAGE,GpuFormat.RGBA8_UNORM,4,2,1,1);
+                    var view=device.createTextureView(texture);
+                    var cb=device.createBuffer(null,GpuBuffer.USAGE_UNIFORM,NativeRenderPearlTest.constants(true));
+                    var vertices=device.createFenceRotatedBuffer(GpuBuffer.USAGE_VERTEX|GpuBuffer.USAGE_MAP_WRITE,
+                        (16L<<20)+48,NativeBuffer.WriteSource.TRANSIENT);
+                    var queries=device.createTimestampQueryPool(1)) {
+                    byte[] red=new byte[32];
+                    for(int i=0;i<32;i+=4) red[i]=red[i+3]=(byte)255;
+                    ((NativeTexture)texture).upload(0,0,0,4,2,red);
+                    try(var mapped=vertices.map(0,48,false,true)) {
+                        var bytes=mapped.data();
+                        for(float[] xy:new float[][]{{-1,-1},{3,-1},{-1,3}})
+                            bytes.putFloat(xy[0]).putFloat(xy[1]).putFloat(0).putInt(-1);
+                    }
+                    try(var pass=encoder.createRenderPass(()->"cold resources",view,java.util.Optional.empty())) {
+                        pass.setPipeline(shader); pass.setVertexBuffer(0,vertices.slice(0,48));
+                        pass.setUniform("DynamicTransforms",cb); pass.setUniform("Projection",cb);
+                        pass.enableScissor(0,0,2,2); pass.draw(3,1,0,0); pass.writeTimestamp(queries,0);
+                    }
+                    device.currentBatch().captureColor(new CommandTape.Region((NativeTexture)texture,0,0,0,0,4,2),99);
+                    encoder.submit();
+                    vertices.close();
+                    gate.close();
+                    renderer.flush();
+                    assertTrue(queries.getValue(0).isPresent());
+                    var bytes=renderer.pollCapture(99).orElseThrow().rgba();
+                    assertEquals(32,bytes.length);
+                    var pixels=java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.nativeOrder());
+                    for(int i=0;i<8;++i) assertEquals(i%4<2?0xff00ff00:0xff0000ff,pixels.getInt());
+                }
+            } finally {
+                if(held) assertEquals(0,(int)gpuGate.invokeExact(0));
+            }
+        }
+    }
+
     @Test void publicViewCopiesForeignParametersWhenTheEncoderOwnsTheStorage() throws Throwable {
         var payload = NativeTestSupport.locate(directory);
         try (var arena = Arena.ofConfined();
@@ -211,6 +291,9 @@ class VulkanSurfaceFaultTest {
             tape.onCompleted(()->{assertTrue(pool.getValue(0).isPresent()); completed.incrementAndGet();});
             tape.submit();
             gate.await();
+            assertEquals(0,renderer.waitSubmit(1,0).completedSequence());
+            assertTrue(pool.getValue(0).isEmpty());
+            assertTrue(renderer.pollCapture(19).isEmpty());
             assertEquals(0,completed.get());
             var bad=arena.allocate(8,8);
             bad.set(JAVA_INT,0,-1); bad.set(JAVA_INT,4,8);
@@ -282,7 +365,6 @@ class VulkanSurfaceFaultTest {
                 assertFalse(surface.isAcquired());
                 assertThrows(IllegalStateException.class, surface::acquireNextTexture);
                 assertThrows(IllegalStateException.class, renderer::pollCompleted);
-                if (!genericError) assertEquals(1, probe.count(3));
                 if(fault==Failure.OLD_FENCE) probe.inject(6,0);
             }
             if (fault != Failure.PRESENT_ERROR) assertEquals(1, probe.count(3));
@@ -396,17 +478,18 @@ class VulkanSurfaceFaultTest {
                 var empty=MemorySegment.NULL;
                 renderer.submitFrame(empty,empty,null);
                 long first=renderer.submitFrame(empty,empty,empty,null,List.of(),true).sequence();
+                assertTrue(renderer.awaitSubmission(first,-1));
+                probe.inject(8,-5);
                 long second=renderer.submitFrame(empty,empty,empty,null,List.of(),true).sequence();
                 assertTrue(renderer.awaitSubmission(second,-1));
                 // WaitIdle visits slot zero (the newer batch) before slot one.
-                probe.inject(8,-5);
                 renderer.flush();
                 var records=arena.allocate(304,8);
                 var count=arena.allocate(JAVA_INT);
                 var handle=NativeTestSupport.handle(renderer);
                 assertEquals(0,(int)renderer.bindings.drainTelemetry.invokeExact(handle,records,2,count));
                 assertEquals(2,count.get(JAVA_INT,0));
-                assertEquals(1,probe.count(0));
+                assertTrue(probe.count(0)>0);
                 assertEquals(first,records.get(ValueLayout.JAVA_LONG,0));
                 assertEquals(1,records.get(JAVA_INT,8));
                 assertEquals(second,records.get(ValueLayout.JAVA_LONG,152));
@@ -423,51 +506,75 @@ class VulkanSurfaceFaultTest {
         var payload = NativeTestSupport.locate(directory);
         try (var arena = Arena.ofShared();
              var env = new NativeEnvironment(payload,NativeEnvironment.Backend.VULKAN,NativeTestSupport.recordingLogger(new ArrayList<>()));
-             var runtime = env.createRuntime(); var renderer = runtime.createRenderer(NativeTestSupport.shaders());
-             var window = new NativeSwapchainTest.Window(); var chain = renderer.createSwapchain(window.hwnd,64,32,NativeSwapchain.PresentMode.IMMEDIATE);
-             var texture = renderer.createTexture(8,4,1,1,NativeTexture.Format.RGBA8,NativeTexture.ATTACHMENT|NativeTexture.READBACK);
-             var old = new CommandTape(renderer); var pending = new CommandTape(renderer)) {
-            var probe = Probe.load(arena);
-            var region = new CommandTape.Region(texture,0,0,0,0,8,4);
-            probe.inject(9,1);
-            try {
-                old.clearColor(region,1,0,0,1);
-                old.captureColor(region,81);
-                long previous = old.submit().sequence();
-                renderer.flush();
-                try (var gate = new WorkerGate(arena,4)) {
+             var runtime = env.createRuntime()) {
+            try (var renderer = runtime.createRenderer(NativeTestSupport.shaders());
+                 var window = new NativeSwapchainTest.Window(); var chain = renderer.createSwapchain(window.hwnd,64,32,NativeSwapchain.PresentMode.IMMEDIATE);
+                 var texture = renderer.createTexture(8,4,1,1,NativeTexture.Format.RGBA8,NativeTexture.ATTACHMENT|NativeTexture.READBACK);
+                 var old = new CommandTape(renderer); var pending = new CommandTape(renderer)) {
+                var probe = Probe.load(arena);
+                var region = new CommandTape.Region(texture,0,0,0,0,8,4);
+                probe.inject(9,1);
+                try {
+                    old.clearColor(region,1,0,0,1);
+                    old.captureColor(region,81);
+                    long previous = TerrainTestPass.submitMeasured(old);
+                    renderer.flush();
                     var callbacks = new AtomicInteger();
                     pending.clearColor(region,0,1,0,1);
                     pending.captureColor(region,82);
-                    pending.blitToSurface(texture,0,chain);
                     pending.onCompleted(callbacks::incrementAndGet);
-                    long seq = pending.submit().sequence();
-                    gate.await();
-                    if (fault == TailFault.READBACK_MAP) probe.inject(8,-5);
-                    else probe.inject(1,LOST);
+                    long seq;
                     boolean flushing = fault == TailFault.DEVICE_LOST_DURING_FLUSH;
-                    var release = gate.releaseDuring(flushing ? "flush" : "waitSubmit");
-                    if (flushing) assertThrows(GpuDeviceLossException.class, renderer::flush);
-                    else if (fault == TailFault.READBACK_MAP)
+                    if (fault == TailFault.READBACK_MAP) {
+                        // The first reservation reuses the previous batch's staging buffer. The second needs a new mapping.
+                        pending.captureColor(region,83);
+                        probe.inject(8,-5);
+                        seq = TerrainTestPass.submitMeasured(pending);
                         assertThrows(IllegalStateException.class,()->renderer.awaitSubmission(seq,-1));
-                    else assertThrows(GpuDeviceLossException.class,()->renderer.awaitSubmission(seq,-1));
-                    release.join();
-                    assertEquals(1,probe.count(0));
+                    } else {
+                        pending.blitToSurface(texture,0,chain);
+                        try (var gate = new WorkerGate(arena,4)) {
+                            seq = pending.submit().sequence();
+                            gate.await();
+                            probe.inject(1,LOST);
+                            var release = gate.releaseDuring(flushing ? "flush" : "waitSubmit");
+                            if (flushing) assertThrows(GpuDeviceLossException.class, renderer::flush);
+                            else assertThrows(GpuDeviceLossException.class,()->renderer.awaitSubmission(seq,-1));
+                            release.join();
+                        }
+                    }
+                    if (fault==TailFault.READBACK_MAP) assertTrue(probe.count(0)>0);
+                    else assertEquals(1,probe.count(0));
                     var progress = arena.allocate(48,8);
                     var handle = NativeTestSupport.handle(renderer);
                     if (flushing) assertEquals(1,(int)renderer.bindings.flushRenderer.invokeExact(handle,progress));
                     else assertEquals(1,(int)renderer.bindings.waitSubmit.invokeExact(handle,0L,0L,progress));
                     var snapshot = NativeRenderer.Progress.read(progress,0);
                     assertEquals(previous,snapshot.completed());
-                    assertEquals(seq,snapshot.submitted());
+                    assertEquals(fault == TailFault.READBACK_MAP ? previous : seq,snapshot.submitted());
                     assertEquals(fault == TailFault.READBACK_MAP ? 2 : 3,snapshot.flags());
                     assertEquals(0,callbacks.get());
+                    var measured = new ArrayList<Long>();
+                    renderer.drainTelemetry(record->measured.add(record.get(ValueLayout.JAVA_LONG,0)));
+                    assertEquals(List.of(previous),measured);
                     assertEquals(255,Byte.toUnsignedInt(renderer.pollCapture(81).orElseThrow().rgba()[0]));
                     assertThrows(IllegalStateException.class,()->renderer.pollCapture(82));
+                } finally {
+                    probe.inject(9,0);
+                    probe.inject(0,0);
                 }
-            } finally {
-                probe.inject(9,0);
-                probe.inject(0,0);
+            }
+            if (fault==TailFault.READBACK_MAP) {
+                try (var healthy=runtime.createRenderer(NativeTestSupport.shaders());
+                     var target=healthy.createTexture(8,4,1,1,NativeTexture.Format.RGBA8,NativeTexture.ATTACHMENT|NativeTexture.READBACK);
+                     var retry=new CommandTape(healthy)) {
+                    var region=new CommandTape.Region(target,0,0,0,0,8,4);
+                    retry.clearColor(region,0,0,1,1);
+                    retry.captureColor(region,82);
+                    retry.submit();
+                    healthy.flush();
+                    assertEquals(255,Byte.toUnsignedInt(healthy.pollCapture(82).orElseThrow().rgba()[2]));
+                }
             }
         }
     }

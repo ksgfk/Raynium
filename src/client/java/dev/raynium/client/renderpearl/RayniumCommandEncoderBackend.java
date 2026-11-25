@@ -23,10 +23,10 @@ final class RayniumCommandEncoderBackend implements CommandEncoderBackend, AutoC
     private CommandTape tape;
     private RayniumRenderPassBackend.Lease activePass;
 
-    RayniumCommandEncoderBackend(NativeRenderer renderer) {
+    RayniumCommandEncoderBackend(NativeRenderer renderer,long hostCoherentAtomSize) {
         this.renderer=renderer;
         tape=new CommandTape(renderer,freeViews,freeStorage);
-        memory=new RayniumTransientMemory(renderer,this::tape);
+        memory=new RayniumTransientMemory(renderer,this::tape,hostCoherentAtomSize);
     }
 
     CommandTape tape() { return tape; }

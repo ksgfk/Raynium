@@ -13,6 +13,7 @@ PFN_vkGetDeviceProcAddr deviceProc{};
 PFN_GetPhysicalDeviceProcAddr physicalProc{};
 VkInstance currentInstance{};
 VkDevice currentDevice{};
+VkDeviceSize coherentAtomSize{};
 VkSemaphore batchGate{};
 std::atomic<bool> armGate{}, maskCounter{}, dedicatedBuffers{};
 
@@ -34,8 +35,8 @@ void checkpoint(Operation site) {
     gateChanged.notify_all();
 }
 std::atomic<Operation> armed{};
-std::atomic<VkResult> injected{}, createError{};
-std::atomic<int> hits{}, acquisitions{}, presentations{}, idleCalls{}, failedCreates{};
+std::atomic<VkResult> injected{}, createError{}, mapError{};
+std::atomic<int> hits{}, acquisitions{}, presentations{}, idleCalls{}, failedCreates{}, counterReads{};
 
 bool take(Operation operation) {
     if (!armed.compare_exchange_strong(operation, None)) return false;
@@ -76,7 +77,13 @@ VKAPI_ATTR VkResult VKAPI_CALL createDevice(VkPhysicalDevice physical, const VkD
     link->u.pLayerInfo = link->u.pLayerInfo->pNext;
     auto create = reinterpret_cast<PFN_vkCreateDevice>(next(currentInstance, "vkCreateDevice"));
     VkResult status = create(physical, info, allocator, device);
-    if (status == VK_SUCCESS) currentDevice = *device;
+    if (status == VK_SUCCESS) {
+        currentDevice = *device;
+        VkPhysicalDeviceProperties properties{};
+        auto getProperties=reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(next(currentInstance,"vkGetPhysicalDeviceProperties"));
+        getProperties(physical,&properties);
+        coherentAtomSize=properties.limits.nonCoherentAtomSize;
+    }
     return status;
 }
 
@@ -85,13 +92,14 @@ template<class F> F downstream(const char* name) {
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL counter(VkDevice device, VkSemaphore semaphore, uint64_t* value) {
+    ++counterReads;
     if (take(Timeline)) return injected;
     if(maskCounter.load()) { *value=0; return VK_SUCCESS; }
     return downstream<PFN_vkGetSemaphoreCounterValue>("vkGetSemaphoreCounterValue")(device, semaphore, value);
 }
 VKAPI_ATTR VkResult VKAPI_CALL mapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset,
         VkDeviceSize size, VkMemoryMapFlags flags, void** output) {
-    if (take(MapMemory)) return injected;
+    if (auto error=mapError.load(); error!=VK_SUCCESS) { ++hits; return error; }
     return downstream<PFN_vkMapMemory>("vkMapMemory")(device, memory, offset, size, flags, output);
 }
 VKAPI_ATTR void VKAPI_CALL bufferRequirements(VkDevice device, const VkBufferMemoryRequirementsInfo2* info,
@@ -219,6 +227,9 @@ extern "C" __declspec(dllexport) int pauseWorker(int operation) {
 
 extern "C" __declspec(dllexport) void armSurfaceFault(int operation, int result) {
     if(operation==DedicatedBuffers) { dedicatedBuffers=result!=0; return; }
+    // VMA can retry a failed mapping with another memory type.
+    if(operation==MapMemory) { hits=0; mapError=static_cast<VkResult>(result); return; }
+    if(operation==None) mapError=VK_SUCCESS;
     if(operation==MaskTimeline) { maskCounter=result!=0; return; }
     if(operation==CreateSwapchain) { if(result) failedCreates=0; createError=static_cast<VkResult>(result); return; }
     injected = static_cast<VkResult>(result);
@@ -247,6 +258,8 @@ extern "C" __declspec(dllexport) int gateGpuBatch(int hold) {
     batchGate = VK_NULL_HANDLE;
     return status;
 }
+extern "C" __declspec(dllexport) uint64_t surfaceTestAtomSize() { return coherentAtomSize; }
+
 extern "C" __declspec(dllexport) int surfaceFaultCounter(int kind) {
     switch (kind) {
         case 0: return hits;
@@ -254,6 +267,7 @@ extern "C" __declspec(dllexport) int surfaceFaultCounter(int kind) {
         case 2: return presentations;
         case 3: return idleCalls;
         case 4: return failedCreates;
+        case 5: return counterReads;
         default: return -1;
     }
 }

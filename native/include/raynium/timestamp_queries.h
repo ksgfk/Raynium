@@ -6,37 +6,27 @@
 #include <span>
 
 namespace raynium {
-class QueryRegistry final {
-public:
-    struct Slot { uint64_t sequence{},ticks{}; bool available{}; };
-    struct Pool { explicit Pool(uint32_t count):slots(count) {} radray::vector<Slot> slots; };
-    struct Write { radray::shared_ptr<Pool> pool; uint32_t slot; };
-    void Register(uint32_t id,uint32_t count);
-    bool Destroy(uint32_t id);
-    radray::shared_ptr<Pool> Find(uint32_t id) const;
-private:
-    radray::unordered_map<uint32_t,radray::shared_ptr<Pool>> _pools;
-};
+struct TimestampTarget { uint32_t pool, slot; };
+struct PublishedTimestamp { uint32_t pool, slot; uint64_t sequence, ticks; };
 
 class FrameTimestamps final {
 public:
-    bool Prepare(radray::gpu::Device&,radray::gpu::CommandQueue&,std::span<const QueryRegistry::Write>);
+    bool Prepare(radray::gpu::Device&,radray::gpu::CommandQueue&,std::span<const TimestampTarget>);
     void Reset(radray::RDGBuilder&) const;
     void Write(radray::RDGBuilder&,uint32_t physicalIndex) const;
     void Resolve(radray::RDGBuilder&) const;
     void WriteInline(radray::gpu::CommandBuffer& commands,uint32_t index) const;
     void Submitted(uint64_t sequence);
-    void Publish(uint64_t completed);
+    bool Collect(uint64_t completed,radray::vector<PublishedTimestamp>& output);
 private:
     struct Storage {
         radray::unique_ptr<radray::gpu::QueryPool> queries;
         radray::unique_ptr<radray::gpu::Buffer> readback;
         const uint64_t* mapped;
-        ~Storage() { readback->Unmap(); }
     };
     radray::unique_ptr<Storage> _storage;
     radray::gpu::BufferStates _state{radray::gpu::BufferState::Undefined};
-    radray::vector<QueryRegistry::Write> _writes;
+    radray::vector<TimestampTarget> _writes;
     uint64_t _sequence{},_mask{};
 };
 }

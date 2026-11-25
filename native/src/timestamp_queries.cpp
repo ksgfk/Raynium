@@ -4,15 +4,7 @@
 
 namespace raynium {
 using namespace radray::gpu;
-void QueryRegistry::Register(uint32_t id,uint32_t count) {
-    _pools.emplace(id,radray::make_shared<Pool>(count));
-}
-bool QueryRegistry::Destroy(uint32_t id) { return _pools.erase(id)!=0; }
-radray::shared_ptr<QueryRegistry::Pool> QueryRegistry::Find(uint32_t id) const {
-    auto found=_pools.find(id);
-    return found==_pools.end()?nullptr:found->second;
-}
-bool FrameTimestamps::Prepare(Device& device,CommandQueue& queue,std::span<const QueryRegistry::Write> writes) {
+bool FrameTimestamps::Prepare(Device& device,CommandQueue& queue,std::span<const TimestampTarget> writes) {
     if(_sequence) RADRAY_ABORT("Cannot reuse in-flight timestamp storage");
     _writes.assign(writes.begin(),writes.end());
     if(writes.empty()) return true;
@@ -24,10 +16,9 @@ bool FrameTimestamps::Prepare(Device& device,CommandQueue& queue,std::span<const
         const uint64_t size=uint64_t(count)*sizeof(uint64_t);
         auto pool=device.CreateQueryPool({QueryType::Timestamp,count,"Raynium frame timestamps"}).Release();
         if(!pool) return false;
-        auto buffer=device.CreateBuffer({.Size=size,.Memory=MemoryType::ReadBack,.Usage=BufferUse::CopyDestination|BufferUse::MapRead,
-            .Hints=ResourceHint::PersistentMap}).Release();
+        auto buffer=device.CreateBuffer({.Size=size,.Memory=MemoryType::ReadBack,.Usage=BufferUse::CopyDestination|BufferUse::MapRead}).Release();
         if(!buffer) return false;
-        auto* mapped=static_cast<const uint64_t*>(buffer->Map(0,size));
+        auto* mapped=static_cast<const uint64_t*>(buffer->GetMappedData().Get());
         if(!mapped) return false;
         _storage=radray::make_unique<Storage>(std::move(pool),std::move(buffer),mapped);
         _state=BufferState::Undefined;
@@ -71,21 +62,17 @@ void FrameTimestamps::Submitted(uint64_t sequence) {
     if(_writes.empty()) return;
     _sequence=sequence;
     _state=BufferState::HostRead;
-    for(const auto& write:_writes) write.pool->slots[write.slot]={sequence,0,false};
 }
-void FrameTimestamps::Publish(uint64_t completed) {
-    if(!_sequence || _sequence>completed) return;
-    _storage->readback->InvalidateMappedRange({0,_writes.size()*sizeof(uint64_t)});
+bool FrameTimestamps::Collect(uint64_t completed,radray::vector<PublishedTimestamp>& output) {
+    if(!_sequence || _sequence>completed) return true;
+    if(!_storage->readback->InvalidateMappedRange({0,_writes.size()*sizeof(uint64_t)})) return false;
     // The last write to a logical slot wins, including when multiple writes share one submission.
     for(size_t i=0;i<_writes.size();++i) {
         const auto& write=_writes[i];
-        auto& slot=write.pool->slots[write.slot];
-        if(slot.sequence==_sequence) {
-            slot.ticks=_storage->mapped[i]&_mask;
-            slot.available=true;
-        }
+        output.push_back({write.pool,write.slot,_sequence,_storage->mapped[i]&_mask});
     }
     _writes.clear();
     _sequence=0;
+    return true;
 }
 }

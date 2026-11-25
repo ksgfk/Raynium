@@ -28,6 +28,7 @@ void QueryDeviceInfo(radray::DeviceContext& runtime,rn_device_info& info) {
     info.max_vertex_bindings=caps.Detail.MaxVertexInputBindings;
     info.max_push_constant_bytes=caps.Limits.MaxPushConstantBytes;
     info.max_draw_indirect_count=caps.Limits.MaxDrawIndirectCount;
+    info.host_coherent_atom_size=std::max<uint64_t>(1,caps.Limits.HostCoherentAtomSize);
     info.flags=RN_DEVICE_PERSISTENT_MAPPING;
     if(caps.Features.IndirectDraw) info.flags|=RN_DEVICE_INDIRECT_DRAW;
     if(caps.Features.IndirectFirstInstance) info.flags|=RN_DEVICE_INDIRECT_FIRST_INSTANCE;

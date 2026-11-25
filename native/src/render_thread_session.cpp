@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <optional>
 
 namespace raynium {
 
@@ -16,7 +17,7 @@ struct RenderThreadSession::State {
         SetThreadDescription(GetCurrentThread(), L"Raynium Render");
         for (;;) {
             const bool pending = poll && poll();
-            std::function<void()> task;
+            std::optional<MoveOnlyTask> task;
             {
                 std::unique_lock lock(mutex);
                 const auto ready = [&] { return stopping || !queue.empty(); };
@@ -24,10 +25,10 @@ struct RenderThreadSession::State {
                     if (!changed.wait_for(lock, std::chrono::milliseconds(1), ready)) continue;
                 } else changed.wait(lock, ready);
                 if (queue.empty()) return;
-                task = std::move(queue.front());
+                task.emplace(std::move(queue.front()));
                 queue.pop_front();
             }
-            task();
+            (*task)();
         }
     } catch (...) {
         AbortUnexpectedException("Raynium Render");
@@ -45,8 +46,7 @@ struct RenderThreadSession::State {
             const auto wake = MsgWaitForMultipleObjectsEx(1, &progress, timeout, QS_SENDMESSAGE, MWMO_INPUTAVAILABLE);
             if (wake == WAIT_OBJECT_0 + 1) {
                 // Dispatch synchronous HWND messages while leaving posted game events to SDL.
-                MSG message{};
-                PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+                RenderThreadSession::PumpSentMessages();
             } else if (wake != WAIT_OBJECT_0 && wake != WAIT_TIMEOUT) {
                 RADRAY_ABORT("Render thread wait failed: {}", GetLastError());
             }
@@ -57,7 +57,7 @@ struct RenderThreadSession::State {
     HANDLE progress;
     std::mutex mutex;
     std::condition_variable changed;
-    radray::deque<std::function<void()>> queue;
+    radray::deque<MoveOnlyTask> queue;
     std::function<bool()> poll;
     bool stopping{};
 };
@@ -90,7 +90,12 @@ RenderThreadSession::~RenderThreadSession() {
     _worker.join();
 }
 
-void RenderThreadSession::Post(std::function<void()> task) {
+void RenderThreadSession::PumpSentMessages() noexcept {
+    MSG message{};
+    PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+}
+
+void RenderThreadSession::Post(MoveOnlyTask task) {
     {
         std::lock_guard lock(_state->mutex);
         _state->queue.push_back(std::move(task));

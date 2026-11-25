@@ -14,12 +14,12 @@ class CommandTape final {
 public:
     void Measure(rn_frame_metrics&) const;
     bool PrepareViews(const rn_batch_desc&,TerrainResidency&,const TextureRegistry&,const MeshPassResources&,radray::FrameSlot&,bool indirect);
-    bool Decode(const rn_batch_desc&,const TextureRegistry&,const QueryRegistry&,const BufferRegistry&,const ImmediatePipelineRegistry&,
+    bool Decode(const rn_batch_desc&,const TextureRegistry&,const BufferRegistry&,const ImmediatePipelineRegistry&,
         const StaticGeometryRegistry&,const TerrainResidency&,const radray::gpu::GpuDeviceCapabilities&);
     radray::vector<GeometryUpload>& WorldUploads() noexcept { return _worldUploads; }
     bool PrepareReadbacks(radray::gpu::Device&,FrameReadbacks&);
     bool ReserveReadbacks(radray::AsyncReadbackQueue&) const;
-    std::span<const QueryRegistry::Write> Timestamps() const { return _timestamps; }
+    std::span<const TimestampTarget> Timestamps() const { return _timestamps; }
     void Replay(radray::RDGBuilder&,FrameTextureImports&,radray::AsyncReadbackQueue&,const OutputPassResources&,const FrameTimestamps&,const FrameReadbacks&,radray::gpu::Texture* backBuffer);
 private:
     radray::vector<TerrainView> _views;
@@ -46,7 +46,7 @@ private:
     };
     void ReplayTextureBuffer(radray::RDGBuilder&,FrameTextureImports&,const FrameReadbacks&,const TextureBuffer&);
     struct Timestamp { uint32_t physicalIndex; };
-    radray::vector<QueryRegistry::Write> _timestamps;
+    radray::vector<TimestampTarget> _timestamps;
     struct Blit { Region source; };
     struct Copy { Region source,destination; };
     radray::vector<std::variant<Clear,Capture,Upload,Copy,Blit,Timestamp,WriteBuffer,CopyBuffer,TextureBuffer,radray::shared_ptr<ImmediatePass>>> _commands;

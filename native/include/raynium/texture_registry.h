@@ -26,7 +26,8 @@ struct UploadedTexture {
 };
 class TextureRegistry final {
 public:
-    bool Create(radray::DeviceContext&,const rn_uploaded_texture_desc&);
+    static bool ValidateDesc(const radray::gpu::GpuDeviceCapabilities&,const rn_uploaded_texture_desc&);
+    void Register(const rn_uploaded_texture_desc&,radray::IntrusivePtr<radray::GpuTexture>);
     struct Upload { rn_texture_upload_desc desc; radray::vector<radray::byte> bytes; };
     static bool PrepareUpload(const rn_uploaded_texture_desc&,const rn_texture_upload_desc&,Upload&);
     void Enqueue(Upload upload);
@@ -37,7 +38,6 @@ public:
 private:
     struct Pending { radray::IntrusivePtr<radray::GpuTexture> target; rn_texture_upload_desc desc; radray::vector<radray::byte> bytes; };
     radray::unordered_map<uint32_t,UploadedTexture> _textures;
-    radray::unordered_set<uint32_t> _used;
     radray::vector<Pending> _pending;
 };
 }

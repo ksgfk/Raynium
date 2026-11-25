@@ -8,8 +8,7 @@
 namespace raynium {
 void QueryDeviceInfo(radray::DeviceContext&,rn_device_info&);
 using RenderBuffer = radray::unique_ptr<radray::gpu::Buffer>;
-RenderBuffer CreateBuffer(radray::gpu::Device&, uint64_t, radray::gpu::MemoryType, radray::gpu::BufferUses,
-                          radray::gpu::ResourceHints = {});
+RenderBuffer CreateBuffer(radray::gpu::Device&, uint64_t, radray::gpu::MemoryType, radray::gpu::BufferUses);
 
 void TextureBarrier(radray::gpu::CommandBuffer&, radray::gpu::Texture*, radray::gpu::TextureStates,
                     radray::gpu::TextureStates);
@@ -19,6 +18,8 @@ class Swapchain final {
 public:
     static bool Create(radray::DeviceContext&,const rn_swapchain_desc&,radray::unique_ptr<Swapchain>&);
     bool Resize(const rn_swapchain_desc&);
+    bool IsBroken() const noexcept { return _broken; }
+    void MarkBroken() noexcept { _broken=true; }
     bool IsPresentable() const noexcept;
     bool Validate() const;
     radray::gpu::SwapChain& Chain() const noexcept { return *_chain; }
@@ -28,6 +29,7 @@ private:
     Swapchain(radray::unique_ptr<radray::gpu::SwapChain> chain,uint64_t hwnd)
         :_chain(std::move(chain)),_hwnd(hwnd) {}
     radray::unique_ptr<radray::gpu::SwapChain> _chain;
+    bool _broken{};
     uint64_t _hwnd{},_timeouts{};
 };
 

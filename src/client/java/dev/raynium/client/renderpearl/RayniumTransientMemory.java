@@ -25,7 +25,11 @@ final class RayniumTransientMemory implements TransientMemory,AutoCloseable {
     private final NativeRenderer renderer;
     private final Supplier<CommandTape> batch;
 
-    RayniumTransientMemory(NativeRenderer renderer,Supplier<CommandTape> batch) {
+    private final long hostCoherentAtomSize;
+
+    RayniumTransientMemory(NativeRenderer renderer,Supplier<CommandTape> batch,long hostCoherentAtomSize) {
+        if(hostCoherentAtomSize<1) throw new IllegalArgumentException("Invalid host coherent atom size");
+        this.hostCoherentAtomSize=hostCoherentAtomSize;
         this.renderer=renderer; this.batch=batch;
     }
     private static void validate(long size,long alignment,long minimum,long element) {
@@ -41,7 +45,7 @@ final class RayniumTransientMemory implements TransientMemory,AutoCloseable {
         validate(size,alignment,minimum,element);
         var allocator=gpu.computeIfAbsent(usage,key->new TransientBlockAllocator<>(524288,Long.highestOneBit(Long.MAX_VALUE),
             Allocator.create(bytes->new Block(renderer.createFenceRotatedBuffer(key,bytes,batch,NativeBuffer.WriteSource.TRANSIENT)),block->block.buffer().close())));
-        var a=allocator.allocate(size,alignment,minimum,element);
+        var a=allocator.allocate(size,allocationAlignment(alignment,hostCoherentAtomSize),minimum,element);
         return a.block().buffer().slice(a.offset(),a.size());
     }
     @Override public GpuBufferSlice.MappedView allocateStaging(long size,long alignment,int usage,long minimum,long element) {
@@ -54,6 +58,15 @@ final class RayniumTransientMemory implements TransientMemory,AutoCloseable {
         var view=allocateGpu(size,alignment,usage|GpuBuffer.USAGE_MAP_WRITE,minimum,element).map(false,true);
         scopedViews.add(view);
         return view;
+    }
+    private static long allocationAlignment(long alignment,long atomSize) {
+        long a=alignment,b=atomSize;
+        while(b!=0) {
+            long remainder=a%b;
+            a=b;
+            b=remainder;
+        }
+        return Math.multiplyExact(alignment/a,atomSize);
     }
     private static long align(long offset,long alignment) {
         if(alignment<=0) throw new IllegalArgumentException("Invalid alignment");

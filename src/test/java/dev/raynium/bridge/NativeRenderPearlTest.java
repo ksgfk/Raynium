@@ -417,14 +417,25 @@ class NativeRenderPearlTest {
                             assertEquals(x>=1 && x<4 && y>=1 && y<3?0xff00ff00:0xffff0000,mapped.data().getInt(4*(8*y+x)));
                     }
                 }
-                try(var p=encoder.createRenderPass(()->"restore default scissor",target,Optional.empty())) {
-                    p.setPipeline(shader); p.setVertexBuffer(0,vb.slice());
-                    p.setUniform("DynamicTransforms",cb); p.setUniform("Projection",cb);
-                    p.draw(3,1,0,0);
+                try(var oversized=device.createFenceRotatedBuffer(GpuBuffer.USAGE_VERTEX|GpuBuffer.USAGE_MAP_WRITE,
+                        (16L<<20)+48,NativeBuffer.WriteSource.TRANSIENT);
+                    var fence=encoder.createFence()) {
+                    try(var mapped=oversized.map(0,48,false,true)) {
+                        var bytes=mapped.data();
+                        for(float[] xy:new float[][]{{-1,-1},{3,-1},{-1,3}})
+                            bytes.putFloat(xy[0]).putFloat(xy[1]).putFloat(0).putInt(-1);
+                    }
+                    try(var p=encoder.createRenderPass(()->"restore default scissor",target,Optional.empty())) {
+                        p.setPipeline(shader); p.setVertexBuffer(0,oversized.slice(0,48));
+                        p.setUniform("DynamicTransforms",cb); p.setUniform("Projection",cb);
+                        p.draw(3,1,0,0);
+                    }
+                    encoder.copyTextureToBuffer(texture,read,0,()->calls.add(2),0);
+                    shader.close(); vb.close(); cb.close(); target.close(); texture.close();
+                    encoder.submit();
+                    oversized.close();
+                    assertTrue(fence.awaitCompletion(-1));
                 }
-                encoder.copyTextureToBuffer(texture,read,0,()->calls.add(2),0);
-                shader.close(); vb.close(); cb.close(); target.close(); texture.close();
-                try(var fence=encoder.createFence()) { encoder.submit(); assertTrue(fence.awaitCompletion(-1)); }
                 try(var mapped=read.slice().map(true,false)) {
                     for(int i=0;i<32;++i) assertEquals(0xff00ff00,mapped.data().getInt(i*4));
                 }

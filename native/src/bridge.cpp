@@ -55,7 +55,7 @@ static_assert(sizeof(rn_batch_telemetry)==152 && offsetof(rn_batch_telemetry,fla
               offsetof(rn_batch_telemetry,gpu_ns)==16 && offsetof(rn_batch_telemetry,wait_ns)==24 && offsetof(rn_batch_telemetry,prepare_ns)==32 &&
               offsetof(rn_batch_telemetry,rdg_ns)==40 && offsetof(rn_batch_telemetry,present_ns)==48 && offsetof(rn_batch_telemetry,metrics)==56);
 static_assert(sizeof(rn_capture_info)==32 && offsetof(rn_capture_info,byte_size)==16);
-static_assert(sizeof(rn_device_info)==592 && offsetof(rn_device_info,max_buffer_size)==488 && offsetof(rn_device_info,timestamp_period_ns)==584 && offsetof(rn_device_info,name)==40 && offsetof(rn_device_info,driver)==360);
+static_assert(sizeof(rn_device_info)==600 && offsetof(rn_device_info,host_coherent_atom_size)==592 && offsetof(rn_device_info,max_buffer_size)==488 && offsetof(rn_device_info,timestamp_period_ns)==584 && offsetof(rn_device_info,name)==40 && offsetof(rn_device_info,driver)==360);
 static_assert(sizeof(rn_uploaded_texture_desc)==32 && offsetof(rn_uploaded_texture_desc,array_layers)==24);
 static_assert(sizeof(rn_texture_upload_desc)==56 && offsetof(rn_texture_upload_desc,pixels)==32 && offsetof(rn_texture_upload_desc,byte_size)==40 && offsetof(rn_texture_upload_desc,array_layer)==48);
 static_assert(sizeof(rn_renderer_desc)==24 && offsetof(rn_renderer_desc,shader_pack)==8 && offsetof(rn_renderer_desc,shader_pack_size)==16);
@@ -107,7 +107,7 @@ template<class Action> rn_status Invoke(std::string_view operation,Action&& acti
     }
 }
 bool Owner(rn_renderer* renderer) {
-    if(!environment || !environment->IsOwnerThread() || !activeRuntime || !renderer || activeRuntime->renderer!=renderer) {
+    if(!environment || !activeRuntime || !renderer || activeRuntime->renderer!=renderer) {
         RADRAY_ERR_LOG("Invalid renderer owner or thread"); return false;
     }
     return true;
@@ -223,7 +223,7 @@ rn_status rn_create_runtime(const rn_runtime_desc* desc,rn_runtime** out_runtime
             RADRAY_ERR_LOG("Invalid rn_runtime_desc struct_size {}; expected 8 bytes",desc->struct_size); return false;
         }
         if(desc->reserved) { RADRAY_ERR_LOG("Invalid runtime reserved field: {}",desc->reserved); return false; }
-        if(!environment || !environment->IsOwnerThread()) {
+        if(!environment) {
             RADRAY_ERR_LOG("Native environment is not initialized on this thread"); return false;
         }
         if(activeRuntime) { RADRAY_ERR_LOG("Native environment already has an active runtime"); return false; }
@@ -239,7 +239,7 @@ rn_status rn_create_runtime(const rn_runtime_desc* desc,rn_runtime** out_runtime
 rn_status rn_destroy_runtime(rn_runtime* runtime) noexcept {
     if(!runtime) return RN_STATUS_OK;
     return Barrier("rn_destroy_runtime",[&] {
-        if(runtime!=activeRuntime || !environment || !environment->IsOwnerThread() || runtime->renderer) {
+        if(runtime!=activeRuntime || !environment || runtime->renderer) {
             RADRAY_ERR_LOG("Cannot destroy runtime: wrong owner/thread or live renderer");
             return false;
         }
@@ -252,7 +252,7 @@ rn_status rn_create_renderer(rn_runtime* runtime,const rn_renderer_desc* desc,rn
     if(output) *output=nullptr;
     auto* session = frontend;
     return Barrier("rn_create_renderer",[&] {
-        if(!runtime || runtime!=activeRuntime || !environment || !environment->IsOwnerThread() || runtime->renderer ||
+        if(!runtime || runtime!=activeRuntime || !environment || runtime->renderer ||
            !desc || desc->struct_size!=sizeof(*desc) || !desc->shader_pack ||
            !desc->shader_pack_size || desc->shader_pack_size>raynium::ShaderPackMaxSize || !output) {
             RADRAY_ERR_LOG("Invalid renderer descriptor or owner/shader pack"); return false;
@@ -312,13 +312,7 @@ rn_status rn_resize_swapchain(rn_swapchain* chain,const rn_swapchain_desc* desc)
         auto& frames = *chain->owner->frames;
         if(chain->owner->renderer->IsTerminal()) { frames.DeviceFailure(); return false; }
         if(desc->hwnd != chain->hwnd || !raynium::ValidSwapchainDesc(*desc)) return false;
-        bool success = false;
-        if(!chain->swapchain || frames.NeedsNewSurface()) {
-            chain->swapchain.reset();
-            success = raynium::Swapchain::Create(chain->owner->renderer->Runtime(), *desc, chain->swapchain);
-        } else success = chain->swapchain->Resize(*desc);
-        if(!success) {
-            chain->swapchain.reset();
+        if(!chain->swapchain->Resize(*desc)) {
             if(chain->owner->renderer->IsTerminal()) frames.DeviceFailure();
             else frames.SurfaceLost();
             return false;
@@ -382,9 +376,7 @@ rn_status rn_create_query_pool(rn_renderer* renderer,uint32_t count,uint32_t* id
 }
 rn_status rn_destroy_query_pool(rn_renderer* renderer,uint32_t id) noexcept {
     return Invoke("rn_destroy_query_pool",[&] {
-        if(!FrontOwner(renderer) || !renderer->frames->RemoveQueryPool(id)) return false;
-        frontend->Post([=] { renderer->renderer->DestroyQueryPool(id); });
-        return true;
+        return FrontOwner(renderer) && renderer->frames->RemoveQueryPool(id);
     });
 }
 rn_status rn_sync_query_pool(rn_renderer* renderer,uint32_t id,uint32_t first,uint32_t count,rn_query_sample* samples,rn_wait_result* result) noexcept {
@@ -413,9 +405,7 @@ rn_status rn_create_buffer(rn_renderer* renderer,const rn_buffer_desc* desc,rn_b
 }
 rn_status rn_destroy_buffer(rn_renderer* renderer,uint32_t id) noexcept {
     return Invoke("rn_destroy_buffer",[&] {
-        if(!FrontOwner(renderer) || !renderer->frames->RemoveBuffer(id)) return false;
-        frontend->Post([=]{renderer->renderer->DestroyBuffer(id);});
-        return true;
+        return FrontOwner(renderer) && renderer->frames->RemoveBuffer(id);
     });
 }
 static_assert(sizeof(rn_buffer_desc)==24 && sizeof(rn_buffer_result)==16 && sizeof(rn_mapped_range)==24);

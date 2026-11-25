@@ -9,9 +9,9 @@ public record NativeDeviceInfo(int backend,int deviceType,int vendorId,long unif
                                String name,String vendor,String driver,TransferLimits transfer,TimestampCalibration timestamps) {
     public record TransferLimits(long maxBufferSize,long maxUniformRange,long maxStorageRange,long storageAlignment,long texelAlignment,
                                  long bufferCopyAlignment,long texturePlacementAlignment,int texturePitchAlignment,int maxTexture1D,
-                                 int maxTexture3D,int maxArrayLayers,int maxVertexBindings,int maxPushConstantBytes,long maxIndirectDrawCount) {}
+                                 int maxTexture3D,int maxArrayLayers,int maxVertexBindings,int maxPushConstantBytes,long maxIndirectDrawCount,long hostCoherentAtomSize) {}
     public record TimestampCalibration(int validBits,long frequency,double tickPeriodNs) {}
-    static final int BYTE_SIZE=592;
+    static final int BYTE_SIZE=600;
     private static long capacity(MemorySegment info,long offset) {
         long value=info.get(JAVA_LONG,offset);
         return value<0?Long.MAX_VALUE:value;
@@ -23,7 +23,7 @@ public record NativeDeviceInfo(int backend,int deviceType,int vendorId,long unif
             info.asSlice(40,256).getString(0),info.asSlice(296,64).getString(0),info.asSlice(360,128).getString(0),
             new TransferLimits(capacity(info,488),capacity(info,496),capacity(info,504),info.get(JAVA_LONG,512),
                 info.get(JAVA_LONG,520),info.get(JAVA_LONG,528),info.get(JAVA_LONG,536),info.get(JAVA_INT,544),info.get(JAVA_INT,548),
-                info.get(JAVA_INT,552),info.get(JAVA_INT,556),info.get(JAVA_INT,560),info.get(JAVA_INT,564),Integer.toUnsignedLong(info.get(JAVA_INT,568))),
+                info.get(JAVA_INT,552),info.get(JAVA_INT,556),info.get(JAVA_INT,560),info.get(JAVA_INT,564),Integer.toUnsignedLong(info.get(JAVA_INT,568)),info.get(JAVA_LONG,592)),
             new TimestampCalibration(info.get(JAVA_INT,572),info.get(JAVA_LONG,576),info.get(JAVA_DOUBLE,584)));
     }
     public boolean wireframe() { return (flags&1)!=0; }

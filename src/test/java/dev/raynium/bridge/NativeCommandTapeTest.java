@@ -323,7 +323,10 @@ class NativeCommandTapeTest {
                 for (int index = 0; index < 2; ++index) {
                     var temporary = encoder.transientMemory().allocateCpu(32, 4, 32, 1);
                     temporary.putInt(0, index);
-                    try(var staging=encoder.transientMemory().allocateStaging(4,4,0,4,4)) {
+                    encoder.transientMemory().allocateStaging(5,1,0,5,1).close();
+                    try(var staging=encoder.transientMemory().allocateStaging(4,3,0,4,4)) {
+                        assertEquals(0,staging.slice().offset()%3);
+                        assertEquals(0,staging.slice().offset()%runtime.deviceInfo().transfer().hostCoherentAtomSize());
                         staging.data().putInt(0,0x12340000+index);
                         var range=staging.slice();
                         device.currentBatch().copyBuffer((NativeBuffer)range.buffer(),range.offset(),host,8L+4L*index,4);

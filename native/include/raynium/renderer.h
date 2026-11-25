@@ -13,19 +13,16 @@ struct FrameExecution {
     uint64_t sequence{};
     rn_present_outcome outcome{RN_PRESENT_NONE};
     uint32_t flags{};
-    uint64_t gpu_sequence{}, gpu_ns{}, wait_ns{}, prepare_ns{}, rdg_ns{}, present_ns{};
+    uint64_t wait_ns{}, prepare_ns{}, rdg_ns{}, present_ns{};
     rn_frame_metrics metrics{};
 };
 class Renderer final {
 public:
     ~Renderer() noexcept;
     static bool Create(radray::DeviceContext&,std::span<const radray::byte>,uint32_t flags,radray::unique_ptr<Renderer>&);
-    bool RegisterPipeline(const rn_pipeline_desc& desc,uint32_t& id) { return !IsTerminal() && _pipelines.Register(_device.GetDevice(),_pipeline->Programs(),desc,id,_device.GetPipelineCache()); }
-    bool DestroyPipeline(uint32_t id) { return _pipelines.Destroy(id); }
-    bool DestroyBuffer(uint32_t id) { return _buffers.Destroy(id); }
-    void RegisterQueryPool(uint32_t id,uint32_t count) { _queries.Register(id,count); }
-    bool DestroyQueryPool(uint32_t id) { return _queries.Destroy(id); }
-    rn_query_sample Query(uint32_t pool, uint32_t slot) const;
+    RenderProgramLibrary& Programs() { return _pipeline->Programs(); }
+    ImmediatePipelineRegistry& Pipelines() { return _pipelines; }
+    TextureRegistry& Textures() { return _uploaded; }
     ModularFramePipeline& Pipeline() { return *_pipeline; }
     BufferRegistry& Buffers() { return _buffers; }
     bool SubmitFrame(const rn_batch_desc&,Swapchain*,FrameExecution&,const std::function<void(uint64_t)>& submitted, const std::function<bool()>& collect);
@@ -34,7 +31,6 @@ public:
         return _pipeline->PrepareOutput(format,_device.GetDevice());
     }
     void Finish();
-    bool CreateTexture(const rn_uploaded_texture_desc& desc) { return _uploaded.Create(_device,desc); }
     void UploadTexture(TextureRegistry::Upload upload) { _uploaded.Enqueue(std::move(upload)); }
     bool DestroyTexture(uint32_t id) { return _uploaded.Destroy(id); }
     bool UpsertModelMesh(int32_t meshId,std::span<const radray::byte> vertices,uint32_t vertexCount,uint32_t indexCount,uint32_t& pageId) {
@@ -57,7 +53,6 @@ private:
     radray::unique_ptr<StaticGeometryRegistry> _staticGeometry;
     ModularFramePipeline* _pipeline;
     TextureRegistry _uploaded;
-    QueryRegistry _queries;
     BufferRegistry _buffers;
     ImmediatePipelineRegistry _pipelines;
     bool _poisoned{};

@@ -4,7 +4,7 @@
 
 # 互操作与加载
 
-Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 23，共有 29 个导出入口，提供窗口交换链输出、常驻模型网格注册及按请求的异步像素读回。
+Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 24，共有 29 个导出入口，提供窗口交换链输出、常驻模型网格注册及按请求的异步像素读回。
 设备、帧槽与完成序号见 [Native runtime](native-runtime.md)，操作入口见[构建与测试](../guide/build-test.md)。
 
 ## 当前 C ABI
@@ -16,7 +16,7 @@ Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 2
 
 | 结构 | Windows x64 大小 | 内容 |
 | --- | ---: | --- |
-| `rn_abi_info` / `rn_device_info` | 240 / 592 B | 构建身份与真实设备的限制、特性、时间戳标定。Java 对超出有符号范围的无符号容量做饱和转换。 |
+| `rn_abi_info` / `rn_device_info` | 240 / 600 B | 构建身份与真实设备的限制、特性和时间戳标定。末尾偏移 592 的 64 位字段 `host_coherent_atom_size` 给出主机缓存同步的原子大小。Java 对超出有符号范围的无符号容量做饱和转换。 |
 | `rn_terrain_view_desc` | 280 B | epoch、网格变更、可见项、实例、相机、变换和雾；支持 `RN_FRAME_REUSE_VISIBLE`/`RN_FRAME_REUSE_INSTANCES` 视图复用标志。批次中可以有多个视图。 |
 | `rn_mesh_update` / `rn_terrain_mesh_layout` | 32 / 72 B | 网格更新句柄、顶点指针与可选预分析布局头（每组 quad 计数、包围盒及多面组 3 位线框组号，`layout == NULL` 回退原生分析）。 |
 | `rn_batch_desc` | 96 B | 命令、传输字节、实例字节、脏映射区间、视图数组、可选的当前批 surface 和测量开关。描述符、视图头和脏区间在返回前复制。默认复制负载。设置 `RN_BATCH_BORROW_POOLED` 时，调用方须保持命令、上传数据及视图引用的数组和字节地址有效、内容不变，直至 `consumed_sequence` 达到该批序号。 |
@@ -36,7 +36,6 @@ Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 2
 ## 构建身份与 payload
 
 `native/CMakeLists.txt` 用独立 binary 目录将锁定 RadRay 作为源码子工程引入，DLL 链接上游 `RadRay::runtime` 静态库，另静态链接 `RadRay::shader` decoder；依赖传递到 render/core，导出清单由 tools/native.py 校验。
-构建时在 binary 目录对两个 RHI 翻译单元应用 `native/cmake/radray-readback.patch`，使 D3D12/Vulkan 读回映射可报告内存错误，并记录 Vulkan 新建交换链时的设备丢失。补丁参与 DLL 构建身份计算。
 Windows x86_64 的 Debug 固定 `/MTd`，Release 固定 `/MT`，bridge、RadRay 和所有链接的依赖必须匹配对应配置的 CRT。
 Debug 使用 Raynium 显式准备的独立依赖前缀，Release 使用 RadRay 的 `windows-x64-msvc-staticcrt` 三元组。默认受管源码的版本由锁文件约束，本地覆盖和 dirty 源码可用于开发；分发要求锁定版本的干净源码。
 CMake 拒绝不匹配的 CRT/依赖配置，bridge 编译期拒绝动态 CRT并断言 Debug/Release 的 STL iterator 等级分别为 2/0。
@@ -51,7 +50,7 @@ Native 运行库、工具和测试直接使用锁定 RadRay 的 `radray/types.h`
 
 stage 使用 `dumpbin /exports` 核对构建脚本列出的 ABI 入口，再用 `/dependents` 拒绝动态 CRT 和未分类的私有 DLL，收集上游许可证，并先验证完整快照再发布 `current.json`。
 schema 1 manifest 包含平台、ABI/布局、构建配置、CRT、工具链、build ID、RadRay commit/dirty、DLL/许可证大小与 SHA-256、系统依赖分类。
-ABI 23 的身份 flags 中 bit 1（static CRT）和 bit 2（mimalloc）均为 1。loader 只接受 Debug/MTd 或 Release/MT 的单 DLL 清单，拒绝错配和 MD 的 schema 2 payload。
+ABI 24 的身份 flags 中 bit 1（static CRT）和 bit 2（mimalloc）均为 1。loader 只接受 Debug/MTd 或 Release/MT 的单 DLL 清单，拒绝错配和 MD 的 schema 2 payload。
 build ID 来自 native/RadRay（含 `modules/runtime/`）源码及配置/工具链指纹；DLL SHA-256 标识实际二进制，manifest SHA-256 标识内容快照，三者用途不同。
 哈希用于一致性检查，不等于来源认证。
 
@@ -78,7 +77,7 @@ loader 的选择顺序为：显式开发目录 `-Draynium.native.dir=...`，否�
 2. 将实际 payload 发布到游戏目录下 `.raynium/natives/windows-x86_64/<content-hash>/`。
 3. 检查已有完整副本，或写入独立 staging 目录，校验后再发布；多进程使用文件锁协调解包。
 4. 客户端初始化入口检查游戏 JVM native access 权限，将规范化的绝对路径转换为 Windows 扩展路径（含 UNC），使用 `SymbolLookup.libraryLookup(String, Arena)` 加载 bridge；保留长路径前缀，避免 Path 重解析后触发 Windows 路径长度限制。
-5. 先调用版本入口核对 ABI 23，再用 `rn_query_abi` 检查布局与构建身份。
+5. 先调用版本入口核对 ABI 24，再用 `rn_query_abi` 检查布局与构建身份。
 6. 游戏后端执行 loadLibrary 时创建环境。createDevice 创建 runtime 与 renderer，createSurface 将交换链关联到 SDL 窗口。
 
 所有内容路径落在 loader 自己的根目录内，只接受固定 DLL 文件名并验证大小和哈希。已有损坏缓存直接报错，不覆盖、不删除；暂未实现旧缓存自动清理。

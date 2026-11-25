@@ -54,6 +54,8 @@ class NativeSwapchainTest {
             var window=new Window(); var runtime=environment.createRuntime()) {
             var info=runtime.deviceInfo();
             assertEquals(backend.nativeValue(),info.backend()); assertFalse(info.name().isBlank()); assertFalse(info.vendor().isBlank());
+            assertTrue(info.transfer().hostCoherentAtomSize()>=1);
+            if(backend==NativeEnvironment.Backend.D3D12) assertEquals(1,info.transfer().hostCoherentAtomSize());
             assertTrue(info.maxTextureSize()>=1920); assertTrue(info.maxColorAttachments()>=2);
             assertTrue(info.uniformOffsetAlignment()>0); assertTrue(info.maxAnisotropy()>=1);
             for(int generation=0;generation<2;generation++) {

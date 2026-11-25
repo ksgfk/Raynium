@@ -17,7 +17,7 @@ public:
     radray::RDGBufferHandle Import(radray::RDGBuilder&) const;
     void Submitted(uint64_t sequence);
     uint64_t Sequence() const { return _sequence; }
-    void Collect(uint64_t completed, radray::vector<HostBufferWrite>& output);
+    bool Collect(uint64_t completed, radray::vector<HostBufferWrite>& output);
 private:
     struct Publication {
         radray::shared_ptr<BufferEntry> target;
@@ -29,7 +29,6 @@ private:
     struct Storage {
         radray::unique_ptr<radray::gpu::Buffer> buffer;
         const radray::byte* mapped;
-        ~Storage() { buffer->Unmap(); }
     };
     radray::unique_ptr<Storage> _storage;
     radray::vector<Publication> _entries;

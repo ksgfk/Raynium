@@ -4,10 +4,9 @@
 
 namespace raynium {
 using namespace radray::gpu;
-BufferEntry::~BufferEntry() { if(upload && mapped) upload->Unmap(); }
 radray::RDGBufferHandle BufferEntry::Import(radray::RDGBuilder& graph) const {
     if(device) return graph.ImportPersistentOwned(device);
-    return graph.ImportBuffer(upload.get(),BufferState::HostWrite,BufferState::HostWrite);
+    return graph.ImportPersistentOwned(upload);
 }
 bool BufferRegistry::Valid(const rn_buffer_desc& desc,uint64_t maxSize) {
     const uint32_t uses=desc.usage & ~RN_BUFFER_CLIENT_STORAGE;
@@ -30,10 +29,11 @@ radray::shared_ptr<BufferEntry> BufferRegistry::Allocate(Device& gpu,uint32_t us
     if(uses&RN_BUFFER_INDIRECT) gpuUses|=BufferUse::Indirect|BufferUse::CopySource;
     if(uses&RN_BUFFER_MAP_READ) return entry;
     if(uses&RN_BUFFER_FENCE_ROTATED) {
-        entry->upload=gpu.CreateBuffer({.Size=size,.Memory=MemoryType::Upload,.Usage=gpuUses|BufferUse::MapWrite,
-            .Hints=ResourceHint::PersistentMap}).Release();
+        // A map-only allocation still needs a valid upload-buffer binding.
+        if(!gpuUses) gpuUses=BufferUse::CopySource;
+        entry->upload=radray::GpuUploadBuffer::Create(gpu,{size,gpuUses}).Release();
         if(!entry->upload) return {};
-        entry->mapped=static_cast<radray::byte*>(entry->upload->Map(0,size));
+        entry->mapped=entry->upload->GetMappedData();
         if(!entry->mapped) return {};
     } else {
         entry->device=radray::GpuBuffer::Create(gpu,{size,gpuUses|BufferUse::CopyDestination}).Release();
@@ -41,14 +41,15 @@ radray::shared_ptr<BufferEntry> BufferRegistry::Allocate(Device& gpu,uint32_t us
     }
     return entry;
 }
-void BufferRegistry::Register(uint32_t id,radray::shared_ptr<BufferEntry> entry,radray::vector<radray::byte> initial,bool flush) {
+bool BufferRegistry::Register(uint32_t id,radray::shared_ptr<BufferEntry> entry,radray::vector<radray::byte> initial,bool flush) {
     entry->id=id;
-    if(flush) entry->upload->FlushMappedRange({0,entry->size});
+    if(flush && !entry->upload->FlushMappedRange({0,entry->size})) return false;
     if(!initial.empty()) {
         entry->pendingInitial=true;
         _initial.push_back({entry,std::move(initial)});
     }
     _buffers.emplace(id,std::move(entry));
+    return true;
 }
 namespace {
 constexpr uint64_t kMaxPooledBuffer=16u<<20;
@@ -103,7 +104,7 @@ bool BufferRegistry::Destroy(uint32_t id) {
     _nextExpiry=std::min(_nextExpiry,_submitted+kIdleSubmissions);
     return true;
 }
-void BufferRegistry::Advance(uint64_t submitted,uint64_t completed) {
+void BufferRegistry::Advance(uint64_t submitted) {
     radray::vector<radray::shared_ptr<BufferEntry>> expired;
     std::lock_guard lock(_poolMutex);
     _submitted=submitted;
@@ -128,7 +129,9 @@ bool BufferRegistry::Flush(std::span<const rn_mapped_range> ranges) {
     for(const auto& range:ranges) {
         auto buffer=Find(range.id);
         if(!buffer || range.reserved || !buffer->Contains(range.offset,range.length)) return false;
-        if(buffer->upload) buffer->upload->FlushMappedRange({range.offset,range.length});
+        if(buffer->upload) {
+            if(!buffer->upload->FlushMappedRange({range.offset,range.length})) return false;
+        }
         else if(!(buffer->usage & RN_BUFFER_MAP_WRITE) || (buffer->usage & RN_BUFFER_COPY_DST)) return false;
     }
     return true;

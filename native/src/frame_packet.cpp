@@ -82,7 +82,7 @@ radray::unique_ptr<FramePacket> FramePacket::Create(const rn_batch_desc& input) 
     desc.dirty_ranges = Copy(arena, desc.dirty_ranges, desc.dirty_count);
     desc.flags &= ~RN_BATCH_BORROW_POOLED;
     radray::vector<uint64_t> captures;
-    radray::vector<PacketQuery> queries;
+    radray::vector<TimestampTarget> queries;
     if (!InspectCommandStream(desc, captures, queries)) return {};
     return radray::unique_ptr<FramePacket>(new FramePacket(std::move(storage), desc, std::move(captures), std::move(queries)));
 }

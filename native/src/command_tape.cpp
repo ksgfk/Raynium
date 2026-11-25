@@ -61,7 +61,7 @@ void CopyRegion(radray::RDGBuilder& graph,radray::RDGTextureHandle source,const 
 }
 }
 
-bool InspectCommandStream(const rn_batch_desc& batch, radray::vector<uint64_t>& captures, radray::vector<PacketQuery>& queries) {
+bool InspectCommandStream(const rn_batch_desc& batch, radray::vector<uint64_t>& captures, radray::vector<TimestampTarget>& queries) {
     std::span remaining(static_cast<const radray::byte*>(batch.commands), size_t(batch.command_bytes));
     bool pass = false, blit = false;
     while (!remaining.empty()) {
@@ -108,7 +108,7 @@ bool InspectCommandStream(const rn_batch_desc& batch, radray::vector<uint64_t>& 
             break;
         }
         case Opcode::WriteTimestamp: {
-            PacketQuery query{};
+            TimestampTarget query{};
             if (!Read(bytes.subspan(sizeof(h)), query)) return false;
             queries.push_back(query);
             break;
@@ -165,7 +165,7 @@ bool CommandTape::PrepareViews(const rn_batch_desc& batch,TerrainResidency& terr
     }
     return true;
 }
-bool CommandTape::Decode(const rn_batch_desc& batch,const TextureRegistry& textures,const QueryRegistry& queries,const BufferRegistry& buffers,
+bool CommandTape::Decode(const rn_batch_desc& batch,const TextureRegistry& textures,const BufferRegistry& buffers,
     const ImmediatePipelineRegistry& pipelines,const StaticGeometryRegistry& staticGeometry,const TerrainResidency& terrain,const GpuDeviceCapabilities& caps) {
     const uint32_t maxColors=caps.Limits.MaxColorAttachments;
     const bool canGeometryIndirect=caps.Features.IndirectDraw && caps.Features.IndirectFirstInstance && caps.Limits.MaxDrawIndirectCount>=2;
@@ -264,11 +264,9 @@ bool CommandTape::Decode(const rn_batch_desc& batch,const TextureRegistry& textu
         case Opcode::WriteTimestamp: {
             struct WireTimestamp { Header header; uint32_t pool,slot; } wire{};
             if(!Read(bytes,wire) || _timestamps.size()==UINT32_MAX) return false;
-            auto pool=queries.Find(wire.pool);
-            if(!pool || wire.slot>=pool->slots.size()) return false;
             if(raster) raster->WriteTimestamp(uint32_t(_timestamps.size()));
             else _commands.emplace_back(Timestamp{uint32_t(_timestamps.size())});
-            _timestamps.push_back({std::move(pool),wire.slot});
+            _timestamps.push_back({wire.pool,wire.slot});
             break;
         }
         case Opcode::WriteBufferBytes: {

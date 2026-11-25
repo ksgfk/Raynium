@@ -7,7 +7,7 @@
 #else
 #define RAYNIUM_API __declspec(dllimport)
 #endif
-#define RN_ABI_VERSION 23u
+#define RN_ABI_VERSION 24u
 
 enum rn_submit_flags : uint32_t { RN_SUBMIT_FLAG_DEVICE_LOST = 1u, RN_SUBMIT_FLAG_TERMINAL_ERROR = 2u };
 struct rn_wait_result {
@@ -97,6 +97,7 @@ struct rn_device_info {
     uint32_t max_vertex_bindings, max_push_constant_bytes, max_draw_indirect_count, timestamp_valid_bits;
     uint64_t timestamp_frequency;
     double timestamp_period_ns;
+    uint64_t host_coherent_atom_size;
 };
 enum rn_pixel_format : uint32_t {
     RN_PIXEL_RGBA8 = 0, RN_PIXEL_R8 = 1, RN_PIXEL_RGBA16F = 2, RN_PIXEL_RGBA32F = 3,

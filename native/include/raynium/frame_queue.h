@@ -29,16 +29,28 @@ public:
     bool RemoveBuffer(uint32_t id);
     void SurfaceConfigured();
     void SurfaceLost();
-    bool NeedsNewSurface();
     uint32_t Drain(std::span<rn_batch_telemetry>);
     void DeviceFailure();
 
 private:
-    struct Pending { uint64_t sequence; radray::vector<uint64_t> captures; radray::vector<PacketQuery> queries; };
+    struct PendingReadback { uint64_t sequence; radray::vector<uint64_t> captures; };
+    struct QuerySlot { uint64_t sequence{},ticks{}; bool available{}; };
     struct Capture { uint64_t sequence; rn_capture_info info{}; radray::vector<radray::byte> pixels; };
-    struct FrontBuffer { uint32_t usage; uint64_t size; radray::vector<radray::byte> host; };
+    struct FrontBuffer {
+        uint32_t usage;
+        uint64_t size;
+        // A returned mapping stays valid until explicit release, including a failed FIFO registration.
+        radray::IntrusivePtr<radray::GpuUploadBuffer> upload;
+        radray::vector<radray::byte> host;
+    };
     bool Collect(bool terminal = false);
     bool Poll();
+    bool OnSlotAvailable();
+    void PublishTelemetryLocked();
+    void TryAdvanceFrontendProgress();
+    void AdvanceFrontendLocked(uint64_t hardwareDone);
+    void RefreshCompletedLocked(uint64_t hardwareDone);
+    void SettleDeviceLoss();
     void SnapshotLocked(rn_wait_result&);
     void Present(rn_present_outcome);
     void FailInput(rn_submit_result&);
@@ -49,17 +61,18 @@ private:
     rn_wait_result _progress{};
     uint64_t _enqueued{};
     uint64_t _maxBufferSize;
-    uint32_t _nextBuffer{1}, _nextQueryPool{1};
+    uint32_t _nextBuffer{1}, _nextQueryPool{1}, _nextPipeline{1};
     bool _timestamps;
     radray::unordered_map<uint32_t,rn_uploaded_texture_desc> _textures;
     radray::unordered_set<uint32_t> _pipelines;
-    bool _queued{}, _closing{};
+    radray::unordered_set<uint32_t> _usedTextureIds;
+    bool _queued{}, _closing{}, _collectScheduled{};
     radray::unordered_map<uint64_t,Capture> _captures;
-    radray::unordered_map<uint32_t,radray::vector<QueryRegistry::Slot>> _queries;
+    radray::unordered_map<uint32_t,radray::vector<QuerySlot>> _queries;
     radray::unordered_map<uint32_t,FrontBuffer> _buffers;
     radray::vector<HostBufferWrite> _writes;
     radray::deque<rn_batch_telemetry> _telemetry;
-    // Only the worker touches pending batches and the device.
-    radray::deque<Pending> _pending;
+    // The worker owns payloads. Frontend fence sampling reads the first sequence under _mutex.
+    radray::deque<PendingReadback> _readbackBatches;
 };
 }

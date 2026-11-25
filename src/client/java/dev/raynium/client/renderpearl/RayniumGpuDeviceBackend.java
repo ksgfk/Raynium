@@ -33,7 +33,7 @@ final class RayniumGpuDeviceBackend implements GpuDeviceBackend {
         var type=switch(data.deviceType()) { case 1->DeviceType.INTEGRATED; case 2->DeviceType.DISCRETE; case 3->DeviceType.CPU; default->DeviceType.OTHER; };
         info=new DeviceInfo(data.name(),data.vendor(),data.driver(),true,"Raynium",(float)data.timestamps().tickPeriodNs(),limits,features,
             Set.of(),new HintsAndWorkarounds(false,false,false,false),type);
-        encoder=new RayniumCommandEncoderBackend(renderer);
+        encoder=new RayniumCommandEncoderBackend(renderer,caps.hostCoherentAtomSize());
     }
     @Override public RayniumGpuSurfaceBackend createSurface(long window,BooleanSupplier iconified) {
         return new RayniumGpuSurfaceBackend(renderer,window,iconified);

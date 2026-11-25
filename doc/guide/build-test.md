@@ -139,7 +139,7 @@ Debug 默认启用 RadRay RHI 检查。`rhiValidation=true`（JVM 属性 `rayniu
 D3D12 在此创建 factory 并启用调试层，早于窗口创建；createDevice 复用环境创建 runtime。
 也可通过独立 `nativeTest -PrhiValidation=true` 验证。
 启动日志中的 `Raynium native manifest=` 与 `Raynium native library loaded:` 记录内容缓存和 ABI/build ID、RadRay 身份、dirty、配置、CRT 与工具链。
-Debug CRT 为 MTd，Release 为 MT；静态分配器随 bridge 加载与卸载。当前要求 ABI 23，导出清单见 `tools/native.py`。
+Debug CRT 为 MTd，Release 为 MT；静态分配器随 bridge 加载与卸载。当前要求 ABI 24，导出清单见 `tools/native.py`。
 `Raynium runtime created` 表示设备与队列完成。GUI 和世界的实际显示须通过窗口观察；F2 使用原版文件写入保存 native 主颜色目标，全景入口通过独立尺寸离屏帧输出，纹理导出使用按子资源请求读回。
 
 ## 自动跑图与性能采样
@@ -248,12 +248,12 @@ Raynium 自身无需动态 VC++ CRT 或额外 mimalloc DLL；系统与显卡驱�
 | --- | --- |
 | `test` | 管线身份、驻留预算/稠密槽位回收与采用、地形占位与捕获、刚体模型矩阵列直读法线基向量/池化分组合批与紧凑粒子堆外直写编码（`WorldFastTrackTest`）、后端选择、路线、清单与着色器包。 |
 | `NativeAbiTest`、`NativeRuntimeTest`、`NativeShaderPackTest` | ABI 拒绝路径、设备与线程所有权、双后端包和退出顺序。 |
-| `NativeCommandTapeTest` | 离屏与上屏提交隔离、顺序复制、映射刷新、深度行距、时间戳、首次部分访问与保活。 |
-| `NativeRenderPearlTest` | 从游戏前端编译管线并绘制，验证线程交接、Push Constant、实际颜色和材质。 |
+| `NativeCommandTapeTest` | 离屏与上屏提交隔离、顺序复制、映射刷新、瞬态切片的缓存原子对齐、深度行距、时间戳、首次部分访问与保活。 |
+| `NativeRenderPearlTest` | 从游戏前端编译管线并绘制，验证线程交接、Push Constant、实际颜色和材质，以及超过复用池上限的上传缓冲在提交后立即关闭时的像素结果。 |
 | `NativeWorldFeaturesTest` | 双后端检查用户网格注册、同页实例绘制、粒子与阴影四边形、传输与实例流的独立偏移，以及共享实例切片的像素结果。 |
 | `NativeTextureTest`、`NativeCaptureTest`、`NativeSwapchainTest` | 子资源、捕获格式及缓冲容量、尺寸变更与窗口状态。 |
 | `NativeWireframeTest` | direct/indirect 实际像素、面掩码、双槽退役及跨页几何。 |
-| `vulkanSurfaceTest` | 真实 Vulkan 设备上的 WSI 恢复、设备丢失后的表面释放与交换链销毁、两批在途时的紧邻字节与查询槽发布。 |
+| `vulkanSurfaceTest` | 真实 Vulkan 设备上的 WSI 恢复、设备丢失后的表面释放与交换链销毁、两批在途时的紧邻字节与查询槽发布。门控测试在 AcquireNext 暂停时核对冷资源创建、已提交批次的 Fence 等待及后续绘制的像素。 |
 
 `test` 排除 `native` 标签，随标准 `check/build` 运行，不加载 DLL、不构建 native；FFM 缓冲测试使用 JVM native access。`nativeTest` 是标准 Gradle `Test` 任务，只包含 `native` 标签；它复用 `testClasses`，依赖 `nativeStage`，在构建/stage 完成后启动测试 JVM。依赖仍须显式准备，执行需要 Windows x64 和 D3D12/Vulkan 驱动；缺少设备或 DLL 时明确失败，不跳过。
 
@@ -267,7 +267,7 @@ cmake --build build/native/windows-x64-msvc-mtd/Debug --target test_raynium_terr
 ctest --test-dir build/native/windows-x64-msvc-mtd/Debug --output-on-failure
 ```
 
-该目标覆盖网格分组、预分析布局、显式面掩码、线框索引与跨面候选缓存，使用 CPU 设备替身检查内建网格、用户句柄复用、稳态缓冲晋升和 Direct/Indirect 对同一参数表的提交。
+该目标覆盖网格分组、预分析布局、显式面掩码、线框索引与跨面候选缓存，使用 CPU 设备替身检查内建网格、用户句柄复用、稳态缓冲晋升和 Direct/Indirect 对同一参数表的提交。缓冲注册表用例覆盖持久上传导入及映射刷新失败。
 
 通用 runtime 测试位于 RadRay 的 `modules/runtime/tests/`，由 `test_radray_runtime` / GTest 注册，
 直接链接 `RadRay::runtime`，不包含 MC bridge。在已准备依赖并完成 configure 的 RadRay checkout 执行：

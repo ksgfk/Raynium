@@ -5,9 +5,6 @@
 #include <radray/profiler.h>
 #include <radray/logger.h>
 #include <algorithm>
-#include <chrono>
-#include <cstring>
-#include <limits>
 #include <span>
 #include <utility>
 
@@ -30,20 +27,22 @@ bool ModularFramePipeline::Create(radray::DeviceContext& device,std::span<const 
         std::move(output),std::move(scene),std::move(completion),indirect));
     return true;
 }
-void ModularFramePipeline::Collect(uint64_t sequence, radray::vector<HostBufferWrite>& writes) {
-    for(auto& slot:_slots) {
-        slot.timestamps.Publish(sequence);
-        slot.readbacks.Collect(sequence,writes);
-    }
-    _completed=sequence;
+bool ModularFramePipeline::HasInFlightReadbacks(uint64_t sequence) const noexcept {
+    return std::ranges::any_of(_slots,[sequence](const auto& slot) { return slot.readbacks.Sequence()==sequence; });
 }
-
+bool ModularFramePipeline::Collect(uint64_t sequence,radray::vector<HostBufferWrite>& writes,radray::vector<PublishedTimestamp>& timestamps) {
+    for(auto& slot:_slots) {
+        if(!slot.timestamps.Collect(sequence,timestamps) || !slot.readbacks.Collect(sequence,writes)) return false;
+    }
+    return true;
+}
 void ModularFramePipeline::Finish(Device& device) {
-    while(_submitted && !device.IsDeviceLost() && !_completion->WaitFor(_submitted,1000)) {}
+    while(_submitted && !device.IsDeviceLost() && WaitFence(_submitted,1'000'000'000ull)==FenceStatus::Timeout) {}
 }
 bool ModularFramePipeline::PollCapture(uint64_t sequence,uint64_t completed,rn_capture_info& info,void* pixels,uint64_t capacity) {
     radray::ReadbackResultInfo result{};
-    if(!_readback.Poll(sequence,completed,result,static_cast<radray::byte*>(pixels),capacity)) {
+    const auto status=_readback.Poll(sequence,completed,result,static_cast<radray::byte*>(pixels),capacity);
+    if(status!=radray::ReadbackStatus::Ready && status!=radray::ReadbackStatus::Pending) {
         RADRAY_ERR_LOG("Cannot poll capture: id={} capacity={}",sequence,capacity); return false;
     }
     info={sizeof(info),result.Ready?1u:0u,result.Texture.Width,result.Texture.Height,result.PackedByteSize,uint32_t(result.PackedRowPitch),0};
@@ -85,32 +84,31 @@ void ModularFramePipeline::Wait(radray::FrameSlot& slot) noexcept {
     sequence=0;
 }
 void ModularFramePipeline::MeasureBatch(radray::FrameSlot& slot, bool enabled) {
-    RetireSlot(slot.GetIndex());
-    if(enabled) {
-        const auto seq=_submitted+1;
-        _slots[slot.GetIndex()].measuredSequence=seq;
-        _measurements.try_emplace(seq);
-    }
     SetGpuProfiling(slot,enabled?radray::RDGGpuProfilingMode::FrameOnly:radray::RDGGpuProfilingMode::Off,_submitted+1);
 }
-void ModularFramePipeline::OnGpuTimingCompleted(radray::FrameSlot&,const radray::RDGGpuTimingSnapshot& snapshot) noexcept {
-    auto it=_measurements.find(snapshot.UserSequence);
-    if(it==_measurements.end()) return;
-    it->second.report.gpu_ns=snapshot.TotalNanoseconds;
-    it->second.report.flags=RN_TELEMETRY_HAS_GPU_NS;
-}
 void ModularFramePipeline::RecordTelemetry(rn_batch_telemetry report) {
-    _measurements.at(report.sequence).report=report;
+    // The worker records CPU data before BeginFrame or WaitIdle can retire this slot.
+    _inFlightTelemetry.push_back({report});
 }
-void ModularFramePipeline::RetireSlot(uint32_t index) {
-    auto seq=std::exchange(_slots[index].measuredSequence,0);
-    if(auto it=_measurements.find(seq); it!=_measurements.end()) it->second.retired=true;
+void ModularFramePipeline::OnFrameSlotRetired(radray::FrameSlot&,const radray::RDGGpuTimingSnapshot& snapshot) noexcept {
+    for(auto& item:_inFlightTelemetry) {
+        if(item.report.sequence!=snapshot.UserSequence) continue;
+        if(snapshot.Status==radray::RDGGpuTimingStatus::Valid) {
+            item.report.gpu_ns=snapshot.TotalNanoseconds;
+            item.report.flags=RN_TELEMETRY_HAS_GPU_NS;
+        }
+        item.retired=true;
+        break;
+    }
+    while(!_inFlightTelemetry.empty() && _inFlightTelemetry.front().retired) {
+        _readyTelemetry.push_back(_inFlightTelemetry.front().report);
+        _inFlightTelemetry.pop_front();
+    }
 }
 bool ModularFramePipeline::PopTelemetry(rn_batch_telemetry& report) {
-    auto it=_measurements.begin();
-    if(it==_measurements.end() || !it->second.retired) return false;
-    report=it->second.report;
-    _measurements.erase(it);
-    return report.sequence!=0;
+    if(_readyTelemetry.empty()) return false;
+    report=_readyTelemetry.front();
+    _readyTelemetry.pop_front();
+    return true;
 }
 }

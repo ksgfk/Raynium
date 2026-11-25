@@ -19,10 +19,9 @@ bool FrameReadbacks::Reserve(const radray::shared_ptr<BufferEntry>& target,uint6
 }
 bool FrameReadbacks::Prepare(Device& device) {
     if(!_size || (_storage && _storage->buffer->GetDesc().Size>=_size)) return true;
-    auto buffer=device.CreateBuffer({.Size=_size,.Memory=MemoryType::ReadBack,.Usage=BufferUse::CopyDestination|BufferUse::MapRead,
-        .Hints=ResourceHint::PersistentMap}).Release();
+    auto buffer=device.CreateBuffer({.Size=_size,.Memory=MemoryType::ReadBack,.Usage=BufferUse::CopyDestination|BufferUse::MapRead}).Release();
     if(!buffer) return false;
-    auto* mapped=static_cast<const radray::byte*>(buffer->Map(0,_size));
+    auto* mapped=static_cast<const radray::byte*>(buffer->GetMappedData().Get());
     if(!mapped) return false;
     _storage=radray::make_unique<Storage>(std::move(buffer),mapped);
     _state=BufferState::Undefined;
@@ -35,9 +34,9 @@ void FrameReadbacks::Submitted(uint64_t sequence) {
     if(!_entries.empty()) _sequence=sequence;
     if(_size) _state=BufferState::HostRead;
 }
-void FrameReadbacks::Collect(uint64_t completed, radray::vector<HostBufferWrite>& output) {
-    if(!_sequence || _sequence>completed) return;
-    if(_size) _storage->buffer->InvalidateMappedRange({0,_size});
+bool FrameReadbacks::Collect(uint64_t completed, radray::vector<HostBufferWrite>& output) {
+    if(!_sequence || _sequence>completed) return true;
+    if(_size && !_storage->buffer->InvalidateMappedRange({0,_size})) return false;
     for(auto& entry:_entries) {
         auto& write=output.emplace_back(HostBufferWrite{entry.target->id,entry.destination,std::move(entry.bytes)});
         if(!write.bytes.empty()) continue;
@@ -50,5 +49,6 @@ void FrameReadbacks::Collect(uint64_t completed, radray::vector<HostBufferWrite>
     _entries.clear();
     _size=0;
     _sequence=0;
+    return true;
 }
 }

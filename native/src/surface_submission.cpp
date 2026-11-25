@@ -2,19 +2,17 @@
 #include <radray/logger.h>
 
 namespace raynium {
-std::optional<rn_present_outcome> ResolveSurfaceOutcome(radray::gpu::GpuBackend backend,
-    radray::gpu::SwapChainStatus status,int64_t nativeCode,int64_t acquiredCode) noexcept {
-    using namespace radray::gpu;
-    constexpr int64_t surfaceLost=-1000000000,suboptimal=1000001003;
-    const bool vulkan=backend==GpuBackend::Vulkan;
+std::optional<rn_present_outcome> ResolveSurfaceOutcome(radray::gpu::SwapChainStatus status,
+    radray::gpu::SwapChainStatus acquiredStatus) noexcept {
+    using radray::gpu::SwapChainStatus;
     switch(status) {
-    case SwapChainStatus::Success:
-        return vulkan && (nativeCode==suboptimal || acquiredCode==suboptimal)?RN_PRESENTED_SUBOPTIMAL:RN_PRESENTED;
+    case SwapChainStatus::Success: return acquiredStatus==SwapChainStatus::Suboptimal?RN_PRESENTED_SUBOPTIMAL:RN_PRESENTED;
+    case SwapChainStatus::Suboptimal: return RN_PRESENTED_SUBOPTIMAL;
     case SwapChainStatus::RequireRecreate: return RN_PRESENT_RECREATE;
     case SwapChainStatus::RetryLater: return RN_PRESENT_SKIPPED;
-    case SwapChainStatus::Error:
-        if(vulkan && nativeCode==surfaceLost) return RN_PRESENT_SURFACE_LOST;
-        return std::nullopt;
+    case SwapChainStatus::SurfaceLost: return RN_PRESENT_SURFACE_LOST;
+    case SwapChainStatus::DeviceLost:
+    case SwapChainStatus::Error: return std::nullopt;
     }
     return std::nullopt;
 }
