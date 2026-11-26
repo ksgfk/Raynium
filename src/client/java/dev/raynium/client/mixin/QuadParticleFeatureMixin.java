@@ -6,10 +6,10 @@ import com.mojang.renderpearl.api.commands.RenderPass;
 import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
 import dev.raynium.client.renderpearl.RayniumGpuDevice;
 import dev.raynium.client.world.ParticleFastTrack;
+import dev.raynium.client.world.ParticleFastTrack.PreparedLayers;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
-import java.util.Map;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.particle.SingleQuadParticle;
 import net.minecraft.client.renderer.StagedVertexBuffer;
@@ -30,19 +30,18 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(QuadParticleFeatureRenderer.class)
 abstract class QuadParticleFeatureMixin {
     @Shadow @Final private List<QuadParticleFeatureRenderer.PreparedGroup> groups;
-    @Unique private final List<@Nullable Map<SingleQuadParticle.Layer, ParticleFastTrack.CompactLayerBatch>> raynium$compactGroups = new ArrayList<>();
+    @Unique private final IdentityHashMap<SingleQuadParticle.Layer, Boolean> raynium$eligible = new IdentityHashMap<>();
+    @Unique private final List<@Nullable PreparedLayers> raynium$compactGroups = new ArrayList<>();
+    @Unique private int raynium$preparedCount;
 
     @Inject(method = "prepareGroup", at = @At("HEAD"), cancellable = true)
     private void raynium$prepareCompactParticles(FeatureFrameContext context, List<QuadParticleFeatureRenderer.Submit> submits,
             boolean strictlyOrdered, CallbackInfo ci) {
         if (submits.isEmpty()) return;
-        if (!(RenderSystem.getDevice() instanceof RayniumGpuDevice device)) {
-            raynium$compactGroups.add(null);
-            return;
-        }
+        if (!(RenderSystem.getDevice() instanceof RayniumGpuDevice device)) return;
         boolean useOit = Minecraft.getInstance().gameRenderer.useImprovedTransparency();
-        Map<SingleQuadParticle.Layer, Boolean> eligible = new IdentityHashMap<>();
-        boolean anyEligible = false;
+        var eligible = raynium$eligible;
+        eligible.clear();
         for (QuadParticleFeatureRenderer.Submit submit : submits) {
             QuadParticleRenderState particles = submit.particles();
             if (particles.isEmpty()) continue;
@@ -53,18 +52,17 @@ abstract class QuadParticleFeatureMixin {
                 eligible.merge(layer, layerOk, (a, b) -> a && b);
             }
         }
-        for (Boolean ok : eligible.values()) {
-            if (Boolean.TRUE.equals(ok)) { anyEligible = true; break; }
-        }
-        if (!anyEligible) {
-            raynium$compactGroups.add(null);
-            return;
-        }
+        if (!eligible.containsValue(Boolean.TRUE)) return;
 
         StagedVertexBuffer stagedVertexBuffer = context.stagedVertexBuffer();
-        Map<SingleQuadParticle.Layer, StagedVertexBuffer.Draw> drawByLayer = new IdentityHashMap<>();
-        Map<SingleQuadParticle.Layer, AbstractTexture> textures = new IdentityHashMap<>();
-        Map<SingleQuadParticle.Layer, ParticleFastTrack.CompactLayerBatch> compactByLayer = new IdentityHashMap<>();
+        int groupIndex = groups.size();
+        while (raynium$compactGroups.size() <= groupIndex) raynium$compactGroups.add(null);
+        var prepared = raynium$compactGroups.get(groupIndex);
+        if (prepared == null) {
+            prepared = new PreparedLayers();
+            raynium$compactGroups.set(groupIndex, prepared);
+        }
+        raynium$preparedCount = groupIndex + 1;
 
         for (QuadParticleFeatureRenderer.Submit submit : submits) {
             QuadParticleRenderState particles = submit.particles();
@@ -73,22 +71,23 @@ abstract class QuadParticleFeatureMixin {
                 if (layer.translucent() != submit.translucent()) continue;
                 AbstractTexture texture = context.textureManager().getTexture(layer.textureAtlasLocation());
                 if (Boolean.TRUE.equals(eligible.get(layer))) {
-                    ParticleFastTrack.CompactLayerBatch batch = compactByLayer.computeIfAbsent(layer, ParticleFastTrack::acquireBatch);
+                    ParticleFastTrack.CompactLayerBatch batch = prepared.compact.computeIfAbsent(layer, ParticleFastTrack::acquireBatch);
                     batch.setTexture(texture);
                     ((ParticleFastTrack.RawParticleAccess) (Object) particles).raynium$appendCompactLayer(layer, batch);
                 } else {
-                    StagedVertexBuffer.Draw draw = drawByLayer.computeIfAbsent(
-                        layer, l -> stagedVertexBuffer.appendDraw(DefaultVertexFormat.PARTICLE, PrimitiveTopology.QUADS, null)
-                    );
+                    StagedVertexBuffer.Draw draw = prepared.draws.get(layer);
+                    if (draw == null) {
+                        draw = stagedVertexBuffer.appendDraw(DefaultVertexFormat.PARTICLE, PrimitiveTopology.QUADS, null);
+                        prepared.draws.put(layer, draw);
+                    }
                     particles.buildLayer(layer, stagedVertexBuffer.getVertexBuilder(draw));
-                    textures.put(layer, texture);
+                    prepared.textures.put(layer, texture);
                     stagedVertexBuffer.requestIndexCount(draw);
                 }
             }
         }
         boolean translucent = submits.getFirst().translucent();
-        this.groups.add(new QuadParticleFeatureRenderer.PreparedGroup(drawByLayer, textures, translucent));
-        raynium$compactGroups.add(compactByLayer);
+        this.groups.add(new QuadParticleFeatureRenderer.PreparedGroup(prepared.draws, prepared.textures, translucent));
         ci.cancel();
     }
 
@@ -102,24 +101,21 @@ abstract class QuadParticleFeatureMixin {
     private void raynium$executeCompactParticles(FeatureFrameContext context, @Nullable OitStage stage,
             RenderPass renderPass, int groupIndex, List<QuadParticleFeatureRenderer.Submit> submits,
             boolean strictlyOrdered, CallbackInfo ci) {
-        if (groupIndex >= raynium$compactGroups.size()) return;
-        Map<SingleQuadParticle.Layer, ParticleFastTrack.CompactLayerBatch> compact = raynium$compactGroups.get(groupIndex);
-        if (compact == null || compact.isEmpty()) return;
-        for (ParticleFastTrack.CompactLayerBatch batch : compact.values()) {
+        if (groupIndex >= raynium$preparedCount) return;
+        var group = raynium$compactGroups.get(groupIndex);
+        if (group == null || group.compact.isEmpty()) return;
+        for (ParticleFastTrack.CompactLayerBatch batch : group.compact.values()) {
             batch.execute(renderPass, stage);
         }
     }
 
     @Inject(method = "finishExecute", at = @At("TAIL"))
     private void raynium$clearCompactGroups(FeatureFrameContext context, CallbackInfo ci) {
-        for (int i = 0; i < raynium$compactGroups.size(); ++i) {
-            Map<SingleQuadParticle.Layer, ParticleFastTrack.CompactLayerBatch> compact = raynium$compactGroups.get(i);
-            if (compact != null) {
-                for (ParticleFastTrack.CompactLayerBatch batch : compact.values()) {
-                    batch.recycle();
-                }
-            }
+        for (int i = 0; i < raynium$preparedCount; ++i) {
+            var group = raynium$compactGroups.get(i);
+            if (group != null) group.clear();
         }
-        raynium$compactGroups.clear();
+        raynium$preparedCount = 0;
+        raynium$eligible.clear();
     }
 }

@@ -23,9 +23,9 @@ final class TerrainResidency {
     }
     private final Long2ObjectOpenHashMap<SectionPayload> residentBySection=new Long2ObjectOpenHashMap<>(4096);
     final ObjectArrayList<SectionPayload> pendingRemovals=new ObjectArrayList<>();
-    private final IntArrayList candidates=new IntArrayList(1024),staged=new IntArrayList(1024);
-    private final IntArrayList freeSlots=new IntArrayList(1024);
-    private final ObjectArrayList<MeshPayload> pendingSlotAllocs=new ObjectArrayList<>();
+    private final IntArrayList candidates=new IntArrayList(1024);
+    private final ObjectArrayList<SectionPayload> staged=new ObjectArrayList<>(1024);
+    private final IntArrayList freeMeshSlots=new IntArrayList(1024),freeInstanceSlots=new IntArrayList(1024);
     private final ObjectArrayList<SectionPayload> evicting=new ObjectArrayList<>();
     private record IndexUpload(SectionPayload section,MeshPayload.IndexSnapshot snapshot) {}
     private final ObjectArrayList<IndexUpload> indexUploads=new ObjectArrayList<>();
@@ -37,7 +37,7 @@ final class TerrainResidency {
     private TerrainCapture.Buffer capture;
     private long epoch,frameId;
     private int residentCount;
-    private int nextSlotId=1;
+    private int nextMeshSlot=1,nextInstanceSlot;
     private long visibleVersion,originsVersion,instancesVersion;
     private int lastVisCount,lastInstCount;
     private int lastReuseFlags;
@@ -47,31 +47,35 @@ final class TerrainResidency {
     long uploadBytes;
 
     void reset(long epoch) {
-        for(int i=0;i<pendingSlotAllocs.size();i++) pendingSlotAllocs.get(i).slotId=0;
-        for(var section:residentBySection.values()) {
-            for(var layer:section.layers) if(layer!=null) layer.slotId=0;
-        }
+        for(var section:staged) clearSlots(section);
+        for(var section:residentBySection.values()) clearSlots(section);
+        for(var section:pendingRemovals) if(section.uploadedEpoch==this.epoch) clearSlots(section);
         residentBySection.clear(); pendingRemovals.clear(); staged.clear(); evicting.clear();
-        candidates.clear(); indexUploads.clear(); freeSlots.clear(); pendingSlotAllocs.clear();
+        candidates.clear(); indexUploads.clear(); freeMeshSlots.clear(); freeInstanceSlots.clear();
         dirtyIndicesScratch.clear();
-        capture=null; this.epoch=epoch; residentCount=0; nextSlotId=1;
+        capture=null; this.epoch=epoch; residentCount=0; nextMeshSlot=1; nextInstanceSlot=0;
         visibleVersion=0; originsVersion=0; instancesVersion=0;
         lastVisCount=0; lastInstCount=0; lastReuseFlags=0;
         hasDeferredUploads=false; lastFrameCommitted=false; uncommittedPrepare=false;
     }
-    private int allocateSlot() {
-        return freeSlots.isEmpty()?nextSlotId++:freeSlots.popInt();
+    private static void clearSlots(SectionPayload section) {
+        section.instanceSlot=-1;
+        for(var layer:section.layers) if(layer!=null) layer.slotId=0;
     }
-    private void rollbackPendingSlots() {
-        if(pendingSlotAllocs.isEmpty()) return;
-        for(int i=0;i<pendingSlotAllocs.size();i++) {
-            var layer=pendingSlotAllocs.get(i);
-            if(layer.slotId!=0) { freeSlots.push(layer.slotId); layer.slotId=0; }
+    private void releaseSlots(SectionPayload section) {
+        freeInstanceSlots.push(section.instanceSlot);
+        section.instanceSlot=-1;
+        for(var layer:section.layers) if(layer!=null && layer.slotId!=0) {
+            freeMeshSlots.push(layer.slotId);
+            layer.slotId=0;
         }
-        pendingSlotAllocs.clear();
+    }
+    private void discardStaged() {
+        for(int i=staged.size()-1;i>=0;--i) releaseSlots(staged.get(i));
+        staged.clear();
     }
     private void ensureScratchCapacity(int sectionCount) {
-        int neededInst=Math.multiplyExact(Math.max(1024,nextSlotId-1),4);
+        int neededInst=Math.multiplyExact(nextInstanceSlot,4);
         if(instScratch.length<neededInst) {
             int cap=instScratch.length;
             while(cap<neededInst) cap=Math.multiplyExact(cap,2);
@@ -110,11 +114,11 @@ final class TerrainResidency {
         if(uncommittedPrepare) {
             lastFrameCommitted=false;
         }
-        rollbackPendingSlots();
+        discardStaged();
         uncommittedPrepare=true;
         pendingAllowReuse=allowReuse;
         this.capture=capture; frameId=NativeRenderer.nextFrameId();
-        candidates.clear(); staged.clear(); evicting.clear(); indexUploads.clear();
+        candidates.clear(); evicting.clear(); indexUploads.clear();
         uploadBytes=0;
         lastReuseFlags=0;
 
@@ -143,7 +147,7 @@ final class TerrainResidency {
             }
             int maxUpdates=capture.instancesChanged?capture.updatedFadingSlots.size():0;
             frame.begin(maxUpdates,0,0,indexUploads.size(),0);
-            frame.instancePool(nextSlotId-1,baseVersion,maxUpdates);
+            frame.instancePool(nextInstanceSlot,baseVersion,maxUpdates);
             frame.terrain(albedo,lightmap,capture.anisotropy);
             emitIndexUploads(frame);
             boolean changed=false;
@@ -217,13 +221,14 @@ final class TerrainResidency {
             int entry=candidates.getInt(i); var p=payloads[entry]; var indices=indicesArr[entry];
             long bytes=p.uploadBytes(indices);
             if(uploadBytes+bytes>UPLOAD_BUDGET && (!staged.isEmpty() || uploadBytes!=0)) break;
-            staged.add(entry); p.stagedFrame=frameId;
+            staged.add(p); p.stagedFrame=frameId;
+            p.instanceSlot=freeInstanceSlots.isEmpty()?nextInstanceSlot++:freeInstanceSlots.popInt();
+            populatedInstances.clear(p.instanceSlot);
             p.sectionKey=SectionPos.asLong(originX[entry]>>4,originY[entry]>>4,originZ[entry]>>4);
             uploadBytes+=bytes;
             if(indices!=null) indexUploads.add(new IndexUpload(p,indices));
             for(var layer:p.layers) if(layer!=null) {
-                layer.slotId=allocateSlot();
-                pendingSlotAllocs.add(layer);
+                layer.slotId=freeMeshSlots.isEmpty()?nextMeshSlot++:freeMeshSlots.popInt();
                 meshes++;
                 if(layer.originalQuadGroups!=null) {
                     dataBytes+=NativeFrameBuffer.alignedBytes(layer.originalQuadGroups.length);
@@ -232,11 +237,11 @@ final class TerrainResidency {
         }
         hasDeferredUploads=staged.size()<candidates.size();
         frame.begin(count*3,pendingRemovals.size()*3,meshes,indexUploads.size(),dataBytes);
-        frame.instancePool(nextSlotId-1,baseVersion,count);
+        frame.instancePool(nextInstanceSlot,baseVersion,count);
         frame.terrain(albedo,lightmap,capture.anisotropy);
         emitIndexUploads(frame);
         for(int i=0;i<staged.size();i++) {
-            for(var layer:payloads[staged.getInt(i)].layers) if(layer!=null) {
+            for(var layer:staged.get(i).layers) if(layer!=null) {
                 frame.meshPooled(Integer.toUnsignedLong(layer.slotId),layer);
             }
         }
@@ -266,7 +271,7 @@ final class TerrainResidency {
             p.lastActiveFrame=frameId;
             if(mask==0) { secToInst[i]=-1; continue; }
             var layers=p.layers;
-            int instance=(layers[0]!=null?layers[0]:layers[1]!=null?layers[1]:layers[2]).slotId-1;
+            int instance=p.instanceSlot;
             int instOff=instance*4;
             ++instCount;
             secToInst[i]=instance;
@@ -355,32 +360,23 @@ final class TerrainResidency {
         var preparedCapture=capture;
         long preparedEpoch=epoch;
         var undo=new ObjectArrayList<Runnable>();
-        if(!pendingSlotAllocs.isEmpty()) {
-            var allocated=new ObjectArrayList<>(pendingSlotAllocs);
-            undo.add(()->{
-                for(int i=allocated.size()-1;i>=0;--i) {
-                    var layer=allocated.get(i);
-                    freeSlots.push(layer.slotId);
-                    layer.slotId=0;
-                }
-            });
-        }
         uncommittedPrepare=false;
         lastFrameCommitted=pendingAllowReuse;
-        pendingSlotAllocs.clear();
         ObjectArrayList<MeshPayload> uploaded=staged.isEmpty()?null:new ObjectArrayList<>(staged.size()*2);
         for(int i=0;i<staged.size();i++) {
-            var p=capture.payloads[staged.getInt(i)];
+            var p=staged.get(i);
             long previousEpoch=p.uploadedEpoch;
             var previous=residentBySection.put(p.sectionKey,p);
             p.uploadedEpoch=epoch; residentCount++;
             undo.add(()->{
+                releaseSlots(p);
                 p.uploadedEpoch=previousEpoch;
                 if(previous==null) residentBySection.remove(p.sectionKey); else residentBySection.put(p.sectionKey,previous);
                 --residentCount;
             });
             for(var layer:p.layers) if(layer!=null) uploaded.add(layer);
         }
+        staged.clear();
         ObjectArrayList<MeshPayload.IndexSnapshot> uploadedIdx=indexUploads.isEmpty()?null:new ObjectArrayList<>(indexUploads.size());
         for(int i=0;i<indexUploads.size();i++) {
             var update=indexUploads.get(i);
@@ -394,12 +390,15 @@ final class TerrainResidency {
             var p=evicting.get(i);
             var previousIndices=p.uploadedIndices;
             var previousResident=residentBySection.get(p.sectionKey);
+            int instanceSlot=p.instanceSlot;
             int[] slots=new int[p.layers.length];
             for(int j=0;j<slots.length;++j) if(p.layers[j]!=null) slots[j]=p.layers[j].slotId;
             undo.add(()->{
                 p.uploadedEpoch=preparedEpoch; p.uploadedIndices=previousIndices;
+                if(!freeInstanceSlots.rem(instanceSlot)) throw new IllegalStateException("Evicted terrain instance slot is no longer free");
+                p.instanceSlot=instanceSlot;
                 for(int j=slots.length-1;j>=0;--j) if(slots[j]!=0) {
-                    if(!freeSlots.rem(slots[j])) throw new IllegalStateException("Evicted terrain slot is no longer free");
+                    if(!freeMeshSlots.rem(slots[j])) throw new IllegalStateException("Evicted terrain mesh slot is no longer free");
                     p.layers[j].slotId=slots[j];
                 }
                 if(previousResident!=null) residentBySection.put(p.sectionKey,previousResident);
@@ -407,10 +406,7 @@ final class TerrainResidency {
                 if(!pendingRemovals.contains(p)) pendingRemovals.add(p);
             });
             p.uploadedEpoch=0; p.uploadedIndices=null;
-            for(var layer:p.layers) if(layer!=null && layer.slotId!=0) {
-                freeSlots.push(layer.slotId);
-                layer.slotId=0;
-            }
+            releaseSlots(p);
             if(residentBySection.get(p.sectionKey)==p) residentBySection.remove(p.sectionKey);
             residentCount--;
         }
@@ -421,6 +417,7 @@ final class TerrainResidency {
         }
         Runnable rollback=()->{
             if(epoch!=preparedEpoch) return;
+            discardStaged();
             for(int i=undo.size()-1;i>=0;--i) undo.get(i).run();
             lastFrameCommitted=false;
             if(preparedCapture!=null) preparedCapture.checkedResidencyEpoch=0;

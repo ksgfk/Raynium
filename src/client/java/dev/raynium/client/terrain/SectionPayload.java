@@ -6,6 +6,7 @@ public final class SectionPayload {
     public final MeshPayload[] layers;
     public final long vertexBytes;
     public long uploadedEpoch,stagedFrame,lastActiveFrame,sectionKey,dirtyIndexFrame;
+    int instanceSlot=-1;
     int capturedSlot=-1;
     MeshPayload.IndexSnapshot uploadedIndices;
     public SectionPayload(long epoch,MeshPayload... layers) {

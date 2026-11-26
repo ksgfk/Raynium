@@ -31,10 +31,7 @@ radray::RDGBufferHandle TerrainView::Constants(radray::RDGBuilder& graph,uint32_
 
 void TerrainView::Import(radray::RDGBuilder& graph,GpuBackend gpuBackend) {
     backend=gpuBackend;
-    for(auto& upload:uploads) {
-        auto h=graph.ImportPersistentOwned(upload.target);
-        graph.UploadBuffer(h,upload.offset,std::move(upload.source)); graph.MarkOutput(h);
-    }
+    for(auto& upload:uploads) upload.Import(graph);
     uploads.clear();
     if(!draws || !draws->hasAnyDraws) return;
     const auto import=[&](const radray::IntrusivePtr<radray::GpuBuffer>& buffer,bool upload,

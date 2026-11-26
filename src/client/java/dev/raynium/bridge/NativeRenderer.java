@@ -21,6 +21,21 @@ public final class NativeRenderer implements AutoCloseable {
         public int outcome() { return progress.outcome(); }
     }
     public record WaitResult(long completedSequence,boolean success,boolean deviceLost) {}
+    /** Owner-thread lease on one native submission result, including across reentrant callbacks. */
+    public final class PendingSubmit implements AutoCloseable {
+        private final MemorySegment result=MemorySegment.ofArray(new long[NativeBindings.SUBMIT_BYTES/Long.BYTES]);
+        private boolean success,leased;
+        private PendingSubmit() {}
+        public long sequence() { return result.get(JAVA_LONG,0); }
+        public boolean success() { return success; }
+        public SubmitResult snapshot() { return new SubmitResult(sequence(),success,Progress.read(result,8)); }
+        public void publish() { syncWorkerState(result,8); }
+        @Override public void close() {
+            if(!leased) return;
+            leased=false;
+            if(!isClosed()) freeSubmits.addFirst(this);
+        }
+    }
     public static class Frame {
         public long epoch=1, outputSequence;
         public int flags;
@@ -38,6 +53,7 @@ public final class NativeRenderer implements AutoCloseable {
     private int surfaceGeneration,recovery;
     private java.util.function.IntConsumer updateRecovery;
     private final ArrayDeque<InFlightBatch> inFlightBatches=new ArrayDeque<>(),freeBatches=new ArrayDeque<>();
+    private final ArrayDeque<PendingSubmit> freeSubmits=new ArrayDeque<>();
     private long consumedSequence,submittedSequence;
     private boolean dispatching;
     private int terminalFlags;
@@ -45,6 +61,11 @@ public final class NativeRenderer implements AutoCloseable {
         long sequence;
         Runnable release,fail;
         List<Runnable> submitted,completed,recyclers;
+        BatchCallbacks pooled=new BatchCallbacks();
+    }
+    public static final class BatchCallbacks {
+        public final ArrayList<Runnable> submitted=new ArrayList<>(),completed=new ArrayList<>(),recyclers=new ArrayList<>();
+        public void clear() { submitted.clear(); completed.clear(); recyclers.clear(); }
     }
 
     private Runnable releaseAcquiredSurface;
@@ -216,12 +237,23 @@ public final class NativeRenderer implements AutoCloseable {
     }
     void trackWritable(NativeBuffer buffer) { writableBuffers.add(buffer); }
     public void trackBatch(long sequence,List<Runnable> submitted,List<Runnable> completed,List<Runnable> recyclers,Runnable release,Runnable fail) {
+        enqueueBatch(sequence,submitted,completed,recyclers,release,fail);
+    }
+    /** Transfers these lists to the in-flight batch and returns empty lists for the next recording. */
+    public BatchCallbacks trackBatch(long sequence,BatchCallbacks callbacks,Runnable release,Runnable fail) {
+        var batch=enqueueBatch(sequence,callbacks.submitted,callbacks.completed,callbacks.recyclers,release,fail);
+        var empty=batch.pooled;
+        batch.pooled=callbacks;
+        return empty;
+    }
+    private InFlightBatch enqueueBatch(long sequence,List<Runnable> submitted,List<Runnable> completed,List<Runnable> recyclers,Runnable release,Runnable fail) {
         var batch=freeBatches.pollFirst();
         if(batch==null) batch=new InFlightBatch();
         batch.sequence=sequence;
         batch.release=release; batch.fail=fail;
         batch.submitted=submitted; batch.completed=completed; batch.recyclers=recyclers;
         inFlightBatches.addLast(batch);
+        return batch;
     }
     private static Throwable collectFailure(Throwable first,Throwable next) {
         if(first==null) return next;
@@ -238,19 +270,26 @@ public final class NativeRenderer implements AutoCloseable {
         return failure;
     }
     public void syncWorkerState(Progress p) {
+        syncWorkerState(p.consumed(),p.submitted(),p.completed(),p.presented(),p.generation(),p.recovery(),p.flags());
+    }
+    private void syncWorkerState(MemorySegment snapshot,long offset) {
+        syncWorkerState(snapshot.get(JAVA_LONG,offset),snapshot.get(JAVA_LONG,offset+8),snapshot.get(JAVA_LONG,offset+16),
+            snapshot.get(JAVA_LONG,offset+24),snapshot.get(JAVA_INT,offset+32),snapshot.get(JAVA_INT,offset+36),snapshot.get(JAVA_INT,offset+44));
+    }
+    private void syncWorkerState(long consumed,long submitted,long completed,long presented,int generation,int reportedRecovery,int flags) {
         if(poisoned) return;
-        terminalFlags|=p.flags();
+        terminalFlags|=flags;
         terminalSettling=terminalFlags!=0;
-        consumedSequence=Math.max(consumedSequence,p.consumed());
-        submittedSequence=Math.max(submittedSequence,p.submitted());
-        completedSequence=Math.max(completedSequence,p.completed());
-        if(p.generation()==surfaceGeneration && p.recovery()!=0 && p.recovery()!=recovery) {
-            recovery=p.recovery();
+        consumedSequence=Math.max(consumedSequence,consumed);
+        submittedSequence=Math.max(submittedSequence,submitted);
+        completedSequence=Math.max(completedSequence,completed);
+        if(generation==surfaceGeneration && reportedRecovery!=0 && reportedRecovery!=recovery) {
+            recovery=reportedRecovery;
             if(updateRecovery!=null) updateRecovery.accept(recovery);
         }
-        if(p.presented()>observedPresented) {
-            dev.raynium.client.benchmark.BenchmarkSession.nativeFrames(p.presented()-observedPresented);
-            observedPresented=p.presented();
+        if(presented>observedPresented) {
+            dev.raynium.client.benchmark.BenchmarkSession.nativeFrames(presented-observedPresented);
+            observedPresented=presented;
         }
         if(dispatching) return;
         dispatching=true;
@@ -278,6 +317,7 @@ public final class NativeRenderer implements AutoCloseable {
                     if(ready.sequence<=completedSequence) failure=runAll(ready.completed,failure);
                     else failure=run(ready.fail,failure);
                     failure=runAll(ready.recyclers,failure);
+                    ready.pooled.clear();
                     ready.submitted=ready.completed=ready.recyclers=null;
                     ready.fail=null;
                     freeBatches.addFirst(ready);
@@ -296,7 +336,7 @@ public final class NativeRenderer implements AutoCloseable {
         if(failure instanceof RuntimeException e) throw e;
         if(failure!=null) throw new IllegalStateException("Completion callback failed",failure);
     }
-    public void pollCompleted() { waitSubmit(0,0); }
+    public void pollCompleted() { waitSubmit(0,0,false); }
     public long createQueryPool(int count) {
         checkOpen();
         if(count<=0) throw new IllegalArgumentException("Query pool must have a positive size");
@@ -317,7 +357,7 @@ public final class NativeRenderer implements AutoCloseable {
             var result=waitResult;
             int status=(int)bindings.syncQueryPool.invokeExact(handle,id,first,count,samples,result);
             if(status!=0) throw new IllegalStateException("Invalid query pool or range");
-            syncWorkerState(Progress.read(result,0));
+            syncWorkerState(result,0);
         } catch(RuntimeException | Error failure) { throw failure; }
         catch(Throwable failure) { throw new IllegalStateException("Cannot sync query pool",failure); }
     }
@@ -335,8 +375,18 @@ public final class NativeRenderer implements AutoCloseable {
     public SubmitResult submitFrame(MemorySegment commands,MemorySegment uploads,MemorySegment instanceUploads,NativeSwapchain surface,
             List<MemorySegment> views,boolean measure,dev.raynium.client.renderpearl.CommandTape.BorrowPermit permit,
             MemorySegment captures,MemorySegment queries) {
+        try(var batch=enqueueFrame(commands,uploads,instanceUploads,surface,views,measure,permit,captures,queries)) {
+            return batch.snapshot();
+        }
+    }
+    public PendingSubmit enqueueFrame(MemorySegment commands,MemorySegment uploads,MemorySegment instanceUploads,NativeSwapchain surface,
+            List<MemorySegment> views,boolean measure,dev.raynium.client.renderpearl.CommandTape.BorrowPermit permit,
+            MemorySegment captures,MemorySegment queries) {
         checkOpen();
         if(surface!=null && surface!=swapchain) throw new IllegalArgumentException("Invalid submit surface");
+        var batch=freeSubmits.pollFirst();
+        if(batch==null) batch=new PendingSubmit();
+        batch.leased=true;
         try {
             var desc=batchDesc;
             desc.set(JAVA_INT,0,NativeBindings.BATCH_BYTES); desc.set(JAVA_INT,4,(measure?1:0)|(permit!=null?2:0));
@@ -359,20 +409,20 @@ public final class NativeRenderer implements AutoCloseable {
             long at=0;
             for(int i=0;i<writableBuffers.size();i++) at=writableBuffers.get(i).encodeRanges(dirty,at);
             desc.set(ADDRESS,64,dirty); desc.set(JAVA_INT,72,count);
-            var result=submitResult;
-            int status=(int)bindings.submitFrame.invokeExact(handle,desc,result);
-            var batch=new SubmitResult(result.get(JAVA_LONG,0),status==0,Progress.read(result,8));
+            int status=(int)bindings.submitFrame.invokeExact(handle,desc,submitResult);
+            batch.result.copyFrom(submitResult);
+            batch.success=status==0;
             if(batch.sequence()>0) {
                 if(measure) writableBuffers.forEach(NativeBuffer::measureWrites);
                 writableBuffers.removeIf(NativeBuffer::afterSubmit);
             }
             return batch;
-        } catch(RuntimeException | Error failure) { throw failure; }
-        catch(Throwable failure) { throw new IllegalStateException("Cannot submit command tape",failure); }
+        } catch(RuntimeException | Error failure) { batch.close(); throw failure; }
+        catch(Throwable failure) { batch.close(); throw new IllegalStateException("Cannot submit command tape",failure); }
     }
     public boolean awaitSubmission(long sequence,long timeoutNs) {
         checkOpen();
-        if(completedSequence<sequence) waitSubmit(sequence,timeoutNs);
+        if(completedSequence<sequence) waitSubmit(sequence,timeoutNs,false);
         return completedSequence>=sequence;
     }
     public void onSurface(Runnable reset,java.util.function.IntConsumer receiver) {
@@ -383,10 +433,10 @@ public final class NativeRenderer implements AutoCloseable {
         checkOpen();
         try {
             int status=(int)bindings.flushRenderer.invokeExact(handle,waitResult);
-            var progress=Progress.read(waitResult,0);
-            syncWorkerState(progress);
+            int outcome=waitResult.get(JAVA_INT,40);
+            syncWorkerState(waitResult,0);
             if(status!=0) throw new IllegalStateException("Renderer flush failed");
-            return progress.outcome();
+            return outcome;
         } catch(RuntimeException | Error e) { throw e; }
         catch(Throwable e) { throw new IllegalStateException("Cannot flush renderer",e); }
     }
@@ -400,16 +450,18 @@ public final class NativeRenderer implements AutoCloseable {
         } while(count==TELEMETRY_CAPACITY);
     }
     public WaitResult waitSubmit(long sequence,long timeoutNs) {
+        return waitSubmit(sequence,timeoutNs,true);
+    }
+    private WaitResult waitSubmit(long sequence,long timeoutNs,boolean returnSnapshot) {
         checkOpen();
         if(sequence<0) throw new IllegalArgumentException("Negative submission sequence");
         try {
             var result=waitResult;
             long start=dev.raynium.client.benchmark.BenchmarkSession.syncWaitStart();
             int status=(int)bindings.waitSubmit.invokeExact(handle,sequence,timeoutNs,result);
-            var p=Progress.read(result,0);
-            var wait=new WaitResult(p.completed(),status==0,(p.flags()&1)!=0);
+            var wait=returnSnapshot?new WaitResult(result.get(JAVA_LONG,16),status==0,(result.get(JAVA_INT,44)&1)!=0):null;
             if(start!=0) dev.raynium.client.benchmark.BenchmarkSession.syncWaitEnd(start);
-            syncWorkerState(p);
+            syncWorkerState(result,0);
             return wait;
         } catch(RuntimeException | Error failure) { throw failure; }
         catch(Throwable failure) { throw new IllegalStateException("Cannot wait for renderer submission",failure); }
@@ -430,7 +482,7 @@ public final class NativeRenderer implements AutoCloseable {
             for(var buffer:buffers) buffer.endRenderer();
             buffers.clear(); writableBuffers.clear();
             viewRecords.close(); dirtyRanges.close(); scratch.close();
-            freeBatches.clear();
+            freeBatches.clear(); freeSubmits.clear();
             owner.releasedRenderer(this);
         }
     }

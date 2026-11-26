@@ -439,6 +439,28 @@ bool TerrainResidency::ValidateAndSyncHotSlot(uint32_t slotId) {
     return true;
 }
 
+void GeometryUpload::Import(radray::RDGBuilder& graph) {
+    const auto dst=graph.ImportPersistentOwned(target);
+    if(copyRanges.empty()) {
+        graph.UploadBuffer(dst,offset,std::move(source));
+    } else {
+        const auto size=source.GetMaxSize();
+        const auto src=graph.CreateDynamicBuffer({.MaxSize=size,.Usage=BufferUse::CopySource,.Alignment=alignof(rn_instance)},std::move(source));
+        struct Copies { radray::RDGBufferHandle src,dst; std::span<const BufferRange> ranges; };
+        graph.AddCopyPass("Raynium terrain instance copies",Copies{src,dst,copyRanges},
+            +[](const Copies& copies,radray::RDGCopyPassContext& ctx) noexcept {
+                const auto from=ctx.ResolveBuffer(copies.src),to=ctx.ResolveBuffer(copies.dst);
+                auto srcOffset=from.Offset;
+                for(const auto& range:copies.ranges) {
+                    ctx.GetCommandBuffer().CopyBufferToBuffer(to.Buffer.Get(),to.Offset+range.Offset,from.Buffer.Get(),srcOffset,range.Size);
+                    srcOffset+=range.Size;
+                }
+                return true;
+            }).ReadBuffer(src).WriteBuffer(dst);
+    }
+    graph.MarkOutput(dst);
+}
+
 namespace {
 bool UpdateInstancePool(const rn_terrain_view_desc& view,TerrainViewCacheSlot& cache,SlotUploads slot) {
     const bool reset=view.instance_base_version==0;
@@ -475,25 +497,49 @@ bool UpdateInstancePool(const rn_terrain_view_desc& view,TerrainViewCacheSlot& c
         if(!buffer) { RADRAY_ERR_LOG("Cannot allocate terrain instance pool"); return false; }
         cache.instancePool=buffer.Release();
     }
-    const auto upload=[&](size_t first,size_t count) {
-        const auto offset=first*sizeof(rn_instance);
-        slot.geometry.push_back({cache.instancePool,offset,
-            radray::RDGUploadSource::BorrowedBytes(bytes.subspan(offset,count*sizeof(rn_instance)))});
+    const auto upload=[&](BufferRange range) {
+        slot.geometry.push_back({cache.instancePool,range.Offset,
+            radray::RDGUploadSource::BorrowedBytes(bytes.subspan(range.Offset,range.Size))});
     };
     if(reset || grow || ids.size()>cache.instances.size()/2) {
-        upload(0,cache.instances.size());
+        upload({0,bytes.size()});
         return true;
     }
-    if(previousSize<cache.instances.size()) upload(previousSize,cache.instances.size()-previousSize);
-    if(ids.empty()) return true;
-    std::pmr::vector<uint32_t> sorted(&slot.frame.GetScratchMemoryResource());
+    if(ids.empty() && previousSize==cache.instances.size()) return true;
+    auto& scratch=slot.frame.GetScratchMemoryResource();
+    std::pmr::vector<uint32_t> sorted(&scratch);
     sorted.reserve(ids.size());
     for(auto id:ids) if(id<previousSize) sorted.push_back(id);
     std::sort(sorted.begin(),sorted.end());
-    for(size_t i=0;i<sorted.size();) {
-        uint32_t first=sorted[i++],last=first;
-        while(i<sorted.size() && sorted[i]<=last+1) last=sorted[i++];
-        upload(first,last-first+1);
+    std::pmr::vector<BufferRange> ranges(&scratch);
+    const auto append=[&](size_t first,size_t end) {
+        const size_t beginByte=first*sizeof(rn_instance),endByte=end*sizeof(rn_instance);
+        constexpr size_t maxGapBytes=64;
+        if(!ranges.empty() && beginByte<=ranges.back().Offset+ranges.back().Size+maxGapBytes) {
+            ranges.back().Size=endByte-ranges.back().Offset;
+        } else {
+            ranges.push_back({beginByte,endByte-beginByte});
+        }
+    };
+    for(auto id:sorted) append(id,id+1);
+    if(previousSize<cache.instances.size()) append(previousSize,cache.instances.size());
+    if(ranges.size()==1) {
+        upload(ranges.front());
+    } else {
+        const auto copies=FreezeFrameArray(slot.frame.GetMemoryResource(),ranges);
+        size_t packedSize=0;
+        for(const auto& range:copies) packedSize+=range.Size;
+        struct Source { std::span<const radray::byte> mirror; std::span<const BufferRange> ranges; };
+        auto source=radray::RDGUploadSource::Generated(packedSize,Source{bytes,copies},
+            +[](const Source& source,radray::RDGUploadWriteContext& ctx) noexcept {
+                auto* out=ctx.Bytes.data();
+                for(const auto& range:source.ranges) {
+                    std::memcpy(out,source.mirror.data()+range.Offset,range.Size);
+                    out+=range.Size;
+                }
+                return true;
+            });
+        slot.geometry.push_back({cache.instancePool,0,std::move(source),copies});
     }
     return true;
 }

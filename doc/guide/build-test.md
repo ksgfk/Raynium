@@ -156,12 +156,17 @@ python tools/benchmark.py --config tools/benchmark.example.json --profiler --tra
 默认视距 32、模拟距离 8、窗口 1280×720、预热 20 秒；optionsFile 的视距、窗口尺寸及垂直同步由配置覆盖。terrainSubmission 默认 auto。route 包含秒数、位置和朝向；commands、screen 和 oit 描述测试场景。playerMode 默认为 spectator，也可选择 creative 或 survival；GUI 人物预览可使用 survival，避免旁观角色的隐藏模型语义。
 
 `tools/validation/create_benchmark_scenes.py --world <存档> --options <选项文件> --output <构建目录>` 生成实体密集、粒子与透明密集、GUI/画中画的三种 renderer 配置。请使用测试专用存档，重复布景会清理平台上的方块以及已加载且带有 raynium_bench 标签的实体。正式输入使用 1920×1080、32 区块、60 秒预热和 240 秒路线。`--smoke` 将预热与路线缩短到 2/8 秒，仅用于检查驱动和场景，不能作为性能验收结果。
-城市存档的航线与相机坐标见 [Metcalf](../../tools/benchmarks/metcalf-stress.json)、[Tideworn](../../tools/benchmarks/tideworn-stress.json) 和 [Newisle](../../tools/benchmarks/newisle-stress.json)。使用主采样参数时显式传入 `--no-profiler --no-jfr`。
 
 产物位于 outputDir 的独立时间目录，包含配置、构建/游戏日志、client-result.json、summary.json、frames.csv 与 gpu.csv；native 运行另保存 payload 清单，诊断按开关保存 session.tracy/session.jfr。脚本检查路线完成和资源关闭；诊断额外检查采集器退出和文件保存。
 `frames.csv` 的 native 指标按本世界帧的实际批次汇总，包括上传字节、驻留几何记录与绘制、即时绘制和绑定数。即时绘制含 GUI 和后处理；独立的旧 GUI 计数列保留为零。原版缺少的 native 指标为 -1。`javaPrepareNs` 计量提交前封存瞬态内存的时间，`nativeCallNs` 计量 Java 进入命令带提交到该方法返回的时间。`nativeSyncWaitNs` 汇总同一测量帧内显式等待和轮询 `rn_wait_submit` 的墙钟时间，单位为纳秒。原版帧记为 -1。`renderWallNs` 涵盖整帧渲染。几何池容量和 Windows 进程显存分别采样。
 客户端以固定容量的原始数组记录测量区间，结束后写文件及计算最近秩 p50/p95/p99。clientFrameInterval 包括两次帧入口之间的客户端工作，renderWall 是 renderFrame 的 CPU 侧墙钟时间；它包含等待，不等于线程忙碌时间。Windows 线程 CPU 计数粒度较粗，只报告总量并保留原始列。native 另返回槽等待、资源准备、RDG RunFrame 和呈现时间；RDG RunFrame 包含建图、准备、录制及提交，不与参考 renderer 的不同职责阶段直接等同。
 GPU 样本均在完成后读取：native 按批测量并在上屏边界汇总，参考使用原版 TimerQuery 并保留实际样本数量，不重复其滑动平均值。进程内存由 Windows 进程计数器轮询，summary 保存峰值工作集、提交量和采样私有内存；GPU Process Memory 计数器按客户端 PID 汇总适配器的专用、共享和提交量采样峰值，同时保存有效样本数；不可用时记录原因，不用零代替。它们是操作系统进程计数，与 native 几何池预留/已分配容量分别报告。客户端保存区间分配量及 GC 次数/时间。普通游戏帧不开启这些测量。
+
+### 真实跑图环境预设
+
+每组对照必须通过目录联接依次使用同一份原存档。上场结束时的天气和世界时钟会随存档保留，每场都须在 `commands` 中显式指定天气和时刻、关闭自然天气和昼夜推进，再开始预热。新增路线、派生后端配置及重复采样均须保留同一组环境预设。专门测量雨天等场景时，各场统一使用该场景的目标天气。
+
+三张主世界城市地图均固定晴天和 6000 tick（正午）。MC 26.3 使用 `gamerule advance_weather false` 和 `gamerule advance_time false`。重复设置相同规则值或相同绝对时刻会触发命令错误，配置先查询规则、按条件设置，并在主世界时钟偏离 6000 时执行 `time set 6000`。可直接沿用以下配置中的 `commands` 和航线。主采样显式传入 `--no-profiler --no-jfr`。[Metcalf](../../tools/benchmarks/metcalf-stress.json) · [Tideworn](../../tools/benchmarks/tideworn-stress.json) · [Newisle](../../tools/benchmarks/newisle-stress.json)
 
 ## Tracy 与整段客户端采样
 

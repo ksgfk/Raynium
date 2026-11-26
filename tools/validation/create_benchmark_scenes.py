@@ -22,11 +22,18 @@ def main():
                 captureTimeoutSeconds=240, terrainSubmission='auto', clearBenchmarkEntities=True, profilerEnabled=False, jfrEnabled=False,
                 route=[point(0), point(duration/4, x=-12, yaw=155), point(duration/2, x=12, yaw=-155), point(duration, pitch=10)])
     # Seed each fill with one changed block so rerunning the fixture also succeeds.
-    commands = ['weather clear', 'time set 6000',
-                'setblock 0 185 0 minecraft:barrier',
-                'fill -24 180 -24 24 185 24 minecraft:air strict',
-                'setblock -24 179 -24 minecraft:barrier',
-                'fill -24 179 -24 24 179 24 minecraft:smooth_stone', 'tick unfreeze']
+    commands = [
+        'execute store result storage raynium:benchmark rule int 1 run gamerule advance_weather',
+        'execute if data storage raynium:benchmark {rule:1} run gamerule advance_weather false',
+        'weather clear',
+        'execute store result storage raynium:benchmark rule int 1 run gamerule advance_time',
+        'execute if data storage raynium:benchmark {rule:1} run gamerule advance_time false',
+        'data remove storage raynium:benchmark rule',
+        'execute unless predicate {type:"minecraft:time_check",clock:"minecraft:overworld",value:6000} run time set 6000',
+        'setblock 0 185 0 minecraft:barrier',
+        'fill -24 180 -24 24 185 24 minecraft:air strict',
+        'setblock -24 179 -24 minecraft:barrier',
+        'fill -24 179 -24 24 179 24 minecraft:smooth_stone', 'tick unfreeze']
     entities = commands.copy()
     kinds = ['armor_stand', 'zombie', 'cow', 'sheep', 'slime', 'creeper', 'enderman', 'spider']
     for n in range(128):

@@ -83,6 +83,9 @@ struct GeometryUpload {
     radray::IntrusivePtr<radray::GpuBuffer> target;
     uint64_t offset{};
     radray::RDGUploadSource source;
+    // When present, the packed source fills these destination ranges in order.
+    std::span<const radray::gpu::BufferRange> copyRanges{};
+    void Import(radray::RDGBuilder& graph);
 };
 
 struct TerrainLayerDrawData {

@@ -79,6 +79,7 @@ class TerrainResidencyTest {
             var transition=residency.stageCommit();
             transition.rollback().run();
             assertEquals(0,b.layers[0].slotId);
+            assertEquals(-1,b.instanceSlot);
             assertEquals(0,c.checkedResidencyEpoch);
             assertEquals(epoch,a.uploadedEpoch);
             residency.prepare(c,frame,16,17,true);
@@ -155,6 +156,7 @@ class TerrainResidencyTest {
             assertFalse(p.layers[0].hasVertices());
             long nextEpoch=NativeRenderer.nextFrameId(); residency.reset(nextEpoch);
             assertEquals(0,p.layers[0].slotId);
+            assertEquals(-1,p.instanceSlot);
             c.epoch=2; put(c,0,p,0,1,1); residency.prepare(c,frame,16,17);
             assertEquals(0,count(frame,1)); assertEquals(0,count(frame,3));
             var fresh=new SectionPayload(2,new MeshPayload(2,ByteBuffer.allocate(112)));
@@ -221,17 +223,36 @@ class TerrainResidencyTest {
             c.clear(); put(c,0,d,32,1,1);
             residency.prepare(c,frame,16,17);
             assertEquals(0,a.layers[0].slotId); assertEquals(0,b.layers[0].slotId);
+            assertEquals(-1,a.instanceSlot); assertEquals(-1,b.instanceSlot);
             assertTrue(d.layers[0].slotId==1 || d.layers[0].slotId==2);
             residency.commit();
             int keptSlot=d.layers[0].slotId;
+            int keptInstance=d.instanceSlot;
             // Evicting d recycles keptSlot for the next uploaded section.
             residency.pendingRemovals.add(d); c.clear();
-            residency.prepare(c,frame,16,17); residency.commit();
+            residency.prepare(c,frame,16,17);
+            var eviction=residency.stageCommit();
             assertEquals(0,d.layers[0].slotId);
+            assertEquals(-1,d.instanceSlot);
             var e=mesh(112); put(c,0,e,48,1,1);
             residency.prepare(c,frame,16,17);
             assertEquals(keptSlot,e.layers[0].slotId);
-            residency.commit();
+            assertEquals(keptInstance,e.instanceSlot);
+            residency.stageCommit().rollback().run();
+            eviction.rollback().run();
+            assertEquals(-1,e.instanceSlot);
+            assertEquals(keptInstance,d.instanceSlot);
+            assertEquals(keptSlot,d.layers[0].slotId);
+            c.clear();
+            residency.prepare(c,frame,16,17);
+            var retryEviction=residency.stageCommit();
+            put(c,0,e,48,1,1);
+            residency.prepare(c,frame,16,17);
+            // The last view borrowed the freed slots but failed before recording its transition.
+            retryEviction.rollback().run();
+            assertEquals(-1,e.instanceSlot);
+            assertEquals(keptInstance,d.instanceSlot);
+            assertEquals(keptSlot,d.layers[0].slotId);
         }
     }
     @Test void releasedVerticesKeepTransparentIndexValidationAndOwnedSnapshots() {
@@ -431,21 +452,27 @@ class TerrainResidencyTest {
         try(var frame=new NativeFrameBuffer()) {
             var residency=new TerrainResidency();
             residency.reset(NativeRenderer.nextFrameId());
-            var a=mesh(112); var b=mesh(112); var c=capture();
-            put(c,0,a,0,1,1); put(c,1,b,16,2,1);
+            var a=new SectionPayload(1,new MeshPayload(1,ByteBuffer.allocate(112),0),new MeshPayload(1,ByteBuffer.allocate(112),1));
+            var b=mesh(112); var c=capture();
+            put(c,0,a,0,1,0x0101); put(c,1,b,16,2,1);
             residency.prepare(c,frame,16,17,true);
+            assertEquals(2,descriptor(frame).get(JAVA_INT,320));
+            assertEquals(0,a.instanceSlot); assertEquals(1,b.instanceSlot);
+            assertEquals(a.instanceSlot,frame.visibleSegment().get(JAVA_INT,16));
+            assertEquals(a.instanceSlot,frame.visibleSegment().get(JAVA_INT,24+16));
+            assertEquals(b.instanceSlot,frame.visibleSegment().get(JAVA_INT,48+16));
             long initial=descriptor(frame).get(JAVA_LONG,304);
             residency.commit();
-            put(c,0,b,16,1,1); put(c,1,a,0,2,1);
+            put(c,0,b,16,1,1); put(c,1,a,0,2,0x0101);
             residency.prepare(c,frame,16,17,true);
             assertEquals(initial,descriptor(frame).get(JAVA_LONG,328));
             assertEquals(0,count(frame,4));
-            assertEquals(b.layers[0].slotId-1,frame.visibleSegment().get(JAVA_INT,16));
+            assertEquals(b.instanceSlot,frame.visibleSegment().get(JAVA_INT,16));
             residency.commit();
             c.fastReused=true; c.instancesChanged=true; c.updatedFadingSlots.add(0); c.visibility[0]=0.25f;
             residency.prepare(c,frame,16,17,true);
             assertEquals(1,count(frame,4));
-            assertEquals(b.layers[0].slotId-1,descriptor(frame).get(ADDRESS,312).reinterpret(4).get(JAVA_INT,0));
+            assertEquals(b.instanceSlot,descriptor(frame).get(ADDRESS,312).reinterpret(4).get(JAVA_INT,0));
         }
     }
 

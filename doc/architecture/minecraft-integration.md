@@ -25,9 +25,9 @@ RenderPearl 编码器复用单个 `RayniumRenderPassBackend` 光栅录制器及�
 主世界实例化在 Raynium 后端按原版提交组录制。
 
 - `LevelWorldFeatureScopeMixin` 将 `WorldModelCaptureScope` 严格限定在 `LevelRenderer` 主世界 `featureFrame` 区间内（GUI/画中画/手持物沿用即时路径）。
-- `ModelPartCompileMixin` 在同一世代第二次访问 `ModelPart` 时缓存 24 B/顶点局部几何；`ModelManagerReloadMixin` 在模型重载时清理并退役旧常驻网格。GC 队列返回空闲句柄，允许重排的组按准备后的材质值查桶，并按顶点页聚集网格 run。
+- `ModelPartCompileMixin` 在同一世代第二次访问 `ModelPart` 时缓存 24 B/顶点局部几何；`ModelManagerReloadMixin` 在模型重载时清理并退役旧常驻网格。叶节点在可见性检查处处理恒等或纯平移快轨，其余节点沿用原版姿态栈与子节点遍历。常驻编译未接管时，原版直接调用带原始整型参数的 `compile`。GC 队列返回空闲句柄，允许重排的组按准备后的材质值查桶，并按顶点页聚集网格 run。
 - `ModelFeatureRendererMixin`、`RenderTypeGroupMixin` 与 `RenderTypeFeatureRendererMixin` 在满足纯刚体模型提交条件且目标管线存在内置伴生实例化变体时，将 `ModelPart` 提交编码为 80 B/实例流并按原版组顺序发出 Opcode 16；遇到覆写 `renderToBuffer`/`compile`、贴花/轮廓/自定义消费者或资源包着色器覆盖时无缝保序回退原版 `StagedVertexBuffer`。
-- `QuadParticleRenderStateMixin` 与 `QuadParticleFeatureMixin` 为匹配内置粒子实例化变体的四边形粒子组跳过 CPU 顶点展开，写入 56 B/粒子四元数实例流并经 Opcode 16 合批绘制；OIT 阶段复用单次上传，非默认状态或着色器覆盖自动回退原版路径。
+- `QuadParticleRenderStateMixin` 与 `QuadParticleFeatureMixin` 为匹配内置粒子实例化变体的四边形粒子组跳过 CPU 顶点展开，写入 56 B/粒子四元数实例流并经 Opcode 16 合批绘制；每个渲染器复用一份图层资格表，按组号保留各自的绘制、纹理和紧凑批次表，直到 `finishExecute` 才清空组内引用。OIT 阶段复用单次上传，非默认状态或着色器覆盖自动回退原版路径。
 - `ShadowFeatureRendererMixin` 在原版 `buildGroup` 切点采集阴影片，保留 `RenderType.prepare()` 产生的视图偏移变换、裁剪和纹理。每片使用 56 B 实例，四角共享单位几何。组执行时选择当前透明阶段，着色器覆盖或缺少所需变体时沿用原版组构建。
 
 `MinecraftBenchmarkMixin` 在世界帧开始时推进采集与基准状态。测试模式可冻结时间、相机与动画并采集实际选用的管线。管线身份、视觉证据与离线产物通过覆盖率脚本关联。[Minecraft 渲染流程](minecraft-rendering.md)

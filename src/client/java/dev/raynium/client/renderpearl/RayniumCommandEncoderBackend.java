@@ -39,8 +39,8 @@ final class RayniumCommandEncoderBackend implements CommandEncoderBackend, AutoC
         memory.seal(submitting);
         tape=new CommandTape(renderer,freeViews,freeStorage);
         long sealed=measuring?System.nanoTime():0;
-        var result=submitting.submit(measuring);
-        if(measuring) dev.raynium.client.benchmark.BenchmarkSession.nativeBatch(renderer,result,sealed-start,System.nanoTime()-sealed);
+        long sequence=submitting.submitSequence(measuring);
+        if(measuring) dev.raynium.client.benchmark.BenchmarkSession.nativeBatch(renderer,sequence,sealed-start,System.nanoTime()-sealed);
         renderer.pollCompleted();
     }
 

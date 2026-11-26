@@ -227,15 +227,23 @@ class NativeWireframeTest {
                 }
                 assertArrayEquals(expected,await(renderer,3),"REUSE_VISIBLE|REUSE_INSTANCES must preserve cached terrain pixels");
 
-                for(int step=0;step<3;step++) {
+                for(int step=0;step<4;step++) {
                     int sequence=4+step;
                     var f=frame(sequence,2,atlas.handle(),light.handle(),1,-1);
                     f.flags=step==0?0:NativeRenderer.REUSE_VISIBLE;
                     try(var storage=new NativeFrameBuffer(); var tape=new dev.raynium.client.renderpearl.CommandTape(renderer)) {
-                        storage.begin(1,0,0,0,0);
+                        storage.begin(3,0,0,0,0);
                         storage.terrain(atlas.handle(),light.handle(),1);
-                        storage.instancePool(12,step==0?0:sequence-1,1);
-                        storage.updateInstance(7,step==1?1000:0,0,0,1);
+                        storage.instancePool(64,step==0?0:sequence-1,3);
+                        storage.updateInstance(43,2000,0,0,1);
+                        if(step==2) {
+                            // Slot 7 stays off-screen when the upload spans slots 5 through 9.
+                            storage.updateInstance(9,0,0,0,1);
+                            storage.updateInstance(5,0,0,0,1);
+                        } else {
+                            storage.updateInstance(7,step==1?1000:0,0,0,1);
+                            storage.updateInstance(0,3000,0,0,1);
+                        }
                         storage.versions(4,sequence,sequence);
                         if(step==0) storage.visible(1,-1,0,7,1);
                         var view=tape.addView(storage,storage.finish(f),atlas,light);
@@ -244,12 +252,12 @@ class NativeWireframeTest {
                         tape.submit();
                     }
                     byte[] pixels=await(renderer,sequence);
-                    if(step==1) {
+                    if(step==1 || step==2) {
                         for(int i=0;i<pixels.length;i+=4) assertEquals(0,pixels[i] | pixels[i+1] | pixels[i+2]);
                     } else assertArrayEquals(expected,pixels,"Sparse GPU instance slot "+step);
                 }
                 // Invalid reuse flag combination must fail.
-                var f4=frame(7,2,atlas.handle(),light.handle(),1,-1);
+                var f4=frame(8,2,atlas.handle(),light.handle(),1,-1);
                 f4.flags=NativeRenderer.REUSE_INSTANCES;
                 f4.instances=List.of();
                 assertThrows(IllegalStateException.class,()->{ submit(renderer,atlas,light,light,f4); renderer.flush(); });

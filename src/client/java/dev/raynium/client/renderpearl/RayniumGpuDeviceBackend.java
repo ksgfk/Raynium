@@ -61,7 +61,7 @@ final class RayniumGpuDeviceBackend implements GpuDeviceBackend {
         try(var queries=new RayniumQueryPool(renderer,1); var tape=new CommandTape(renderer); var done=tape.createFence()) {
             tape.writeTimestamp(queries,0);
             long before=System.nanoTime();
-            tape.submit();
+            tape.submitSequence(false);
             done.awaitCompletion(-1);
             long after=System.nanoTime();
             return before+(after-before)/2-(long)(queries.getValue(0).orElseThrow()*info.timestampPeriod());

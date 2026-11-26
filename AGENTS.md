@@ -29,4 +29,4 @@
 - C++ 层禁止默认构造后再调用 `Init` / `Initialize` 的二段式构造。可失败的创建使用 `static Create` 返回成功/失败，准备完全部资源后才构造并交付有效对象；失败由局部 RAII 清理。
 - Native（含工具与测试）优先直接使用 `radray/types.h` 已导出的容器、字符串、数组、智能指针及其创建函数，显式写 `radray::`；没有对应导出的类型继续使用 `std::`，不为这些导出类型新增本地别名或引入 `using namespace radray`。
 - 当前 C ABI 状态只使用 `RN_STATUS_OK` / `RN_STATUS_FAILED`；错误详情在 native 发现处记录，不跨层传递错误字符串。不可恢复错误记录后 abort，边界见[Native runtime](doc/architecture/native-runtime.md#失败处理)。
-- 真实 Minecraft 跑图 benchmark 不要复制地图。保证参数一致可以通过预设命令、预设值保持一致。
+- 真实 Minecraft 跑图 benchmark 必须原地使用同一存档，禁止复制地图。每场预热前通过配置的 `commands` 固定天气与昼夜，跨后端、跨版本和重复采样沿用同一组预设，见[构建与测试](doc/guide/build-test.md#真实跑图环境预设)。

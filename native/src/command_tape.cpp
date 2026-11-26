@@ -382,11 +382,7 @@ void FrameTapePlan::ReplayTextureBuffer(radray::RDGBuilder& graph,FrameTextureIm
     }
 }
 void FrameTapePlan::Replay(radray::RDGBuilder& graph,FrameTextureImports& imports,radray::AsyncReadbackQueue& queue,const OutputPassResources& output,const FrameTimestamps& timestamps,const FrameReadbacks& readbacks,Texture* backBuffer) {
-    for(auto& upload:_worldUploads) {
-        auto h=graph.ImportPersistentOwned(upload.target);
-        graph.UploadBuffer(h,upload.offset,std::move(upload.source));
-        graph.MarkOutput(h);
-    }
+    for(auto& upload:_worldUploads) upload.Import(graph);
 
     radray::RDGBufferHandle instanceBuffer;
     if(!_instanceUploads.empty()) {

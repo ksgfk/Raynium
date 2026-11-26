@@ -9,7 +9,9 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.ArrayDeque;
 import java.util.Arrays;
+import java.util.IdentityHashMap;
 import net.minecraft.client.particle.SingleQuadParticle;
+import net.minecraft.client.renderer.StagedVertexBuffer;
 import net.minecraft.client.renderer.oit.OitPipelineSet;
 import net.minecraft.client.renderer.oit.OitStage;
 import net.minecraft.client.renderer.texture.AbstractTexture;
@@ -32,6 +34,19 @@ public final class ParticleFastTrack {
     }
 
     private ParticleFastTrack() {}
+
+    public static final class PreparedLayers {
+        public final IdentityHashMap<SingleQuadParticle.Layer, StagedVertexBuffer.Draw> draws = new IdentityHashMap<>();
+        public final IdentityHashMap<SingleQuadParticle.Layer, AbstractTexture> textures = new IdentityHashMap<>();
+        public final IdentityHashMap<SingleQuadParticle.Layer, CompactLayerBatch> compact = new IdentityHashMap<>();
+
+        public void clear() {
+            compact.forEach((layer, batch) -> batch.recycle());
+            compact.clear();
+            draws.clear();
+            textures.clear();
+        }
+    }
 
     public static CompactLayerBatch acquireBatch(SingleQuadParticle.Layer layer) {
         CompactLayerBatch batch = BATCH_POOL.pollFirst();

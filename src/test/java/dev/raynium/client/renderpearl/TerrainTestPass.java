@@ -9,7 +9,7 @@ import org.joml.Vector4f;
 
 public final class TerrainTestPass {
     private TerrainTestPass() {}
-    public static long submitMeasured(CommandTape tape) { return tape.submit(true).sequence(); }
+    public static long submitMeasured(CommandTape tape) { return tape.submitSequence(true); }
     public static long queryPoolHandle(RayniumQueryPool pool) { return pool.handle(); }
     public static CommandTape batch(RayniumGpuDevice device) { return device.currentBatch(); }
     public static void loadAttachments(CommandTape tape,NativeTexture color,NativeTexture depth) {

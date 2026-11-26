@@ -22,6 +22,35 @@ class NativeCommandTapeTest {
     @TempDir Path directory;
 
     @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void consumedStorageCanRecordNewCallbacksWhilePriorSubmissionIsPending(NativeEnvironment.Backend backend) throws Exception {
+        try(var env=new NativeEnvironment(NativeTestSupport.locate(directory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var runtime=env.createRuntime(); var renderer=runtime.createRenderer(NativeTestSupport.shaders())) {
+            var empty=MemorySegment.NULL;
+            try(var first=renderer.enqueueFrame(empty,empty,empty,null,java.util.List.of(),false,null,empty,empty);
+                var second=renderer.enqueueFrame(empty,empty,empty,null,java.util.List.of(),false,null,empty,empty)) {
+                assertEquals(1,first.sequence()); assertEquals(2,second.sequence());
+                var before=first.snapshot();
+                var events=new ArrayList<String>();
+                var callbacks=new NativeRenderer.BatchCallbacks();
+                callbacks.submitted.add(()->events.add("first submitted"));
+                callbacks.completed.add(()->{
+                    events.add("first completed");
+                    try(var nested=new CommandTape(renderer)) { assertEquals(3,nested.submit().sequence()); }
+                });
+                callbacks.recyclers.add(()->events.add("first recycled"));
+                var next=renderer.trackBatch(1,callbacks,()->events.add("first consumed"),()->fail("First batch failed"));
+                renderer.syncWorkerState(new NativeRenderer.Progress(1,0,0,0,0,0,0,0));
+                assertEquals(java.util.List.of("first consumed"),events);
+                next.completed.add(()->events.add("second completed"));
+                renderer.trackBatch(2,next,()->events.add("second consumed"),()->fail("Second batch failed"));
+                renderer.flush();
+                assertEquals(java.util.List.of("first consumed","first submitted","first completed","first recycled","second consumed","second completed"),events);
+                assertEquals(before,first.snapshot());
+            }
+        }
+    }
+
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
     void offscreenAndPresentedBatchesRetireSeparatelyAtAbiStride(NativeEnvironment.Backend backend) throws Throwable {
         try(var env=new NativeEnvironment(NativeTestSupport.locate(directory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var runtime=env.createRuntime(); var renderer=runtime.createRenderer(NativeTestSupport.shaders()); var arena=Arena.ofConfined();

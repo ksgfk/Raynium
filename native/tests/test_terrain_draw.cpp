@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <memory_resource>
 #include <span>
@@ -353,11 +354,13 @@ void WithTerrainViews(Test test) {
         return view;
     };
 
-    auto runFrame=[&](const rn_terrain_view_desc& view,TerrainFrame& outFrame) {
+    auto runFrame=[&](const rn_terrain_view_desc& view,TerrainFrame& outFrame,
+        const std::function<void(std::span<GeometryUpload>)>& inspect={}) {
         auto& slot=scheduler->BeginFrame();
         residency.BeginSlotViews({&view,1},slot);
         std::pmr::vector<GeometryUpload> geometry(&slot.GetMemoryResource());
         const bool ok=residency.PrepareFrame(owner,view,*resources,{slot,geometry,residency.View(0),true},outFrame);
+        if(ok && inspect) inspect(geometry);
         EXPECT_TRUE(scheduler->RunFrame());
         return ok;
     };
@@ -449,6 +452,51 @@ TEST(TerrainResidencyCache, SparseInstancesFollowFirstVisiblePageInEachLayer) {
         ASSERT_TRUE(runFrame(view,frame));
         EXPECT_NE(buffer.Get(),frame.persistentInstances.Get());
         EXPECT_FLOAT_EQ(residency.View(0).instances[3].visibility,1.f);
+    });
+}
+
+TEST(TerrainResidencyCache, ScatteredFadesAndNewTailShareOnePackedUpload) {
+    WithTerrainViews([](TerrainResidency&,auto makeView,auto runFrame,rn_instance initial) {
+        constexpr uint32_t count=2900;
+        constexpr uint32_t capacity=10*count;
+        uint32_t seed=2;
+        initial.origin[0]=123;
+        auto view=makeView(1,1,1,1,&initial,false);
+        view.flags=RN_FRAME_INSTANCE_POOL;
+        view.visible_count=0;
+        view.instance_slots=&seed; view.instance_capacity=capacity;
+        TerrainFrame frame{};
+        ASSERT_TRUE(runFrame(view,frame));
+        auto pool=frame.persistentInstances;
+
+        radray::vector<uint32_t> ids;
+        for(uint32_t i=count;i>0;--i) ids.push_back((i-1)*10);
+        ids.push_back(3); ids.push_back(3);
+        radray::vector<rn_instance> updates(ids.size());
+        for(size_t i=0;i<ids.size();++i) updates[i].origin[0]=int32_t(i+1);
+        view.instances=updates.data(); view.instance_slots=ids.data(); view.instance_count=uint32_t(ids.size());
+        view.instance_capacity=capacity+2; view.instance_base_version=1; view.instances_version=2;
+        ASSERT_TRUE(runFrame(view,frame,[&](std::span<GeometryUpload> uploads) {
+            ASSERT_EQ(uploads.size(),1u);
+            auto& upload=uploads.front();
+            EXPECT_EQ(upload.target.Get(),pool.Get());
+            ASSERT_EQ(upload.copyRanges.size(),count+1);
+            EXPECT_EQ(upload.copyRanges.front().Size,4*sizeof(rn_instance));
+            EXPECT_EQ(upload.copyRanges.back().Offset,capacity*sizeof(rn_instance));
+            EXPECT_EQ(upload.copyRanges.back().Size,2*sizeof(rn_instance));
+            radray::vector<rn_instance> packed(count+5);
+            auto bytes=std::as_writable_bytes(std::span(packed));
+            ASSERT_EQ(upload.source.GetMaxSize(),bytes.size());
+            radray::RDGUploadWriteContext context{bytes,bytes.size()};
+            ASSERT_TRUE(upload.source.Write(context));
+            EXPECT_EQ(packed[0].origin[0],int32_t(count));
+            EXPECT_EQ(packed[2].origin[0],123);
+            EXPECT_EQ(packed[3].origin[0],updates.back().origin[0]);
+            EXPECT_EQ(packed[4].origin[0],int32_t(count-1));
+            EXPECT_EQ(packed.back().origin[0],0);
+        }));
+        view.instance_base_version=2; view.instance_count=0;
+        ASSERT_TRUE(runFrame(view,frame,[](std::span<GeometryUpload> uploads) { EXPECT_TRUE(uploads.empty()); }));
     });
 }
 

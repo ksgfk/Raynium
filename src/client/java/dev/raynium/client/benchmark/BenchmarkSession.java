@@ -105,12 +105,12 @@ public final class BenchmarkSession {
     public static void nativeFrames(long count) {
         if(isActive() && Minecraft.getInstance().level!=null) active.nativeFrames+=count;
     }
-    public static void nativeBatch(dev.raynium.bridge.NativeRenderer renderer,dev.raynium.bridge.NativeRenderer.SubmitResult batch,long javaPrepare,long nativeCall) {
-        if(active==null || !active.measuringFrame || batch.sequence()<=0) return;
+    public static void nativeBatch(dev.raynium.bridge.NativeRenderer renderer,long sequence,long javaPrepare,long nativeCall) {
+        if(active==null || !active.measuringFrame || sequence<=0) return;
         active.measuredRenderer=renderer;
         active.nativeTimes[0]=Math.max(0,active.nativeTimes[0])+javaPrepare;
         active.nativeTimes[1]=Math.max(0,active.nativeTimes[1])+nativeCall;
-        active.measurements.expect(batch.sequence());
+        active.measurements.expect(sequence);
     }
     public static void referenceGpuSample(long nanos) { if(active!=null && active.phase.equals("measuring")) active.measurements.gpu(nanos); }
     public static void afterFrame() {

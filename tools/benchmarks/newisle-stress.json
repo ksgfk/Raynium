@@ -7,6 +7,15 @@
   "renderDistance": 32,
   "simulationDistance": 8,
   "warmupSeconds": 90,
+  "commands": [
+    "execute store result storage raynium:benchmark rule int 1 run gamerule advance_weather",
+    "execute if data storage raynium:benchmark {rule:1} run gamerule advance_weather false",
+    "weather clear",
+    "execute store result storage raynium:benchmark rule int 1 run gamerule advance_time",
+    "execute if data storage raynium:benchmark {rule:1} run gamerule advance_time false",
+    "data remove storage raynium:benchmark rule",
+    "execute unless predicate {type:\"minecraft:time_check\",clock:\"minecraft:overworld\",value:6000} run time set 6000"
+  ],
   "route": [
     { "seconds": 0,  "x": 232,  "y": 100, "z": -610, "yaw": 45,  "pitch": 10 },
     { "seconds": 20, "x": -86,  "y": 111, "z": -291, "yaw": 22,  "pitch": 12 },
