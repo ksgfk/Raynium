@@ -93,12 +93,12 @@ Sampler* GetTextureSampler(Device& device,uint32_t bits,const rn_texture_samplin
         .MinFilter=(bits&4)?FilterMode::Linear:FilterMode::Nearest,.MagFilter=(bits&8)?FilterMode::Linear:FilterMode::Nearest,
         .MipmapFilter=(bits&16)?FilterMode::Linear:FilterMode::Nearest,.LodMax=lod,.AnisotropyClamp=sampling.max_anisotropy}).Get();
 }
-FrameTextureImports::FrameTextureImports(radray::RDGBuilder& graph,std::pmr::memory_resource& scratch,const DeviceDetail* detail)
-    :_graph(graph),_detail(detail),_cleared(&scratch) {}
+FrameTextureImports::FrameTextureImports(radray::RDGBuilder& graph,std::pmr::memory_resource& scratch,const DeviceLimits* limits)
+    :_graph(graph),_limits(limits),_cleared(&scratch) {}
 radray::RDGTextureHandle FrameTextureImports::Import(const radray::IntrusivePtr<radray::GpuTexture>& texture,bool overwritesWholeSubresource) {
     const auto handle=_graph.ImportPersistentOwned(texture);
     const auto& desc=texture->GetDesc();
-    if(_detail) {
+    if(_limits) {
         if(texture->GetSubmittedState()!=TextureState::Undefined || !_cleared.insert(texture.Get()).second ||
            (overwritesWholeSubresource && desc.ArrayLayers==1 && desc.MipLevels==1)) return handle;
         auto zero=+[](const int&,radray::RDGUploadWriteContext& ctx) noexcept {
@@ -117,10 +117,10 @@ radray::RDGTextureHandle FrameTextureImports::Import(const radray::IntrusivePtr<
                 else if(!IsDepthStencilFormat(desc.Format))
                     _graph.UploadTexture(handle,{mip,layer,0,0,width,height},radray::RDGTextureUploadSource::Generated(bytes*height,0,zero));
                 else {
-                    const uint64_t align=std::max(4u,_detail->TextureDataPitchAlignment);
+                    const uint64_t align=std::max(4u,_limits->TextureDataPitchAlignment);
                     const uint64_t size=((bytes+align-1)/align)*align*height;
-                    auto src=_graph.CreateBuffer({.MaxSize=size,.Usage=BufferUse::CopySource,
-                        .Alignment=std::max<uint64_t>(4,_detail->TextureDataPlacementAlignment)},radray::RDGUploadSource::Generated(size,0,zero));
+                    auto src=_graph.CreateDynamicBuffer({.MaxSize=size,.Usage=BufferUse::CopySource,
+                        .Alignment=std::max<uint64_t>(4,_limits->TextureDataPlacementAlignment)},radray::RDGUploadSource::Generated(size,0,zero));
                     struct Fill { radray::RDGTextureHandle dst; radray::RDGBufferHandle src; SubresourceRange range; Texture* image{}; };
                     SubresourceRange range{layer,1,mip,1,aspects};
                     for(auto aspect:{TextureAspect::Depth,TextureAspect::Stencil}) if(aspects&aspect) {

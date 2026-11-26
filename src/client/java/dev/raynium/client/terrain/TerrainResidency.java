@@ -9,6 +9,7 @@ import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteOrder;
 import java.util.Arrays;
+import java.util.BitSet;
 import net.minecraft.core.SectionPos;
 import static java.lang.foreign.ValueLayout.*;
 
@@ -31,6 +32,7 @@ final class TerrainResidency {
     private final ObjectArrayList<SectionPayload> dirtyIndicesScratch=new ObjectArrayList<>();
     private int[] instScratch=new int[4096*4];
     private int[] visScratch=new int[4096*6];
+    private final BitSet populatedInstances=new BitSet();
     private int[] sectionToInstance=new int[4096];
     private TerrainCapture.Buffer capture;
     private long epoch,frameId;
@@ -40,7 +42,7 @@ final class TerrainResidency {
     private int lastVisCount,lastInstCount;
     private int lastReuseFlags;
     private boolean hasDeferredUploads;
-    private boolean lastFrameCommitted,lastInstancesCommitted;
+    private boolean lastFrameCommitted;
     private boolean uncommittedPrepare,pendingAllowReuse;
     long uploadBytes;
 
@@ -55,7 +57,7 @@ final class TerrainResidency {
         capture=null; this.epoch=epoch; residentCount=0; nextSlotId=1;
         visibleVersion=0; originsVersion=0; instancesVersion=0;
         lastVisCount=0; lastInstCount=0; lastReuseFlags=0;
-        hasDeferredUploads=false; lastFrameCommitted=false; lastInstancesCommitted=false; uncommittedPrepare=false;
+        hasDeferredUploads=false; lastFrameCommitted=false; uncommittedPrepare=false;
     }
     private int allocateSlot() {
         return freeSlots.isEmpty()?nextSlotId++:freeSlots.popInt();
@@ -69,11 +71,11 @@ final class TerrainResidency {
         pendingSlotAllocs.clear();
     }
     private void ensureScratchCapacity(int sectionCount) {
-        int neededInst=Math.multiplyExact(Math.max(1024,sectionCount),4);
+        int neededInst=Math.multiplyExact(Math.max(1024,nextSlotId-1),4);
         if(instScratch.length<neededInst) {
             int cap=instScratch.length;
             while(cap<neededInst) cap=Math.multiplyExact(cap,2);
-            instScratch=new int[cap];
+            instScratch=Arrays.copyOf(instScratch,cap);
         }
         int neededVis=Math.multiplyExact(Math.max(1024,sectionCount),18); // up to 3 layers * 6 ints
         if(visScratch.length<neededVis) {
@@ -107,7 +109,6 @@ final class TerrainResidency {
     void prepare(TerrainCapture.Buffer capture,NativeFrameBuffer frame,long albedo,long lightmap,boolean allowReuse) {
         if(uncommittedPrepare) {
             lastFrameCommitted=false;
-            lastInstancesCommitted=false;
         }
         rollbackPendingSlots();
         uncommittedPrepare=true;
@@ -117,6 +118,8 @@ final class TerrainResidency {
         uploadBytes=0;
         lastReuseFlags=0;
 
+        long baseVersion=allowReuse && lastFrameCommitted?instancesVersion:0;
+        if(baseVersion==0) populatedInstances.clear();
         boolean canReuse=allowReuse && capture.fastReused && lastFrameCommitted && !hasDeferredUploads && pendingRemovals.isEmpty();
         if(canReuse) {
             dirtyIndicesScratch.clear();
@@ -138,42 +141,27 @@ final class TerrainResidency {
                     uploadBytes+=idx.byteSize();
                 }
             }
-            boolean activeInstancesChanged=false;
-            if(capture.instancesChanged) {
-                for(int i=0;i<capture.updatedFadingSlots.size();i++) {
-                    int slot=capture.updatedFadingSlots.getInt(i);
-                    if(slot>=0 && slot<sectionToInstance.length) {
-                        int instIdx=sectionToInstance[slot];
-                        if(instIdx>=0 && instIdx<lastInstCount) {
-                            int bits=Float.floatToRawIntBits(capture.visibility[slot]);
-                            int off=instIdx*4+3;
-                            if(instScratch[off]!=bits) {
-                                instScratch[off]=bits;
-                                activeInstancesChanged=true;
-                            }
-                        }
-                    }
-                }
-                if(activeInstancesChanged) instancesVersion=frameId;
-            }
-            if(!activeInstancesChanged && lastInstancesCommitted) {
-                lastReuseFlags=NativeRenderer.REUSE_VISIBLE|NativeRenderer.REUSE_INSTANCES;
-                frame.begin(0,0,0,indexUploads.size(),0);
-                frame.terrain(albedo,lightmap,capture.anisotropy);
-                frame.versions(visibleVersion,originsVersion,instancesVersion);
-                emitIndexUploads(frame);
-                frame.setVisibleAndInstanceCounts(0,0);
-                return;
-            }
-            lastReuseFlags=NativeRenderer.REUSE_VISIBLE;
-            frame.begin(lastInstCount,0,0,indexUploads.size(),0);
+            int maxUpdates=capture.instancesChanged?capture.updatedFadingSlots.size():0;
+            frame.begin(maxUpdates,0,0,indexUploads.size(),0);
+            frame.instancePool(nextSlotId-1,baseVersion,maxUpdates);
             frame.terrain(albedo,lightmap,capture.anisotropy);
-            frame.versions(visibleVersion,originsVersion,instancesVersion);
             emitIndexUploads(frame);
-            if(lastInstCount>0) {
-                MemorySegment.copy(instScratch,0,frame.instanceSegment(),JAVA_INT,0,lastInstCount*4);
+            boolean changed=false;
+            for(int i=0;i<maxUpdates;i++) {
+                int section=capture.updatedFadingSlots.getInt(i);
+                int slot=sectionToInstance[section];
+                if(slot<0) continue;
+                int offset=slot*4;
+                float fade=capture.visibility[section];
+                int bits=Float.floatToRawIntBits(fade);
+                if(instScratch[offset+3]==bits) continue;
+                instScratch[offset+3]=bits;
+                frame.updateInstance(slot,instScratch[offset],instScratch[offset+1],instScratch[offset+2],fade);
+                changed=true;
             }
-            frame.setVisibleAndInstanceCounts(0,lastInstCount);
+            if(changed) instancesVersion=frameId;
+            lastReuseFlags=NativeRenderer.REUSE_VISIBLE|(changed?0:NativeRenderer.REUSE_INSTANCES);
+            frame.versions(visibleVersion,originsVersion,instancesVersion);
             return;
         }
 
@@ -244,6 +232,7 @@ final class TerrainResidency {
         }
         hasDeferredUploads=staged.size()<candidates.size();
         frame.begin(count*3,pendingRemovals.size()*3,meshes,indexUploads.size(),dataBytes);
+        frame.instancePool(nextSlotId-1,baseVersion,count);
         frame.terrain(albedo,lightmap,capture.anisotropy);
         emitIndexUploads(frame);
         for(int i=0;i<staged.size();i++) {
@@ -261,7 +250,7 @@ final class TerrainResidency {
         final int[] visArr=visScratch;
         final int[] secToInst=sectionToInstance;
         int visCount=0,instCount=0;
-        int visOff=0,instOff=0;
+        int visOff=0;
         for(int i=0;i<count;i++) {
             var p=payloads[i]; int mask=elementMask[i];
             if(p.uploadedEpoch!=epoch && p.stagedFrame!=frameId) {
@@ -276,19 +265,25 @@ final class TerrainResidency {
             }
             p.lastActiveFrame=frameId;
             if(mask==0) { secToInst[i]=-1; continue; }
-            int instance=instCount++;
+            var layers=p.layers;
+            int instance=(layers[0]!=null?layers[0]:layers[1]!=null?layers[1]:layers[2]).slotId-1;
+            int instOff=instance*4;
+            ++instCount;
             secToInst[i]=instance;
             int ox=originX[i], oy=originY[i], oz=originZ[i];
             int visBits=Float.floatToRawIntBits(visibility[i]);
             boolean originDiff=instArr[instOff]!=ox || instArr[instOff+1]!=oy || instArr[instOff+2]!=oz;
             originsChanged|=originDiff;
-            instancesChanged|=originDiff || instArr[instOff+3]!=visBits;
+            boolean instanceDiff=originDiff || instArr[instOff+3]!=visBits;
+            instancesChanged|=instanceDiff;
+            if(instanceDiff || !populatedInstances.get(instance)) {
+                frame.updateInstance(instance,ox,oy,oz,visibility[i]);
+                populatedInstances.set(instance);
+            }
             instArr[instOff]=ox;
             instArr[instOff+1]=oy;
             instArr[instOff+2]=oz;
             instArr[instOff+3]=visBits;
-            instOff+=4;
-            var layers=p.layers;
             var l0=layers[0];
             if(l0!=null && (mask&127)!=0) {
                 int slotId=l0.slotId;
@@ -345,9 +340,8 @@ final class TerrainResidency {
                 frame.removeMesh(Integer.toUnsignedLong(layer.slotId));
             }
         }
-        if(instCount>0) MemorySegment.copy(instArr,0,frame.instanceSegment(),JAVA_INT,0,instOff);
         if(visCount>0) MemorySegment.copy(visArr,0,frame.visibleSegment(),JAVA_INT,0,visOff);
-        frame.setVisibleAndInstanceCounts(visCount,instCount);
+        frame.setVisibleCount(visCount);
         if(visibleChanged || lastVisCount!=visCount || !evicting.isEmpty()) visibleVersion=frameId;
         if(originsChanged || lastInstCount!=instCount) originsVersion=frameId;
         if(instancesChanged || lastInstCount!=instCount) instancesVersion=frameId;
@@ -373,7 +367,6 @@ final class TerrainResidency {
         }
         uncommittedPrepare=false;
         lastFrameCommitted=pendingAllowReuse;
-        lastInstancesCommitted=pendingAllowReuse;
         pendingSlotAllocs.clear();
         ObjectArrayList<MeshPayload> uploaded=staged.isEmpty()?null:new ObjectArrayList<>(staged.size()*2);
         for(int i=0;i<staged.size();i++) {
@@ -429,7 +422,7 @@ final class TerrainResidency {
         Runnable rollback=()->{
             if(epoch!=preparedEpoch) return;
             for(int i=undo.size()-1;i>=0;--i) undo.get(i).run();
-            lastFrameCommitted=lastInstancesCommitted=false;
+            lastFrameCommitted=false;
             if(preparedCapture!=null) preparedCapture.checkedResidencyEpoch=0;
         };
         if((uploaded==null || uploaded.isEmpty()) && (uploadedIdx==null || uploadedIdx.isEmpty()) && evictedCopy==null)

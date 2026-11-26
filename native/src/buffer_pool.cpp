@@ -3,8 +3,7 @@
 #include <cstring>
 
 radray::RDGBufferHandle rn_buffer::Import(radray::RDGBuilder& graph) const {
-    if(device) return graph.ImportPersistentOwned(device);
-    return graph.ImportPersistentOwned(upload);
+    return graph.ImportPersistentOwned(gpu);
 }
 namespace raynium {
 using namespace radray::gpu;
@@ -31,13 +30,15 @@ radray::unique_ptr<rn_buffer> BufferPool::Allocate(Device& gpu,uint32_t uses,uin
     if(uses&RN_BUFFER_FENCE_ROTATED) {
         // A map-only allocation still needs a valid upload-buffer binding.
         if(!gpuUses) gpuUses=BufferUse::CopySource;
-        entry->upload=radray::GpuUploadBuffer::Create(gpu,{size,gpuUses}).Release();
-        if(!entry->upload) return {};
-        entry->mapped=entry->upload->GetMappedData();
+        const auto memory=gpuUses==BufferUse::CopySource ? radray::GpuBufferMemory::HostUpload
+            : radray::GpuBufferMemory::DeviceUploadWithFallback;
+        entry->gpu=radray::GpuBuffer::Create(gpu,{size,gpuUses,memory}).Release();
+        if(!entry->gpu) return {};
+        entry->mapped=entry->gpu->GetMappedData().Get();
         if(!entry->mapped) return {};
     } else {
-        entry->device=radray::GpuBuffer::Create(gpu,{size,gpuUses|BufferUse::CopyDestination}).Release();
-        if(!entry->device) return {};
+        entry->gpu=radray::GpuBuffer::Create(gpu,{size,gpuUses|BufferUse::CopyDestination}).Release();
+        if(!entry->gpu) return {};
     }
     return entry;
 }
@@ -68,8 +69,7 @@ radray::unique_ptr<rn_buffer> BufferPool::Take(uint32_t uses,uint64_t size,uint6
     auto& bucket=found->second;
     for(size_t i=bucket.size();i>0;--i) {
         auto& retired=bucket[i-1];
-        if(retired.sequence>completed || (retired.entry->device && retired.entry->device->UseCount()!=1) ||
-           (retired.entry->upload && retired.entry->upload->UseCount()!=1)) continue;
+        if(retired.sequence>completed || retired.entry->gpu->UseCount()!=1) continue;
         auto entry=std::move(retired.entry);
         if(i!=bucket.size()) retired=std::move(bucket.back());
         bucket.pop_back();
@@ -83,7 +83,7 @@ radray::unique_ptr<rn_buffer> BufferPool::Take(uint32_t uses,uint64_t size,uint6
 void BufferPool::Retire(radray::unique_ptr<rn_buffer> entry,uint64_t sequence) {
     if(entry->IsReadback() || entry->size>kMaxPooledBuffer || entry->size>kPoolBudget-_poolBytes) return;
     radray::vector<radray::byte>().swap(entry->shadowHost);
-    entry->mapped=entry->upload?entry->upload->GetMappedData():nullptr;
+    entry->mapped=entry->gpu->GetMappedData().Get();
     const auto key=PoolKey(entry->usage,entry->size);
     _poolBytes+=entry->size;
     _pool[key].push_back({std::move(entry),sequence});

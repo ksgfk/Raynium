@@ -60,11 +60,11 @@ struct rn_texture : raynium::ResourceHandle<rn_texture> {
 struct rn_buffer : raynium::ResourceHandle<rn_buffer> {
     uint32_t usage{};
     uint64_t size{};
-    radray::IntrusivePtr<radray::GpuBuffer> device;
-    radray::IntrusivePtr<radray::GpuUploadBuffer> upload;
+    radray::IntrusivePtr<radray::GpuBuffer> gpu;
     radray::IntrusivePtr<raynium::HostReadStorage> readbackHost;
     radray::vector<radray::byte> shadowHost;
     radray::byte* mapped{};
+    bool IsHostVisible() const noexcept { return gpu && gpu->IsHostVisible(); }
     bool IsReadback() const { return (usage & RN_BUFFER_MAP_READ)!=0; }
     bool Contains(uint64_t offset,uint64_t length) const { return length && offset<=size && length<=size-offset; }
     radray::RDGBufferHandle Import(radray::RDGBuilder&) const;

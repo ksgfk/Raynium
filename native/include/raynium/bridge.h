@@ -7,7 +7,7 @@
 #else
 #define RAYNIUM_API __declspec(dllimport)
 #endif
-#define RN_ABI_VERSION 25u
+#define RN_ABI_VERSION 26u
 
 enum rn_submit_flags : uint32_t { RN_SUBMIT_FLAG_DEVICE_LOST = 1u, RN_SUBMIT_FLAG_TERMINAL_ERROR = 2u };
 struct rn_wait_result {
@@ -67,7 +67,8 @@ enum rn_frame_flags : uint32_t {
     RN_FRAME_IMPROVED_TRANSPARENCY = 4,
     RN_FRAME_WIREFRAME = 128,
     RN_FRAME_REUSE_VISIBLE = 256,
-    RN_FRAME_REUSE_INSTANCES = 512
+    RN_FRAME_REUSE_INSTANCES = 512,
+    RN_FRAME_INSTANCE_POOL = 1024
 };
 // Zero selects auto. Forced direct and indirect are mutually exclusive.
 enum rn_renderer_flags : uint32_t { RN_RENDERER_DIRECT = 1, RN_RENDERER_INDIRECT = 2 };
@@ -160,6 +161,10 @@ struct rn_terrain_view_desc {
     int32_t camera_block[3];
     float camera_fraction[3], fog_color[4], fog_distances[4];
     uint64_t visible_version, origins_version, instances_version;
+    // In pool mode instances[i] replaces instance_slots[i]. A zero base resets the view's table.
+    const uint32_t* instance_slots;
+    uint32_t instance_capacity, instance_reserved;
+    uint64_t instance_base_version;
 };
 
 extern "C" {

@@ -265,8 +265,9 @@ public final class TerrainCapture {
                 var indexSnapshot=translucent==null?null:translucent.indices;
                 indices[slot]=indexSnapshot;
                 originX[slot]=origin.getX(); originY[slot]=origin.getY(); originZ[slot]=origin.getZ();
-                BUFFER.capturedSections[slot]=section;
-                BUFFER.uploadedAt[slot]=section.uploadedTime;
+                long uploaded=section.uploadedTime;
+                BUFFER.uploadedAt[slot]=uploaded;
+                if(fade>0 && now-uploaded<fade) BUFFER.capturedSections[slot]=section;
                 elementMask[slot]=mask;
             }
         } finally { dispatcher.unlock(); }
@@ -277,8 +278,10 @@ public final class TerrainCapture {
             long elapsed=now-BUFFER.uploadedAt[slot];
             float visibility=fade<=0 || elapsed>=fade?1f:(float)elapsed/fade;
             BUFFER.visibility[slot]=visibility;
-            if(visibility<1f) BUFFER.addFading(slot,BUFFER.capturedSections[slot]);
-            BUFFER.capturedSections[slot]=null;
+            if(fade>0 && elapsed<fade) {
+                if(visibility<1f) BUFFER.addFading(slot,BUFFER.capturedSections[slot]);
+                BUFFER.capturedSections[slot]=null;
+            }
         }
         BUFFER.finish(count); BUFFER.epoch=epoch;
         BUFFER.checkedResidencyEpoch=residencyEpoch;

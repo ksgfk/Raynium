@@ -88,8 +88,8 @@ void ModularFramePipeline::ExtractFrameData(radray::FrameSlot&) noexcept {}
 void ModularFramePipeline::SetupGraph(radray::RDGBuilder& graph,radray::FrameSlot& slot) noexcept {
     auto& resources=_slots[slot.GetIndex()];
     resources.timestamps.Reset(graph);
-    const auto& detail=slot.GetDevice().GetDetail();
-    FrameTextureImports imports{graph,slot.GetScratchMemoryResource(),&detail};
+    const auto& limits=slot.GetDevice().GetCapabilities().Limits;
+    FrameTextureImports imports{graph,slot.GetScratchMemoryResource(),&limits};
     _pending->uploads->AddUploads(graph,imports,_pending->shadowWrites);
     _tape->Replay(graph,imports,_readback,*_output,resources.timestamps,resources.readbacks,_pending->color);
     resources.timestamps.Resolve(graph);

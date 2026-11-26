@@ -67,12 +67,12 @@ bool RendererFrontend::Submit(const rn_batch_desc& desc,Swapchain* target,rn_sub
         auto* buffer=ResolveHandle(_owner,range.buffer);
         if(!buffer || !buffer->Contains(range.offset,range.length) || !(buffer->usage&RN_BUFFER_MAP_WRITE) ||
            (buffer->usage&RN_BUFFER_COPY_DST)) return FailInput(out);
-        if(buffer->upload) {
-            if(!buffer->upload->FlushMappedRange({range.offset,range.length})) return FailInput(out);
+        if(buffer->IsHostVisible()) {
+            if(!buffer->gpu->FlushMappedRange({range.offset,range.length})) return FailInput(out);
         } else {
             auto* copy=static_cast<radray::byte*>(envelope.Memory().allocate(range.length,1));
             std::memcpy(copy,buffer->shadowHost.data()+range.offset,range.length);
-            envelope.shadows.push_back({buffer->device,range.offset,{copy,size_t(range.length)}});
+            envelope.shadows.push_back({buffer->gpu,range.offset,{copy,size_t(range.length)}});
         }
     }
     for(auto query:std::span(desc.queries,desc.query_count)) {
@@ -288,13 +288,13 @@ bool RendererFrontend::CreateBuffer(const rn_buffer_desc& desc,rn_buffer_result&
     } else if((usage&RN_BUFFER_MAP_WRITE) && !(usage&(RN_BUFFER_COPY_DST|RN_BUFFER_FENCE_ROTATED))) {
         buffer->shadowHost.resize(desc.size);
         buffer->mapped=buffer->shadowHost.data();
-    } else buffer->mapped=buffer->upload?buffer->upload->GetMappedData():nullptr;
+    } else buffer->mapped=buffer->IsHostVisible()?buffer->gpu->GetMappedData().Get():nullptr;
     if(desc.initial) {
         if(buffer->mapped) std::memcpy(buffer->mapped,desc.initial,desc.size);
-        if(buffer->upload && !buffer->upload->FlushMappedRange({0,desc.size})) { SettleDeviceLoss(); return false; }
-        if(buffer->device) {
+        if(buffer->IsHostVisible() && !buffer->gpu->FlushMappedRange({0,desc.size})) { SettleDeviceLoss(); return false; }
+        if(buffer->gpu && !buffer->IsHostVisible()) {
             auto* bytes=static_cast<const radray::byte*>(desc.initial);
-            _pending.bufferUploads.push_back({buffer->device,{bytes,bytes+desc.size}});
+            _pending.bufferUploads.push_back({buffer->gpu,{bytes,bytes+desc.size}});
         }
     }
     out.mapped=buffer->mapped;

@@ -129,16 +129,23 @@ class NativeWireframeTest {
             first.indices=List.of(new TerrainFixture.Index(2,ALL));
             submit(renderer,atlas,light,light,first); byte[] expected=await(renderer,1);
 
-            // 5 x 28 MiB crosses an opaque page. 24 x (28 MiB vertices, 6 MiB indices)
+            // 19 x 28 MiB crosses a 512 MiB opaque page. 24 x (28 MiB vertices, 6 MiB indices)
             // crosses both translucent geometry buffers while keeping each upload batch small.
             byte[] filler=new byte[(1<<20)*28]; int[] fillerIndices=new int[(1<<20)/4*6];
-            var opaqueMeshes=new ArrayList<TerrainFixture.Mesh>();
-            for(int i=0;i<5;i++) opaqueMeshes.add(new TerrainFixture.Mesh(100+i,filler,1<<20,0));
-            var growOpaque=frame(2,1,atlas.handle(),light.handle(),2,-1); growOpaque.meshes=opaqueMeshes;
-            submit(renderer,atlas,light,light,growOpaque); assertArrayEquals(expected,await(renderer,2));
+            var removed=new long[19+24];
+            long sequence=1;
+            for(int start=0;start<19;start+=5) {
+                var growOpaque=frame(++sequence,1,atlas.handle(),light.handle(),2,-1);
+                var meshes=new ArrayList<TerrainFixture.Mesh>();
+                for(int i=start;i<Math.min(start+5,19);i++) {
+                    removed[i]=200+i;
+                    meshes.add(new TerrainFixture.Mesh(removed[i],filler,1<<20,0));
+                }
+                growOpaque.meshes=meshes;
+                submit(renderer,atlas,light,light,growOpaque);
+                assertArrayEquals(expected,await(renderer,sequence));
+            }
 
-            var removed=new long[5+24];
-            for(int i=0;i<5;i++) removed[i]=100+i;
             for(int group=0;group<4;group++) {
                 var meshes=new ArrayList<TerrainFixture.Mesh>();
                 var indices=new ArrayList<TerrainFixture.Index>();
@@ -146,19 +153,18 @@ class NativeWireframeTest {
                     int id=110+6*group+i;
                     meshes.add(new TerrainFixture.Mesh(id,filler,1<<20,2));
                     indices.add(new TerrainFixture.Index(id,fillerIndices));
-                    removed[5+6*group+i]=id;
+                    removed[19+6*group+i]=id;
                 }
                 boolean last=group==3;
                 if(last) meshes.add(new TerrainFixture.Mesh(1,corner(false),8,0));
-                int sequence=3+group;
-                var grown=frame(sequence,1,atlas.handle(),light.handle(),last?1:2,-1);
+                var grown=frame(++sequence,1,atlas.handle(),light.handle(),last?1:2,-1);
                 grown.meshes=meshes; grown.indices=indices;
                 submit(renderer,atlas,light,light,grown); assertArrayEquals(expected,await(renderer,sequence));
             }
-            var retired=frame(7,1,atlas.handle(),light.handle(),1,-1); retired.flags=0;
+            var retired=frame(++sequence,1,atlas.handle(),light.handle(),1,-1); retired.flags=0;
             retired.removedMeshes=removed;
             submit(renderer,atlas,light,light,retired);
-            var failed=frame(8,1,atlas.handle(),light.handle(),1,-1);
+            var failed=frame(++sequence,1,atlas.handle(),light.handle(),1,-1);
             failed.instances=List.of();
             assertThrows(IllegalStateException.class,()->{ submit(renderer,atlas,light,light,failed); renderer.flush(); });
         }
@@ -221,8 +227,29 @@ class NativeWireframeTest {
                 }
                 assertArrayEquals(expected,await(renderer,3),"REUSE_VISIBLE|REUSE_INSTANCES must preserve cached terrain pixels");
 
-                // Frame 4: invalid reuse flag combination (REUSE_INSTANCES without REUSE_VISIBLE) must fail.
-                var f4=frame(4,2,atlas.handle(),light.handle(),1,-1);
+                for(int step=0;step<3;step++) {
+                    int sequence=4+step;
+                    var f=frame(sequence,2,atlas.handle(),light.handle(),1,-1);
+                    f.flags=step==0?0:NativeRenderer.REUSE_VISIBLE;
+                    try(var storage=new NativeFrameBuffer(); var tape=new dev.raynium.client.renderpearl.CommandTape(renderer)) {
+                        storage.begin(1,0,0,0,0);
+                        storage.terrain(atlas.handle(),light.handle(),1);
+                        storage.instancePool(12,step==0?0:sequence-1,1);
+                        storage.updateInstance(7,step==1?1000:0,0,0,1);
+                        storage.versions(4,sequence,sequence);
+                        if(step==0) storage.visible(1,-1,0,7,1);
+                        var view=tape.addView(storage,storage.finish(f),atlas,light);
+                        dev.raynium.client.renderpearl.TerrainTestPass.record(tape,view,color,depth,atlas,light);
+                        tape.captureColor(new dev.raynium.client.renderpearl.CommandTape.Region(color,0,0,0,0,128,128),sequence);
+                        tape.submit();
+                    }
+                    byte[] pixels=await(renderer,sequence);
+                    if(step==1) {
+                        for(int i=0;i<pixels.length;i+=4) assertEquals(0,pixels[i] | pixels[i+1] | pixels[i+2]);
+                    } else assertArrayEquals(expected,pixels,"Sparse GPU instance slot "+step);
+                }
+                // Invalid reuse flag combination must fail.
+                var f4=frame(7,2,atlas.handle(),light.handle(),1,-1);
                 f4.flags=NativeRenderer.REUSE_INSTANCES;
                 f4.instances=List.of();
                 assertThrows(IllegalStateException.class,()->{ submit(renderer,atlas,light,light,f4); renderer.flush(); });

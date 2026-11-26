@@ -8,28 +8,38 @@
 namespace raynium {
 using namespace radray::gpu;
 
-void TerrainView::Import(radray::RDGBuilder& graph,GpuBackend backend) {
-    for(auto& upload:uploads) {
-        auto h=graph.ImportPersistentOwned(upload.target);
-        graph.UploadBuffer(h,upload.offset,std::move(upload.source)); graph.MarkOutput(h);
-    }
-    uploads.clear();
-    if(!draws || !draws->hasAnyDraws) return;
-    struct Source { const rn_terrain_view_desc* parameters; GpuBackend backend; };
-    constants=graph.CreateBuffer({.MaxSize=256,.Usage=BufferUse::CBuffer},radray::RDGUploadSource::Generated(256,Source{&frame.parameters,backend},
+radray::RDGBufferHandle TerrainView::Constants(radray::RDGBuilder& graph,uint32_t width,uint32_t height) {
+    if(width==atlasWidth && height==atlasHeight) return constants;
+    atlasWidth=width;
+    atlasHeight=height;
+    struct Source { const rn_terrain_view_desc* parameters; GpuBackend backend; uint32_t width,height; };
+    constants=graph.CreateDynamicBuffer({.MaxSize=256,.Usage=BufferUse::CBuffer},radray::RDGUploadSource::Generated(256,Source{&frame.parameters,backend,width,height},
         +[](const Source& source,radray::RDGUploadWriteContext& ctx) noexcept {
-            struct Constants { float projection[16],view[16]; int32_t block[4]; float fraction[4],fog[4],distances[4]; } data{};
+            struct Constants { float projection[16],view[16]; int32_t block[4]; float fraction[4],fog[4],distances[4],atlas[4]; } data{};
             const auto& p=*source.parameters;
             std::copy_n(p.projection,16,data.projection); std::copy_n(p.view,16,data.view);
             std::copy_n(p.camera_block,3,data.block); data.block[3]=(p.flags&RN_FRAME_RGSS)!=0;
             std::copy_n(p.camera_fraction,3,data.fraction);
             data.fraction[3]=source.backend==GpuBackend::Vulkan?1.f:-1.f;
             std::copy_n(p.fog_color,4,data.fog); std::copy_n(p.fog_distances,4,data.distances);
+            data.atlas[0]=float(source.width); data.atlas[1]=float(source.height);
+            data.atlas[2]=1.f/data.atlas[0]; data.atlas[3]=1.f/data.atlas[1];
             std::memset(ctx.Bytes.data(),0,ctx.Bytes.size()); std::memcpy(ctx.Bytes.data(),&data,sizeof(data)); return true;
         }));
+    return constants;
+}
+
+void TerrainView::Import(radray::RDGBuilder& graph,GpuBackend gpuBackend) {
+    backend=gpuBackend;
+    for(auto& upload:uploads) {
+        auto h=graph.ImportPersistentOwned(upload.target);
+        graph.UploadBuffer(h,upload.offset,std::move(upload.source)); graph.MarkOutput(h);
+    }
+    uploads.clear();
+    if(!draws || !draws->hasAnyDraws) return;
     const auto import=[&](const radray::IntrusivePtr<radray::GpuBuffer>& buffer,bool upload,
                           std::span<const radray::byte> bytes,BufferUses usage) {
-        if(!buffer) return graph.CreateBuffer({.MaxSize=bytes.size(),.Usage=usage},radray::RDGUploadSource::BorrowedBytes(bytes));
+        if(!buffer) return graph.CreateDynamicBuffer({.MaxSize=bytes.size(),.Usage=usage,.Residency=StreamResidency(bytes.size())},radray::RDGUploadSource::BorrowedBytes(bytes));
         auto handle=graph.ImportPersistentOwned(buffer);
         if(upload) {
             graph.UploadBuffer(handle,0,radray::RDGUploadSource::BorrowedBytes(bytes));
@@ -70,7 +80,12 @@ bool TerrainFeature::Decode(std::span<const radray::byte> bytes,std::span<Terrai
     return true;
 }
 
-void TerrainFeature::Import(radray::RDGBuilder&,FrameTextureImports& imports) {
+void TerrainFeature::Import(radray::RDGBuilder& graph,FrameTextureImports& imports) {
+    if(view->draws->layers[std::min(stage,uint32_t(Translucent))].recordCount) {
+        const auto& atlas=materials[0];
+        frameConstants=view->Constants(graph,std::max(1u,atlas.image->desc.width>>atlas.sampling.base_mip),
+            std::max(1u,atlas.image->desc.height>>atlas.sampling.base_mip));
+    }
     for(auto& m:materials) m.handle=imports.Import(m.image);
     for(uint32_t i=0;i<3;++i) if(sources[i]) reads[i]=imports.Import(sources[i]);
 }
@@ -78,7 +93,7 @@ void TerrainFeature::Import(radray::RDGBuilder&,FrameTextureImports& imports) {
 void TerrainFeature::Declare(radray::RDGRasterPassBuilder& pass) const {
     const uint32_t layer=std::min(stage,uint32_t(Translucent));
     if(!view->draws->layers[layer].recordCount) return;
-    pass.ReadBuffer(view->constants,BufferState::CBuffer).ReadBuffer(view->instances,BufferState::Vertex);
+    pass.ReadBuffer(frameConstants,BufferState::CBuffer).ReadBuffer(view->instances,BufferState::Vertex);
     if(view->useIndirect) pass.ReadBuffer(view->indirectByLayer[layer],BufferState::Indirect);
     for(const auto& m:materials) pass.ReadTexture(m.handle);
     for(auto h:reads) if(h.IsValid()) pass.ReadTexture(h);
@@ -97,7 +112,7 @@ bool TerrainFeature::Prepare(radray::RDGPrepareContext& ctx) {
         const auto base=ctx.ResolveBuffer(view->indirectByLayer[layer]);
         indirectSlice={base.Buffer,base.Offset,layerData.indirectSize};
     }
-    auto binding=FrameConstantBinding(0,ctx.ResolveBuffer(view->constants));
+    auto binding=FrameConstantBinding(0,ctx.ResolveBuffer(frameConstants));
     constants=slot.AcquireParameterSet(view->mesh->PassGroupLayout(),{&binding,1}).Get();
     if(!constants) return false;
     radray::array<radray::TransientParameterBinding,4> materialBindings;

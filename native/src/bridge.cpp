@@ -69,7 +69,7 @@ static_assert(offsetof(rn_mesh_update,vertex_count)==16 && offsetof(rn_mesh_upda
 static_assert(sizeof(rn_visible_item)==24);
 static_assert(offsetof(rn_visible_item,mesh)==0 && offsetof(rn_visible_item,element_mask)==8);
 static_assert(offsetof(rn_visible_item,sort_key)==12 && offsetof(rn_visible_item,first_instance)==16 && offsetof(rn_visible_item,instance_count)==20);
-static_assert(sizeof(rn_terrain_view_desc)==312 && sizeof(rn_texture_sampling)==16);
+static_assert(sizeof(rn_terrain_view_desc)==336 && sizeof(rn_texture_sampling)==16);
 static_assert(offsetof(rn_terrain_view_desc,projection)==104);
 static_assert(offsetof(rn_terrain_view_desc,indices)==24);
 static_assert(offsetof(rn_terrain_view_desc,index_count)==64);
@@ -78,6 +78,8 @@ static_assert(offsetof(rn_terrain_view_desc,fog_distances)==272);
 static_assert(offsetof(rn_terrain_view_desc,visible_version)==288);
 static_assert(offsetof(rn_terrain_view_desc,origins_version)==296);
 static_assert(offsetof(rn_terrain_view_desc,instances_version)==304);
+static_assert(offsetof(rn_terrain_view_desc,instance_slots)==312 && offsetof(rn_terrain_view_desc,instance_capacity)==320 &&
+              offsetof(rn_terrain_view_desc,instance_base_version)==328);
 static_assert(sizeof(rn_instance)==16);
 static_assert(!std::is_default_constructible_v<raynium::Renderer>);
 
@@ -178,17 +180,17 @@ rn_status rn_init_env(const rn_env_desc* desc) noexcept {
         }
         if(claimed.test_and_set()) { RADRAY_ERR_LOG("Native environment is already initialized"); return false; }
         auto releaseClaim = radray::MakeScopeGuard([]() noexcept { if (!frontend) claimed.clear(); });
+#ifdef RADRAY_ENABLE_PROFILER
+        tracy::StartupProfiler();
+        auto stopFailedProfiler=radray::MakeScopeGuard([]() noexcept { if(!frontend) tracy::ShutdownProfiler(); });
+#endif
         auto session = raynium::RenderChannel::Create();
         if (!session) return false;
         const bool started = session->Barrier([&] {
-#ifdef RADRAY_ENABLE_PROFILER
-        tracy::StartupProfiler();
-        auto stopFailedProfiler=radray::MakeScopeGuard([]() noexcept { if(!environment) tracy::ShutdownProfiler(); });
-#endif
-        RADRAY_PROFILE_THREAD("Raynium Render");
-        RADRAY_PROFILE_SCOPE_N("Raynium.Environment.Create");
-        environment=radray::Environment::Create(backend,(desc->flags & RN_ENV_VALIDATION)!=0,"Raynium").Release();
-        return static_cast<bool>(environment);
+            RADRAY_PROFILE_THREAD("Raynium Render");
+            RADRAY_PROFILE_SCOPE_N("Raynium.Environment.Create");
+            environment=radray::Environment::Create(backend,(desc->flags & RN_ENV_VALIDATION)!=0,"Raynium").Release();
+            return static_cast<bool>(environment);
         });
         if (started) frontend = session.release();
         return started;
@@ -204,14 +206,14 @@ rn_status rn_destroy_env(void) noexcept {
         if(activeRuntime) { RADRAY_ERR_LOG("Destroy the active runtime before destroying the environment"); return false; }
         radray::unique_ptr<raynium::RenderChannel> session(std::exchange(frontend, nullptr));
         session->Barrier([] {
-#ifdef RADRAY_ENABLE_PROFILER
-        // Join profiler workers before FFM unloads the DLL under the Windows loader lock.
-        auto stopProfiler=radray::MakeScopeGuard([]() noexcept { tracy::ShutdownProfiler(); });
-#endif
-        RADRAY_PROFILE_SCOPE_N("Raynium.Environment.Destroy");
-        environment.reset(); return true;
+            RADRAY_PROFILE_SCOPE_N("Raynium.Environment.Destroy");
+            environment.reset();
+            return true;
         });
         session.reset();
+#ifdef RADRAY_ENABLE_PROFILER
+        tracy::ShutdownProfiler();
+#endif
         claimed.clear();
         return true;
     });

@@ -38,6 +38,19 @@ RasterPassPlan* RasterPassPlan::Decode(std::pmr::memory_resource& memory,std::sp
     }
     return result;
 }
+bool RasterPassPlan::TryFoldClear(const rn_texture* texture,uint32_t mip,uint32_t layer,const ColorClearValue& value) noexcept {
+    if(_area.X || _area.Y || _area.Width!=_width || _area.Height!=_height) return false;
+    const auto fold=[&](Attachment& a) {
+        if(a.texture!=texture || a.mip!=mip || a.layer!=layer || a.clear) return false;
+        a.clear=true;
+        a.value=value;
+        return true;
+    };
+    if(IsDepthStencilFormat(texture->texture->GetDesc().Format))
+        return !(GetTextureFormatAspects(texture->texture->GetDesc().Format)&TextureAspect::Stencil) && fold(_depth);
+    for(auto& color:_colors) if(fold(color)) return true;
+    return false;
+}
 bool RasterPassPlan::AddTerrain(std::pmr::memory_resource& memory,std::pmr::vector<RasterOp>& ops,std::span<const radray::byte> bytes,std::span<TerrainView> views,rn_renderer* owner) {
     auto* terrain=FrameArray<TerrainFeature>(memory,1).data();
     if(!terrain->Decode(bytes,views,owner,_area)) return false;

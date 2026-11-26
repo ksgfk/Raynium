@@ -38,6 +38,8 @@ public final class NativeFrameBuffer implements AutoCloseable {
     private final Arena fixed=Arena.ofConfined();
     private final MemorySegment descriptor=fixed.allocate(BYTE_SIZE,8);
     private final Storage[] arrays=new Storage[5];
+    private final Storage instanceSlots=new Storage();
+    private boolean useInstancePool;
     private final Storage layouts=new Storage();
     private final Storage upload=new Storage();
     private final int[] counts=new int[5];
@@ -49,7 +51,7 @@ public final class NativeFrameBuffer implements AutoCloseable {
     private long uploadCursor;
     private boolean closed;
 
-    public static final int BYTE_SIZE=312;
+    public static final int BYTE_SIZE=336;
     public static final int MESH_UPDATE_STRIDE=32;
     public static final int MESH_LAYOUT_STRIDE=72;
     public static final int LAYOUT_FLAG_FINITE_BOUNDS=1;
@@ -74,6 +76,7 @@ public final class NativeFrameBuffer implements AutoCloseable {
         arrays[4].reserve(16L*Math.max(1024,visibleCapacity));
         layouts.reserve((long)MESH_LAYOUT_STRIDE*meshCapacity);
         upload.reserve(uploadBytes);
+        useInstancePool=false;
         Arrays.fill(counts,0);
         layoutCount=0;
         uploadCursor=0;
@@ -174,6 +177,16 @@ public final class NativeFrameBuffer implements AutoCloseable {
         s.set(JAVA_LONG,o,mesh); s.set(JAVA_INT,o+8,elementMask); s.set(JAVA_INT,o+12,sortKey);
         s.set(JAVA_INT,o+16,firstInstance); s.set(JAVA_INT,o+20,instanceCount);
     }
+    public void instancePool(int capacity,long baseVersion,int maxUpdates) {
+        useInstancePool=true;
+        instanceSlots.reserve(maxUpdates*4L);
+        descriptor.set(JAVA_INT,320,capacity);
+        descriptor.set(JAVA_LONG,328,baseVersion);
+    }
+    public void updateInstance(int slot,int x,int y,int z,float visibility) {
+        int index=instance(x,y,z,visibility);
+        instanceSlots.segment.setAtIndex(JAVA_INT,index,slot);
+    }
     public int instance(int x,int y,int z,float visibility) {
         int index=counts[4]++; var s=arrays[4].segment; long o=index*16L;
         s.set(JAVA_INT,o,x); s.set(JAVA_INT,o+4,y); s.set(JAVA_INT,o+8,z); s.set(JAVA_FLOAT,o+12,visibility);
@@ -191,13 +204,15 @@ public final class NativeFrameBuffer implements AutoCloseable {
         counts[3]=visibleCount;
         counts[4]=instanceCount;
     }
+    public void setVisibleCount(int count) { setVisibleAndInstanceCounts(count,counts[4]); }
     public int visibleCount() { return counts[3]; }
     private static void floats(MemorySegment target,long offset,float[] values,int count) {
         if(values.length!=count) throw new IllegalArgumentException("Expected "+count+" floats");
         for(int i=0;i<count;i++) target.set(JAVA_FLOAT,offset+i*4L,values[i]);
     }
     public MemorySegment finish(NativeRenderer.Frame frame) {
-        var s=descriptor; s.set(JAVA_INT,0,BYTE_SIZE); s.set(JAVA_INT,4,frame.flags);
+        var s=descriptor; s.set(JAVA_INT,0,BYTE_SIZE); s.set(JAVA_INT,4,frame.flags | (useInstancePool?NativeRenderer.INSTANCE_POOL:0));
+        s.set(ADDRESS,312,useInstancePool && counts[4]!=0?instanceSlots.segment:MemorySegment.NULL);
         s.set(JAVA_LONG,8,frame.epoch); s.set(JAVA_LONG,16,frame.outputSequence);
         for(int i=0;i<5;i++) {
             s.set(ADDRESS,24+i*8L,counts[i]==0?MemorySegment.NULL:arrays[i].segment);
@@ -212,6 +227,7 @@ public final class NativeFrameBuffer implements AutoCloseable {
         if(closed) return;
         clearBorrowed();
         for(var storage:arrays) storage.close();
+        instanceSlots.close();
         layouts.close();
         upload.close();
         fixed.close();

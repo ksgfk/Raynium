@@ -82,7 +82,6 @@ bool TapeCompiler::PrepareViews(const rn_batch_desc& batch,TerrainResidency& ter
     _views=_viewStorage;
     _backend=slot.GetDevice().GetBackend();
     const auto& caps=slot.GetDevice().GetCapabilities();
-    terrain.BeginSlotViews({batch.views,batch.view_count},slot);
     for(size_t i=0;i<_views.size();++i) {
         auto& view=_views[i];
         auto& cache=terrain.View(i);
@@ -109,6 +108,15 @@ bool TapeCompiler::Compile(const rn_batch_desc& batch,rn_renderer* owner,const S
             ops.emplace_back(entry);
             return *entry;
         }
+    };
+    radray::InlineVector<Clear,4> pendingClears;
+    const auto flushClears=[&](RasterPassPlan* pass=nullptr) {
+        for(const auto& clear:pendingClears) {
+            const auto& target=clear.target;
+            if(!pass || !pass->TryFoldClear(target.texture,target.area.MipLevel,target.area.ArrayLayer,clear.value))
+                append(clear);
+        }
+        pendingClears.clear();
     };
     const uint32_t maxColors=caps.Limits.MaxColorAttachments;
     const bool canGeometryIndirect=caps.Features.IndirectDraw && caps.Features.IndirectFirstInstance && caps.Limits.MaxDrawIndirectCount>=2;
@@ -145,6 +153,10 @@ bool TapeCompiler::Compile(const rn_batch_desc& batch,rn_renderer* owner,const S
         if(raster && header.opcode!=Opcode::RetainedTerrain && header.opcode!=Opcode::InstancedGeometry &&
            header.opcode!=Opcode::Draw &&
            header.opcode!=Opcode::WriteTimestamp && header.opcode!=Opcode::EndPass) return false;
+        // Buffer-only transfers cannot observe or modify a pending texture clear.
+        const bool bufferOnly=header.opcode==Opcode::WriteBufferBytes || header.opcode==Opcode::CopyBufferBytes;
+        if(!bufferOnly && header.opcode!=Opcode::BeginPass && header.opcode!=Opcode::ClearColor && header.opcode!=Opcode::ClearDepth)
+            flushClears();
         Region region{};
         switch(header.opcode) {
         case Opcode::ClearColor:
@@ -157,7 +169,24 @@ bool TapeCompiler::Compile(const rn_batch_desc& batch,rn_renderer* owner,const S
             if(depth && !(wire.value[0]>=0 && wire.value[0]<=1)) return false;
             ColorClearValue value{};
             std::copy_n(wire.value,4,value.Value.begin());
-            append(Clear{region,value});
+            if(!region.full || (GetTextureFormatAspects(desc.Format)&TextureAspect::Stencil)) {
+                flushClears();
+                append(Clear{region,value});
+                break;
+            }
+            const auto previous=std::find_if(pendingClears.begin(),pendingClears.end(),[&](const Clear& clear) {
+                return clear.target.texture==region.texture && clear.target.area.MipLevel==region.area.MipLevel &&
+                    clear.target.area.ArrayLayer==region.area.ArrayLayer;
+            });
+            if(previous!=pendingClears.end()) previous->value=value;
+            else {
+                if(pendingClears.size()==4) {
+                    append(pendingClears.front());
+                    std::move(pendingClears.begin()+1,pendingClears.end(),pendingClears.begin());
+                    pendingClears.pop_back();
+                }
+                pendingClears.push_back({region,value});
+            }
             break;
         }
         case Opcode::CaptureColor: {
@@ -241,7 +270,7 @@ bool TapeCompiler::Compile(const rn_batch_desc& batch,rn_renderer* owner,const S
                (src==dst && wire.srcOffset<wire.dstOffset+wire.size && wire.dstOffset<wire.srcOffset+wire.size)) return false;
             auto& copy=append(CopyBuffer{src,dst,wire.srcOffset,wire.dstOffset,wire.size,0});
             if(dst->IsReadback() && !frame.Reserve(dst,wire.dstOffset,wire.size,1,wire.size,
-                std::max<uint64_t>(1,device.GetDetail().BufferCopyOffsetAlignment),copy.stagingOffset)) return false;
+                std::max<uint64_t>(1,caps.Limits.BufferCopyOffsetAlignment),copy.stagingOffset)) return false;
             break;
         }
         case Opcode::BufferToTexture:
@@ -261,8 +290,8 @@ bool TapeCompiler::Compile(const rn_batch_desc& batch,rn_renderer* owner,const S
             const auto& area=transfer.image.area;
             uint64_t minimum=IsDepthStencilFormat(desc.Format)?4u:1u;
             const uint64_t texel=GetTextureFormatBytesPerPixel(desc.Format);
-            const uint64_t alignment=std::lcm(texel,std::max<uint64_t>(minimum,device.GetDetail().TextureDataPitchAlignment));
-            const uint64_t placement=std::lcm(texel,std::max<uint64_t>(minimum,device.GetDetail().TextureDataPlacementAlignment));
+            const uint64_t alignment=std::lcm(texel,std::max<uint64_t>(minimum,caps.Limits.TextureDataPitchAlignment));
+            const uint64_t placement=std::lcm(texel,std::max<uint64_t>(minimum,caps.Limits.TextureDataPlacementAlignment));
             const uint64_t pitch=(row+alignment-1)/alignment*alignment;
             if(pitch>UINT32_MAX) return false;
             transfer.alignedPitch=uint32_t(pitch);
@@ -284,6 +313,7 @@ bool TapeCompiler::Compile(const rn_batch_desc& batch,rn_renderer* owner,const S
         case Opcode::BeginPass:
             raster=RasterPassPlan::Decode(memory,bytes,owner,maxColors);
             if(!raster) return false;
+            flushClears(raster);
             ops.emplace_back(raster);
             break;
         case Opcode::EndPass:
@@ -295,6 +325,7 @@ bool TapeCompiler::Compile(const rn_batch_desc& batch,rn_renderer* owner,const S
         default: return false;
         }
     }
+    flushClears();
     _commands=FreezeFrameArray(memory,ops);
     _geometryIndirectArgs=_args;
     return !raster && hasBlit==(batch.surface!=nullptr) && captures==batch.capture_count && queries==batch.query_count &&
@@ -306,7 +337,7 @@ void FrameTapePlan::ReplayTextureBuffer(radray::RDGBuilder& graph,FrameTextureIm
     const auto& region=op.image.area;
     const uint64_t row=uint64_t(region.Width)*GetTextureFormatBytesPerPixel(op.image.texture->texture->GetDesc().Format);
     const bool host=op.buffer->IsReadback();
-    if(op.toImage && !op.direct && op.buffer->upload) {
+    if(op.toImage && !op.direct && op.buffer->IsHostVisible()) {
         const auto length=(region.Height-1)*op.pitch+row;
         graph.UploadTexture(texture,region,radray::RDGTextureUploadSource::BorrowedBytes(
             {op.buffer->mapped+op.offset,size_t(length)},uint32_t(op.pitch)));
@@ -315,7 +346,7 @@ void FrameTapePlan::ReplayTextureBuffer(radray::RDGBuilder& graph,FrameTextureIm
     }
     auto real=host?readbacks.Import(graph):op.buffer->Import(graph);
     const bool intermediate=!host && !op.direct;
-    auto buffer=intermediate?graph.CreateBuffer({.Size=uint64_t(op.alignedPitch)*region.Height,.Memory=MemoryType::Device,
+    auto buffer=intermediate?graph.CreateBuffer({.Size=uint64_t(op.alignedPitch)*region.Height,
         .Usage=BufferUse::CopySource|BufferUse::CopyDestination}):real;
     const uint64_t offset=host?op.stagingOffset:intermediate?0:op.offset;
     const uint32_t pitch=host || intermediate?op.alignedPitch:uint32_t(op.pitch);
@@ -359,13 +390,14 @@ void FrameTapePlan::Replay(radray::RDGBuilder& graph,FrameTextureImports& import
 
     radray::RDGBufferHandle instanceBuffer;
     if(!_instanceUploads.empty()) {
-        instanceBuffer=graph.CreateBuffer({.MaxSize=_instanceUploads.size(),.Usage=BufferUse::Vertex},
+        instanceBuffer=graph.CreateDynamicBuffer({.MaxSize=_instanceUploads.size(),.Usage=BufferUse::Vertex,
+            .Residency=StreamResidency(_instanceUploads.size())},
             radray::RDGUploadSource::BorrowedBytes(_instanceUploads));
     }
     radray::RDGBufferHandle geometryIndirectBuffer;
     if(!_geometryIndirectArgs.empty()) {
         const auto argBytes=std::as_bytes(std::span{_geometryIndirectArgs});
-        geometryIndirectBuffer=graph.CreateBuffer({.MaxSize=argBytes.size(),.Usage=BufferUse::Indirect},
+        geometryIndirectBuffer=graph.CreateDynamicBuffer({.MaxSize=argBytes.size(),.Usage=BufferUse::Indirect},
             radray::RDGUploadSource::BorrowedBytes(argBytes));
     }
     for(auto& view:_views) view.Import(graph,_backend);
@@ -400,7 +432,7 @@ void FrameTapePlan::Replay(radray::RDGBuilder& graph,FrameTextureImports& import
             bool toHost=copy->destination->IsReadback();
             auto dst=toHost?readbacks.Import(graph):copy->destination->Import(graph);
             if(copy->source==copy->destination) {
-                auto temp=graph.CreateBuffer({.Size=copy->size,.Memory=MemoryType::Device,.Usage=BufferUse::CopySource|BufferUse::CopyDestination});
+                auto temp=graph.CreateBuffer({.Size=copy->size,.Usage=BufferUse::CopySource|BufferUse::CopyDestination});
                 CopyBytes(graph,src,copy->srcOffset,temp,0,copy->size);
                 CopyBytes(graph,temp,0,dst,copy->dstOffset,copy->size);
             } else CopyBytes(graph,src,copy->srcOffset,dst,toHost?copy->stagingOffset:copy->dstOffset,copy->size);

@@ -61,7 +61,11 @@ class NativeShaderPackTest {
                     case "vertex" -> { int inputs=b.getInt(offset+48); int packed=offset+inputs+16;
                         b.putInt(packed,(b.getInt(packed)&~28)|(1<<2)); checksum(changed,record); }
                     case "constants" -> { int types=b.getInt(offset+32); int count=b.getInt(offset+36)/44;
-                        for(int i=0;i<count;i++) if(b.getInt(offset+types+i*44+24)==192) { b.putInt(offset+types+i*44+24,208); break; }
+                        boolean mutated=false;
+                        for(int i=0;i<count;i++) if(b.getInt(offset+types+i*44+24)==208) {
+                            b.putInt(offset+types+i*44+24,192); mutated=true; break;
+                        }
+                        assertTrue(mutated,"Missing 208-byte Frame layout in shader fixture");
                         checksum(changed,record); }
                     default -> throw new AssertionError(mutation);
                 }

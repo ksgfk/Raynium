@@ -135,6 +135,46 @@ class NativeCommandTapeTest {
     }
 
     @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void fullClearsAcrossBufferTransfersPreserveReadbacksAndOtherMips(NativeEnvironment.Backend backend) throws Exception {
+        try(var env=new NativeEnvironment(NativeTestSupport.locate(directory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var runtime=env.createRuntime(); var renderer=runtime.createRenderer(NativeTestSupport.shaders());
+            var color=renderer.createTexture(4,4,2,1,NativeTexture.Format.RGBA8,NativeTexture.ATTACHMENT|NativeTexture.READBACK);
+            var depth=renderer.createTexture(4,4,1,1,NativeTexture.Format.DEPTH32F,NativeTexture.ATTACHMENT|NativeTexture.READBACK);
+            var tape=new CommandTape(renderer)) {
+            var base=new Region(color,0,0,0,0,4,4);
+            var mip=new Region(color,1,0,0,0,2,2);
+            var z=new Region(depth,0,0,0,0,4,4);
+            try(var pixels=renderer.createBuffer(GpuBuffer.USAGE_MAP_READ|GpuBuffer.USAGE_COPY_DST,132,null,()->tape);
+                var scratch=renderer.createBuffer(GpuBuffer.USAGE_COPY_SRC|GpuBuffer.USAGE_COPY_DST,4,null,null);
+                var mapped=pixels.map(true,false); var fence=tape.createFence()) {
+                tape.clearDepth(z,0.75f);
+                tape.textureToBuffer(z,pixels,64,null);
+                tape.clearColor(base,1,0,0,1);
+                tape.clearColor(mip,0,0,1,1);
+                tape.clearDepth(z,0.25f);
+                tape.clearColor(base,0,1,0,1);
+                tape.writeBuffer(scratch,0,MemorySegment.ofArray(new int[]{0x12345678}));
+                tape.copyBuffer(scratch,0,pixels,128,4);
+                dev.raynium.client.renderpearl.TerrainTestPass.loadAttachments(tape,color,depth);
+                tape.textureToBuffer(z,pixels,0,null);
+                tape.captureColor(base,1);
+                tape.captureColor(mip,2);
+                tape.submit();
+                assertTrue(fence.awaitCompletion(-1));
+                for(int i=0;i<16;i++) {
+                    assertEquals(0.25f,mapped.data().getFloat(4*i));
+                    assertEquals(0.75f,mapped.data().getFloat(64+4*i));
+                }
+                assertEquals(0x12345678,mapped.data().getInt(128));
+                byte[] basePixels=renderer.pollCapture(1).orElseThrow().rgba();
+                assertEquals(64,basePixels.length);
+                for(int pixel:MemorySegment.ofArray(basePixels).toArray(ValueLayout.JAVA_INT_UNALIGNED))
+                    assertEquals(0xff00ff00,pixel);
+                checkPixels(renderer.pollCapture(2).orElseThrow().rgba(),0xffff0000,0xffff0000);
+            }
+        }
+    }
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
     void headlessReplayPreservesSubresourceOrderAndRecordingLifetimes(NativeEnvironment.Backend backend) throws Exception {
         try(var env=new NativeEnvironment(NativeTestSupport.locate(directory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var runtime=env.createRuntime(); var renderer=runtime.createRenderer(NativeTestSupport.shaders());

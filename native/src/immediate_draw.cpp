@@ -60,7 +60,7 @@ void ImmediateDraw::Import(radray::RDGBuilder& graph,FrameTextureImports& import
     if(_pipeline->program->drawBasesLayout) {
         const bool indirect=_kind==2 || _kind==3;
         if(indirect) {
-            _drawBases=graph.CreateBuffer({.Size=uint64_t(_count)*256,.Memory=MemoryType::Device,
+            _drawBases=graph.CreateBuffer({.Size=uint64_t(_count)*256,
                 .Usage=BufferUse::CopyDestination|BufferUse::CBuffer});
             size_t argIndex=0;
             while(argIndex<_resources.size() && _resources[argIndex].kind!=2) ++argIndex;
@@ -84,7 +84,7 @@ void ImmediateDraw::Import(radray::RDGBuilder& graph,FrameTextureImports& import
             if(!cache) cache=blackboard.Emplace<DrawBaseBuffers>(imports.Scratch());
             radray::array<uint32_t,2> bases{_kind==0?_first:uint32_t(_base),_firstInstance};
             auto [it,fresh]=cache.Get()->buffers.try_emplace(uint64_t(bases[1])<<32 | bases[0]);
-            if(fresh) it->second=graph.CreateBuffer({.MaxSize=256,.Usage=BufferUse::CBuffer},radray::RDGUploadSource::Generated(256,bases,
+            if(fresh) it->second=graph.CreateDynamicBuffer({.MaxSize=256,.Usage=BufferUse::CBuffer},radray::RDGUploadSource::Generated(256,bases,
                 +[](const radray::array<uint32_t,2>& value,radray::RDGUploadWriteContext& ctx) noexcept {
                     std::memcpy(ctx.Bytes.data(),value.data(),sizeof(value)); return true;
                 }));
@@ -93,7 +93,7 @@ void ImmediateDraw::Import(radray::RDGBuilder& graph,FrameTextureImports& import
     }
     if(_kind==4) {
         const uint64_t bytes=uint64_t(_count-2)*3*sizeof(uint32_t);
-        _fan=graph.CreateBuffer({.MaxSize=bytes,.Usage=BufferUse::Index},radray::RDGUploadSource::Generated(bytes,_count,
+        _fan=graph.CreateDynamicBuffer({.MaxSize=bytes,.Usage=BufferUse::Index},radray::RDGUploadSource::Generated(bytes,_count,
             +[](const uint32_t& count,radray::RDGUploadWriteContext& ctx) noexcept {
                 auto* dest=reinterpret_cast<uint32_t*>(ctx.Bytes.data());
                 for(uint32_t i=1;i+1<count;++i) { *dest++=0; *dest++=i; *dest++=i+1; }

@@ -10,7 +10,8 @@ void QueryDeviceInfo(radray::DeviceContext& runtime,rn_device_info& info) {
     info={}; info.struct_size=sizeof(info);
     info.backend=device.GetBackend()==GpuBackend::Vulkan?RN_BACKEND_VULKAN:RN_BACKEND_D3D12;
     info.vendor_id=caps.Detail.VendorId;
-    info.device_type=caps.Detail.IsSoftware?3:caps.Detail.IsUMA?1:2;
+    const bool uma=caps.Memory.Architecture==MemoryArchitecture::IntegratedUMA || caps.Memory.Architecture==MemoryArchitecture::CacheCoherentUMA;
+    info.device_type=caps.Detail.IsSoftware?3:uma?1:2;
     info.uniform_offset_alignment=std::max(uint64_t(1),caps.Limits.CBufferOffsetAlignment);
     info.max_texture_size=caps.Limits.MaxTexture2DDimension;
     info.max_color_attachments=caps.Limits.MaxColorAttachments;
@@ -19,13 +20,13 @@ void QueryDeviceInfo(radray::DeviceContext& runtime,rn_device_info& info) {
     info.max_storage_buffer_range=caps.Limits.MaxStorageBufferRange;
     info.storage_offset_alignment=caps.Limits.StorageBufferOffsetAlignment;
     info.texel_offset_alignment=caps.Limits.TexelBufferOffsetAlignment;
-    info.buffer_copy_offset_alignment=caps.Detail.BufferCopyOffsetAlignment;
-    info.texture_placement_alignment=caps.Detail.TextureDataPlacementAlignment;
-    info.texture_pitch_alignment=caps.Detail.TextureDataPitchAlignment;
+    info.buffer_copy_offset_alignment=caps.Limits.BufferCopyOffsetAlignment;
+    info.texture_placement_alignment=caps.Limits.TextureDataPlacementAlignment;
+    info.texture_pitch_alignment=caps.Limits.TextureDataPitchAlignment;
     info.max_texture_1d=caps.Limits.MaxTexture1DDimension;
     info.max_texture_3d=caps.Limits.MaxTexture3DDimension;
     info.max_array_layers=caps.Limits.MaxTextureArrayLayers;
-    info.max_vertex_bindings=caps.Detail.MaxVertexInputBindings;
+    info.max_vertex_bindings=caps.Limits.MaxVertexInputBindings;
     info.max_push_constant_bytes=caps.Limits.MaxPushConstantBytes;
     info.max_draw_indirect_count=caps.Limits.MaxDrawIndirectCount;
     info.host_coherent_atom_size=std::max<uint64_t>(1,caps.Limits.HostCoherentAtomSize);

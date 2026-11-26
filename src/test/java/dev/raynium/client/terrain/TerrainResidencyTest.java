@@ -427,6 +427,28 @@ class TerrainResidencyTest {
         }
     }
 
+    @Test void reorderedSectionsReuseInstanceSlotsAndOnlyChangedSlotsCrossTheAbi() {
+        try(var frame=new NativeFrameBuffer()) {
+            var residency=new TerrainResidency();
+            residency.reset(NativeRenderer.nextFrameId());
+            var a=mesh(112); var b=mesh(112); var c=capture();
+            put(c,0,a,0,1,1); put(c,1,b,16,2,1);
+            residency.prepare(c,frame,16,17,true);
+            long initial=descriptor(frame).get(JAVA_LONG,304);
+            residency.commit();
+            put(c,0,b,16,1,1); put(c,1,a,0,2,1);
+            residency.prepare(c,frame,16,17,true);
+            assertEquals(initial,descriptor(frame).get(JAVA_LONG,328));
+            assertEquals(0,count(frame,4));
+            assertEquals(b.layers[0].slotId-1,frame.visibleSegment().get(JAVA_INT,16));
+            residency.commit();
+            c.fastReused=true; c.instancesChanged=true; c.updatedFadingSlots.add(0); c.visibility[0]=0.25f;
+            residency.prepare(c,frame,16,17,true);
+            assertEquals(1,count(frame,4));
+            assertEquals(b.layers[0].slotId-1,descriptor(frame).get(ADDRESS,312).reinterpret(4).get(JAVA_INT,0));
+        }
+    }
+
     @Test void fullRescanPreservesVersionsWhenUnchangedAndResetsOnNewEpoch() {
         try(var frame=new NativeFrameBuffer()) {
             var residency=new TerrainResidency(); long epoch=NativeRenderer.nextFrameId(); residency.reset(epoch);

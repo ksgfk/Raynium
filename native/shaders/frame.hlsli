@@ -5,4 +5,5 @@
     float4 CameraFraction;
     float4 FogColor;
     float4 FogDistances;
+    float4 AtlasSizeAndInverse;
 };

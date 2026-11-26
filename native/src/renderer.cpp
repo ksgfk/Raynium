@@ -25,11 +25,11 @@ bool Renderer::Create(radray::DeviceContext& device,std::span<const radray::byte
         radray::VertexInputAttribute{0,24,"TEXCOORD",1,VertexFormat::UINT16X2},
         radray::VertexInputAttribute{1,0,"TEXCOORD",2,VertexFormat::SINT32X3},
         radray::VertexInputAttribute{1,12,"TEXCOORD",3,VertexFormat::FLOAT32}};
-    auto vertices=radray::VertexBufferPool::Create(device.GetDevice(),{.VertexStride=28,.PageVertexCapacity=(128u<<20)/28,
-        .AdditionalUsage=BufferUse::Resource,.Layouts=layouts,.Attributes=attributes,.DebugNamePrefix="TerrainVertices"}).Release();
     constexpr uint64_t targetPageBytes=512ull<<20;
-    const auto translucentPageBytes=caps.Limits.MaxBufferSize?std::min(targetPageBytes,caps.Limits.MaxBufferSize):targetPageBytes;
-    auto translucentVertices=radray::VertexBufferPool::Create(device.GetDevice(),{.VertexStride=28,.PageVertexCapacity=uint32_t(translucentPageBytes/28),
+    const auto pageBytes=caps.Limits.MaxBufferSize?std::min(targetPageBytes,caps.Limits.MaxBufferSize):targetPageBytes;
+    auto vertices=radray::VertexBufferPool::Create(device.GetDevice(),{.VertexStride=28,.PageVertexCapacity=uint32_t(pageBytes/28),
+        .AdditionalUsage=BufferUse::Resource,.Layouts=layouts,.Attributes=attributes,.DebugNamePrefix="TerrainVertices"}).Release();
+    auto translucentVertices=radray::VertexBufferPool::Create(device.GetDevice(),{.VertexStride=28,.PageVertexCapacity=uint32_t(pageBytes/28),
         .AdditionalUsage=BufferUse::Resource,.Layouts=layouts,.Attributes=attributes,.DebugNamePrefix="TranslucentVertices"}).Release();
     auto quadPool=radray::IndexBufferPool::Create(device.GetDevice(),{.PageIndexCapacity=(16u<<20)/sizeof(uint32_t),
         .AdditionalUsage=BufferUse::Resource,.DebugNamePrefix="QuadIndices"}).Release();
@@ -90,6 +90,7 @@ bool Renderer::SubmitFrame(rn_renderer* owner,BatchEnvelope& envelope,FrameExecu
     auto& tape=*slot.Emplace<TapeCompiler>(slot);
     for(auto id:envelope.resources.removedModelMeshes) RemoveModelMesh(id);
     _staticGeometry->BeginSlot();
+    _terrain.BeginSlotViews({batch.views,batch.view_count},slot);
     if(!_staticGeometry->PrepareQuadIndices(_terrain,slot,tape.WorldUploads()) ||
        !tape.PrepareViews(batch,_terrain,owner,_pipeline->Resources(),_pipeline->UsesIndirect()) ||
        !_pipeline->CompileTape(slot,tape,batch,owner,*_staticGeometry,_terrain)) {

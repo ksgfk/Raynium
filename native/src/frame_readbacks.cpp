@@ -30,7 +30,7 @@ bool FrameReadbacks::Reserve(rn_buffer* target,uint64_t destination,uint64_t row
 }
 bool FrameReadbacks::Prepare(Device& device) {
     if(!_size || (_storage && _storage->UseCount()==1 && _storage->buffer->GetDesc().Size>=_size)) return true;
-    auto buffer=device.CreateBuffer({.Size=_size,.Memory=MemoryType::ReadBack,.Usage=BufferUse::CopyDestination|BufferUse::MapRead}).Release();
+    auto buffer=device.CreateBuffer({.Size=_size,.Memory=MemoryType::HostReadBack,.Usage=BufferUse::CopyDestination|BufferUse::MapRead}).Release();
     if(!buffer) return false;
     auto* mapped=static_cast<const radray::byte*>(buffer->GetMappedData().Get());
     if(!mapped) return false;

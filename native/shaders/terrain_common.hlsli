@@ -45,10 +45,9 @@ float linearFog(float distance, float start, float end) {
     return distance <= start ? 0 : distance >= end ? 1 : (distance - start) / (end - start);
 }
 float4 sampleAtlas(float2 uv) {
-    uint width,height; Atlas.GetDimensions(width,height);
-    float2 pixel=1.0/float2(width,height),du=ddx(uv),dv=ddy(uv);
+    float2 pixel=AtlasSizeAndInverse.zw,du=ddx(uv),dv=ddy(uv);
     float2 screen=max(sqrt(du*du+dv*dv),1e-20);
-    float2 texel=uv/pixel,center=round(texel)-0.5;
+    float2 texel=uv*AtlasSizeAndInverse.xy,center=round(texel)-0.5;
     float2 offset=saturate((texel-center-0.5)*pixel/screen+0.5);
     float4 nearest=Atlas.SampleGrad(AtlasSampler,(center+offset)*pixel,du,dv);
     if(CameraBlock.w==0) return nearest;

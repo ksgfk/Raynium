@@ -24,6 +24,9 @@ struct TerrainView {
     const radray::gpu::GpuDeviceCapabilities* capabilities{};
     bool useIndirect{};
     uint32_t indirectLimit{};
+    uint32_t atlasWidth{},atlasHeight{};
+    radray::gpu::GpuBackend backend{};
+    radray::RDGBufferHandle Constants(radray::RDGBuilder&,uint32_t width,uint32_t height);
     void Import(radray::RDGBuilder&,radray::gpu::GpuBackend);
 };
 struct TerrainFeature {
@@ -33,6 +36,7 @@ struct TerrainFeature {
     radray::array<const rn_texture*,3> sources;
     radray::array<uint32_t,3> mips{};
     radray::array<radray::RDGTextureHandle,3> reads;
+    radray::RDGBufferHandle frameConstants;
     struct MaterialBinding {
         const rn_texture* image;
         rn_texture_sampling sampling{};

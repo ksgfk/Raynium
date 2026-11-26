@@ -16,7 +16,7 @@ bool FrameTimestamps::Prepare(Device& device,CommandQueue& queue,std::span<const
         const uint64_t size=uint64_t(count)*sizeof(uint64_t);
         auto pool=device.CreateQueryPool({QueryType::Timestamp,count,"Raynium frame timestamps"}).Release();
         if(!pool) return false;
-        auto buffer=device.CreateBuffer({.Size=size,.Memory=MemoryType::ReadBack,.Usage=BufferUse::CopyDestination|BufferUse::MapRead}).Release();
+        auto buffer=device.CreateBuffer({.Size=size,.Memory=MemoryType::HostReadBack,.Usage=BufferUse::CopyDestination|BufferUse::MapRead}).Release();
         if(!buffer) return false;
         auto* mapped=static_cast<const uint64_t*>(buffer->GetMappedData().Get());
         if(!mapped) return false;

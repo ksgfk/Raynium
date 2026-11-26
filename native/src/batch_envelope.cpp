@@ -22,7 +22,12 @@ bool FreezeView(std::pmr::memory_resource& arena, rn_terrain_view_desc& view, bo
         !ValidArray(view.indices, view.index_count, 65536) || !ValidArray(view.meshes, view.mesh_count, 65536) ||
         !ValidArray(view.removed_meshes, view.removed_mesh_count, 1048576) ||
         !ValidArray(view.visible, view.visible_count, 1048576) || !ValidArray(view.instances, view.instance_count, 1048576)) return false;
+    const bool pooled=(view.flags&RN_FRAME_INSTANCE_POOL)!=0;
+    if (view.instance_reserved || (pooled ?
+        (view.instance_capacity>1048576 || !ValidArray(view.instance_slots,view.instance_count,1048576)) :
+        (view.instance_slots || view.instance_capacity || view.instance_base_version))) return false;
     if (borrow) return true;
+    if (pooled) view.instance_slots=Copy(arena,view.instance_slots,view.instance_count);
     auto* meshes = Copy(arena, view.meshes, view.mesh_count);
     view.meshes = meshes;
     for (auto& mesh : std::span(meshes, view.mesh_count)) {

@@ -7,7 +7,7 @@ import static java.lang.foreign.ValueLayout.*;
 
 /** Owner-thread frontend for the renderer and its asynchronous submission stream. */
 public final class NativeRenderer implements AutoCloseable {
-    public static final int RGSS=1, IMPROVED_TRANSPARENCY=4, WIREFRAME=128, REUSE_VISIBLE=256, REUSE_INSTANCES=512;
+    public static final int RGSS=1, IMPROVED_TRANSPARENCY=4, WIREFRAME=128, REUSE_VISIBLE=256, REUSE_INSTANCES=512, INSTANCE_POOL=1024;
     public record Capture(int width,int height,byte[] rgba) {}
     public record Progress(long consumed,long submitted,long completed,long presented,int generation,int recovery,int outcome,int flags) {
         static Progress read(MemorySegment memory,long offset) {

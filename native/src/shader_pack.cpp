@@ -125,10 +125,10 @@ bool ValidateTerrainShader(const ShaderArtifactView& artifact,std::string_view p
     auto frame=artifact.FindBinding("Frame");
     if(frame) {
         auto types=artifact.Types(); const auto root=frame->Record.TypeIndex;
-        if(root>=types.size() || types[root].Size!=192) { RADRAY_ERR_LOG("{}: Terrain Frame constant size is incompatible",program); return false; }
+        if(root>=types.size() || types[root].Size!=208) { RADRAY_ERR_LOG("{}: Terrain Frame constant size is incompatible",program); return false; }
         struct Member { const char* name; uint32_t offset,size,scalar,rows; };
         const Member members[]{{"Projection",0,64,1,4},{"View",64,64,1,4},{"CameraBlock",128,16,2,1},
-            {"CameraFraction",144,16,1,1},{"FogColor",160,16,1,1},{"FogDistances",176,16,1,1}};
+            {"CameraFraction",144,16,1,1},{"FogColor",160,16,1,1},{"FogDistances",176,16,1,1},{"AtlasSizeAndInverse",192,16,1,1}};
         for(const auto& member:members) {
             auto found=std::find_if(types.begin(),types.end(),[&](const auto& type){return type.ParentIndex==root && artifact.GetName(type.Name)==member.name;});
             if(found==types.end() || found->Offset!=member.offset || found->Size!=member.size || found->ElementSize!=member.size ||

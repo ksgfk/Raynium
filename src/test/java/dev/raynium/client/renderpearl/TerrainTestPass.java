@@ -12,6 +12,14 @@ public final class TerrainTestPass {
     public static long submitMeasured(CommandTape tape) { return tape.submit(true).sequence(); }
     public static long queryPoolHandle(RayniumQueryPool pool) { return pool.handle(); }
     public static CommandTape batch(RayniumGpuDevice device) { return device.currentBatch(); }
+    public static void loadAttachments(CommandTape tape,NativeTexture color,NativeTexture depth) {
+        try(var target=new RayniumTextureView(color,0,1); var z=new RayniumTextureView(depth,0,1)) {
+            var pass=RenderPassDescriptor.builder(()->"load cleared attachments").withColorAttachment(target,Optional.empty())
+                .withDepthAttachment(z,OptionalDouble.empty()).build();
+            tape.beginRaster(pass);
+            tape.endRaster();
+        }
+    }
     public static void record(CommandTape tape,CommandTape.TerrainView view,NativeTexture color,NativeTexture depth,
                               NativeTexture atlas,NativeTexture light) {
         try(var target=new RayniumTextureView(color,0,1); var z=new RayniumTextureView(depth,0,1);

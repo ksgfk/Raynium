@@ -132,6 +132,8 @@ struct TerrainViewCacheSlot {
     TerrainViewDrawData draws;
     radray::array<Layer,3> layers;
     SlotPromotedBuffer instanceBuffer;
+    radray::IntrusivePtr<radray::GpuBuffer> instancePool;
+    bool pooledInstances{};
     radray::array<SlotPromotedBuffer,3> argumentBuffers;
     radray::vector<rn_visible_item> visible;
     radray::vector<rn_instance> instances;
@@ -197,6 +199,13 @@ public:
         uint64_t* uploadBytesOut=nullptr,bool* grewOut=nullptr);
     bool ResyncQuadMeshes();
 private:
+    struct RetiredTerrainAllocations {
+        radray::vector<radray::VertexBufferSubAllocation> vertices;
+        radray::vector<radray::IndexBufferSubAllocation> indices;
+    };
+    RetiredTerrainAllocations& Retired(radray::FrameSlot&);
+    void RetireMesh(TerrainMesh&,radray::FrameSlot&);
+    RetiredTerrainAllocations* _retired{};
     struct TerrainState {
         uint64_t epoch{};
         radray::vector<TerrainMesh> meshesBySlot;

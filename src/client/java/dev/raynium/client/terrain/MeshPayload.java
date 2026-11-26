@@ -193,15 +193,12 @@ public final class MeshPayload {
                 offsets[g] = cursor;
                 cursor += groupQuadCounts[g] * 112;
             }
+            byte[] packed = new byte[(quadCount * 3 + 7) / 8];
             for (int q = 0; q < quadCount; q++) {
                 int g = groups[q] & 7;
                 int dstOff = offsets[g];
                 offsets[g] = dstOff + 112;
                 MemorySegment.copy(srcSeg, q * 112L, dstSeg, dstOff, 112L);
-            }
-            byte[] packed = new byte[(quadCount * 3 + 7) / 8];
-            for (int q = 0; q < quadCount; q++) {
-                int g = groups[q] & 7;
                 int bit = q * 3;
                 int b = bit >>> 3;
                 int shift = bit & 7;
@@ -288,8 +285,8 @@ public final class MeshPayload {
                 for (int i = 0; i < count; i++) {
                     int value = data.getInt(i * 4);
                     if (value < 0 || value >= vertexCount) throw new IllegalArgumentException("Transparent index outside mesh");
-                    direct.putInt(i * 4, value);
                 }
+                MemorySegment.copy(MemorySegment.ofBuffer(data),0,MemorySegment.ofBuffer(direct),0,count * 4L);
             }
             return new IndexSnapshot(direct, count);
         } catch (RuntimeException | Error failure) {

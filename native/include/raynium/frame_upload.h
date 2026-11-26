@@ -6,6 +6,10 @@
 #include <algorithm>
 
 namespace raynium {
+inline radray::DynamicBufferResidency StreamResidency(size_t bytes) noexcept {
+    return bytes>(64u<<10) ? radray::DynamicBufferResidency::HostOnly : radray::DynamicBufferResidency::PreferDevice;
+}
+
 struct FrameParameterBindings {
     explicit FrameParameterBindings(radray::FrameSlot& slot)
         :memory(storage.data(),storage.size(),&slot.GetScratchMemoryResource()),

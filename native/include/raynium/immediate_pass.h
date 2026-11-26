@@ -11,6 +11,7 @@ using RasterOp=FrameOp<uint32_t,ImmediateDraw,TerrainFeature,InstancedGeometryFe
 class RasterPassPlan final {
 public:
     static RasterPassPlan* Decode(std::pmr::memory_resource& memory,std::span<const radray::byte> record,rn_renderer* owner,uint32_t maxColors);
+    bool TryFoldClear(const rn_texture*,uint32_t mip,uint32_t layer,const radray::gpu::ColorClearValue&) noexcept;
     bool AddTerrain(std::pmr::memory_resource& memory,std::pmr::vector<RasterOp>& ops,std::span<const radray::byte>,std::span<TerrainView>,rn_renderer* owner);
     bool AddDraw(std::pmr::memory_resource& memory,std::pmr::vector<RasterOp>& ops,std::span<const radray::byte>,rn_renderer* owner);
     bool AddInstancedGeometry(std::pmr::memory_resource& memory,std::pmr::vector<RasterOp>& ops,std::span<const radray::byte>,std::span<const radray::byte> instanceUploads,

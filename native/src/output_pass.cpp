@@ -36,7 +36,7 @@ bool OutputPassResources::Create(Device& device,std::span<const radray::byte> sh
 }
 void OutputPassResources::AddPass(radray::RDGBuilder& graph,radray::RDGTextureHandle source,
     radray::RDGTextureHandle destination,uint32_t width,uint32_t height,uint32_t sourceMip,bool flip) const {
-    const auto constants=graph.CreateBuffer({.MaxSize=256,.Usage=BufferUse::CBuffer},
+    const auto constants=graph.CreateDynamicBuffer({.MaxSize=256,.Usage=BufferUse::CBuffer},
         radray::RDGUploadSource::Generated(256,flip?height:0,+[](const uint32_t& flippedHeight,radray::RDGUploadWriteContext& ctx) noexcept {
             std::memset(ctx.Bytes.data(),0,ctx.Bytes.size());
             std::memcpy(ctx.Bytes.data(),&flippedHeight,sizeof(flippedHeight));
@@ -58,6 +58,6 @@ void OutputPassResources::AddPass(radray::RDGBuilder& graph,radray::RDGTextureHa
             const radray::TransientParameterBinding bindings[]{{0,0,view.Get()},FrameConstantBinding(1,context.ResolveBuffer(data.constants))};
             data.parameters=context.GetSlot().AcquireParameterSet(data.objects->bindings,bindings).Get();
             return data.parameters!=nullptr;
-        }).ReadBuffer(constants,BufferState::CBuffer).ReadTexture(source).WriteColor(0,destination,LoadAction::Clear,StoreAction::Store,{{0,0,0,1}});
+        }).ReadBuffer(constants,BufferState::CBuffer).ReadTexture(source).WriteColor(0,destination,LoadAction::DontCare,StoreAction::Store);
 }
 }

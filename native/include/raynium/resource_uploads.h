@@ -11,7 +11,7 @@ namespace raynium {
 radray::gpu::TextureFormat ToTextureFormat(rn_pixel_format) noexcept;
 class FrameTextureImports final {
 public:
-    FrameTextureImports(radray::RDGBuilder& graph,std::pmr::memory_resource& scratch,const radray::gpu::DeviceDetail* detail=nullptr);
+    FrameTextureImports(radray::RDGBuilder& graph,std::pmr::memory_resource& scratch,const radray::gpu::DeviceLimits* limits=nullptr);
     radray::RDGTextureHandle Import(const radray::IntrusivePtr<radray::GpuTexture>& texture,bool overwritesWholeSubresource=false);
     std::pmr::memory_resource* Scratch() const { return _cleared.get_allocator().resource(); }
     radray::RDGTextureHandle Import(const rn_texture* texture,bool overwrite=false) {
@@ -19,7 +19,7 @@ public:
     }
 private:
     radray::RDGBuilder& _graph;
-    const radray::gpu::DeviceDetail* _detail;
+    const radray::gpu::DeviceLimits* _limits;
     std::pmr::unordered_set<radray::GpuTexture*> _cleared;
 };
 radray::IntrusivePtr<radray::GpuTexture> CreateSceneTexture(radray::gpu::Device&,const rn_texture_desc&);

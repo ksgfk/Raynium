@@ -31,7 +31,7 @@ radray::unique_ptr<ImmediatePipeline> ImmediatePipeline::Create(Device& device,R
     if(desc.struct_size!=sizeof(desc) || !desc.program || !desc.words || desc.word_count<9) return {};
     const auto* w=desc.words;
     const uint32_t topology=w[0],flags=w[1],compare=w[2],bindings=w[6],attributes=w[7],colors=w[8];
-    if(topology>3 || flags>3 || compare>8 || w[3]>1 || bindings>device.GetDetail().MaxVertexInputBindings ||
+    if(topology>3 || flags>3 || compare>8 || w[3]>1 || bindings>device.GetCapabilities().Limits.MaxVertexInputBindings ||
        attributes>32 || colors>device.GetCapabilities().Limits.MaxColorAttachments ||
        desc.word_count!=9ull+3ull*bindings+4ull*attributes+9ull*colors) return {};
     const auto bias=std::bit_cast<float>(w[4]),slope=std::bit_cast<float>(w[5]);
@@ -53,7 +53,7 @@ radray::unique_ptr<ImmediatePipeline> ImmediatePipeline::Create(Device& device,R
         .DepthTestEnable=true,.DepthWriteEnable=w[3]!=0};
     w+=9;
     for(uint32_t i=0;i<bindings;++i,w+=3) {
-        if(w[0]>=device.GetDetail().MaxVertexInputBindings || !w[1] || w[2]>1) return {};
+        if(w[0]>=device.GetCapabilities().Limits.MaxVertexInputBindings || !w[1] || w[2]>1) return {};
         state.vertices.push_back({w[0],w[1],w[2]?VertexStepMode::Instance:VertexStepMode::Vertex});
     }
     auto inputs=item->program->program->Artifact().VertexInputs();

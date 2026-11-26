@@ -80,11 +80,18 @@ FaceMask EvaluateFaces(const TerrainHotSlot& hot,const radray::array<int32_t,3>&
         return {requested,false};
     FaceMask result{hot.groupBits[6]&requested,false};
     if(result.bits==requested) return result;
+    const bool standard=hot.sectionBoundsAxes==7 && instances.size()==1 &&
+        std::abs(eye[0])<=1.5 && std::abs(eye[1])<=1.5 && std::abs(eye[2])<=1.5;
     for(const auto& instance:instances) {
         for(uint32_t a=0;a<3;++a) {
             const uint32_t positive=hot.groupBits[2*a]&requested, negative=hot.groupBits[2*a+1]&requested;
             if(!(positive|negative)) continue;
-            const double position=double(int64_t(block[a])-instance.origin[a])+eye[a];
+            const int64_t diff=int64_t(block[a])-instance.origin[a];
+            if(standard) {
+                if(diff<=-4) { result.bits|=negative; continue; }
+                if(diff>=20) { result.bits|=positive; continue; }
+            }
+            const double position=double(diff)+eye[a];
             if(!std::isfinite(position)) return {requested,false};
             // For bounds inside a section, neither plane can cross the one-block eye box at this distance.
             if(hot.sectionBoundsAxes&(1u<<a)) {
@@ -267,7 +274,21 @@ TerrainResidency::TerrainResidency(radray::DeviceContext& device,radray::unique_
     _fastClassicTranslucent.reserve(1024);
 }
 
+TerrainResidency::RetiredTerrainAllocations& TerrainResidency::Retired(radray::FrameSlot& slot) {
+    if(!_retired) _retired=slot.Emplace<RetiredTerrainAllocations>();
+    return *_retired;
+}
+
+void TerrainResidency::RetireMesh(TerrainMesh& mesh,radray::FrameSlot& slot) {
+    auto& retired=Retired(slot);
+    if(mesh.geometry) retired.vertices.push_back(std::move(mesh.geometry));
+    if(mesh.indices) retired.indices.push_back(std::move(mesh.indices));
+    for(auto& wire:mesh.wireframes) retired.indices.push_back(std::move(wire.indices));
+    mesh={};
+}
+
 void TerrainResidency::BeginSlotViews(std::span<const rn_terrain_view_desc> views,radray::FrameSlot& slot) {
+    _retired=nullptr;
     if(!views.empty()) {
         const bool wireframe=std::any_of(views.begin(),views.end(),[](const auto& view){ return (view.flags&RN_FRAME_WIREFRAME)!=0; });
         if(_state.wireframeActive && !wireframe) {
@@ -276,7 +297,7 @@ void TerrainResidency::BeginSlotViews(std::span<const rn_terrain_view_desc> view
             for(auto& mesh:_state.meshesBySlot) {
                 if(!mesh.active || mesh.wireframes.empty()) continue;
                 for(auto& wire:mesh.wireframes) {
-                    slot.Emplace<TerrainWireframe>(std::move(wire));
+                    Retired(slot).indices.push_back(std::move(wire.indices));
                 }
                 mesh.wireframes.clear();
             }
@@ -345,7 +366,7 @@ bool TerrainResidency::EnsureQuadIndices(uint32_t vertexCount,std::pmr::vector<G
     if(uploadBytesOut) *uploadBytesOut+=owner.GetByteSize();
     uploads.push_back({owner.GetGpuBuffer(),owner.GetByteOffset(),radray::RDGUploadSource::Generated(owner.GetByteSize(),capacity,
         +[](const uint32_t& vertices,radray::RDGUploadWriteContext& context) noexcept { return WriteQuadIndices(context.Bytes,vertices); })});
-    if(_quadIndices && retireSlot) retireSlot->Emplace<radray::IndexBufferSubAllocation>(std::move(_quadIndices));
+    if(_quadIndices && retireSlot) Retired(*retireSlot).indices.push_back(std::move(_quadIndices));
     _quadIndices=std::move(owner);
     _quadVertexCapacity=capacity;
     ++_layerGeometryVersion[0];
@@ -418,18 +439,79 @@ bool TerrainResidency::ValidateAndSyncHotSlot(uint32_t slotId) {
     return true;
 }
 
+namespace {
+bool UpdateInstancePool(const rn_terrain_view_desc& view,TerrainViewCacheSlot& cache,SlotUploads slot) {
+    const bool reset=view.instance_base_version==0;
+    if(view.instance_capacity>TerrainResidency::kMaxMeshSlot || !Array(view.instance_slots,view.instance_count) ||
+       !view.instances_version || (!reset && (!cache.pooledInstances || cache.epoch!=view.epoch ||
+        cache.instancesVersion!=view.instance_base_version || view.instance_capacity<cache.instances.size()))) {
+        RADRAY_ERR_LOG("Invalid terrain instance pool base or extent");
+        return false;
+    }
+    std::span ids{view.instance_slots,view.instance_count};
+    for(uint32_t id:ids) if(id>=view.instance_capacity) {
+        RADRAY_ERR_LOG("Terrain instance update exceeds pool extent");
+        return false;
+    }
+    const size_t previousSize=cache.instances.size();
+    if(reset) cache.instances.clear();
+    cache.instances.resize(view.instance_capacity);
+    for(size_t i=0;i<ids.size();++i) cache.instances[ids[i]]=view.instances[i];
+    if(cache.instances.empty()) {
+        cache.instancePool=nullptr;
+        return true;
+    }
+    const auto bytes=std::as_bytes(std::span(cache.instances));
+    const bool grow=!cache.instancePool || cache.instancePool->GetDesc().Size<bytes.size();
+    if(grow) {
+        uint64_t capacity=std::max<uint64_t>(4096,std::bit_ceil(bytes.size()));
+        const uint64_t limit=slot.frame.GetDevice().GetCapabilities().Limits.MaxBufferSize;
+        if(limit) capacity=std::min(capacity,limit);
+        if(capacity<bytes.size()) {
+            RADRAY_ERR_LOG("Terrain instance pool exceeds device buffer limit");
+            return false;
+        }
+        auto buffer=radray::GpuBuffer::Create(slot.frame.GetDevice(),{.Size=capacity,.Usage=BufferUse::Vertex|BufferUse::CopyDestination});
+        if(!buffer) { RADRAY_ERR_LOG("Cannot allocate terrain instance pool"); return false; }
+        cache.instancePool=buffer.Release();
+    }
+    const auto upload=[&](size_t first,size_t count) {
+        const auto offset=first*sizeof(rn_instance);
+        slot.geometry.push_back({cache.instancePool,offset,
+            radray::RDGUploadSource::BorrowedBytes(bytes.subspan(offset,count*sizeof(rn_instance)))});
+    };
+    if(reset || grow || ids.size()>cache.instances.size()/2) {
+        upload(0,cache.instances.size());
+        return true;
+    }
+    if(previousSize<cache.instances.size()) upload(previousSize,cache.instances.size()-previousSize);
+    if(ids.empty()) return true;
+    std::pmr::vector<uint32_t> sorted(&slot.frame.GetScratchMemoryResource());
+    sorted.reserve(ids.size());
+    for(auto id:ids) if(id<previousSize) sorted.push_back(id);
+    std::sort(sorted.begin(),sorted.end());
+    for(size_t i=0;i<sorted.size();) {
+        uint32_t first=sorted[i++],last=first;
+        while(i<sorted.size() && sorted[i]<=last+1) last=sorted[i++];
+        upload(first,last-first+1);
+    }
+    return true;
+}
+}
+
 bool TerrainResidency::PrepareFrame(rn_renderer* renderer,const rn_terrain_view_desc& f,
     const MeshPassResources& resources,SlotUploads slot,TerrainFrame& frame) {
     RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.Prepare");
 
     constexpr uint32_t kAllowedFlags=RN_FRAME_RGSS|RN_FRAME_IMPROVED_TRANSPARENCY|RN_FRAME_WIREFRAME|
-        RN_FRAME_REUSE_VISIBLE|RN_FRAME_REUSE_INSTANCES;
+        RN_FRAME_REUSE_VISIBLE|RN_FRAME_REUSE_INSTANCES|RN_FRAME_INSTANCE_POOL;
     if(f.struct_size!=sizeof(f) || (f.flags&~kAllowedFlags) || !f.epoch || f.epoch<_state.epoch ||
        !Array(f.indices,f.index_count,65536) || !Array(f.meshes,f.mesh_count,65536) ||
        !Array(f.removed_meshes,f.removed_mesh_count) || !Array(f.visible,f.visible_count) || !Array(f.instances,f.instance_count))
         { RADRAY_ERR_LOG("Invalid frame layout, epoch or array: sequence={} epoch={} resident_epoch={}",f.output_sequence,f.epoch,_state.epoch); return false; }
     const bool wireframe=(f.flags&RN_FRAME_WIREFRAME)!=0;
     const bool oit=(f.flags&RN_FRAME_IMPROVED_TRANSPARENCY)!=0;
+    const bool pooled=(f.flags&RN_FRAME_INSTANCE_POOL)!=0;
     const bool reuseVisible=(f.flags&RN_FRAME_REUSE_VISIBLE)!=0;
     const bool reuseInstances=(f.flags&RN_FRAME_REUSE_INSTANCES)!=0;
     if(wireframe && !resources.SupportsWireframe()) { RADRAY_ERR_LOG("Terrain wireframe unsupported on this device"); return false; }
@@ -440,13 +522,14 @@ bool TerrainResidency::PrepareFrame(rn_renderer* renderer,const rn_terrain_view_
     auto& draws=cache.draws;
     const bool warm=cache.epoch==f.epoch;
     if(reuseVisible) {
-        if(!warm || f.epoch!=_state.epoch ||
+        if(pooled!=cache.pooledInstances || !warm || f.epoch!=_state.epoch ||
            f.visible_count || f.mesh_count || f.removed_mesh_count) {
             RADRAY_ERR_LOG("Invalid RN_FRAME_REUSE_VISIBLE usage: cached={} epoch={} vis={} meshes={} removed={}",
                 warm,f.epoch,f.visible_count,f.mesh_count,f.removed_mesh_count);
             return false;
         }
-        if(reuseInstances && (!warm || f.instance_count)) {
+        if(reuseInstances && (f.instance_count || (pooled && (!f.instance_base_version ||
+            f.instance_base_version!=f.instances_version || f.instance_capacity!=cache.instances.size())))) {
             RADRAY_ERR_LOG("Invalid RN_FRAME_REUSE_INSTANCES usage: cached={} instances={}",warm,f.instance_count);
             return false;
         }
@@ -462,13 +545,12 @@ bool TerrainResidency::PrepareFrame(rn_renderer* renderer,const rn_terrain_view_
     frame={};
     frame.parameters=f; frame.draws=&draws; frame.geometry=&slot.geometry;
     auto& scalar=frame.parameters;
-    scalar.indices=nullptr; scalar.meshes=nullptr; scalar.removed_meshes=nullptr; scalar.visible=nullptr; scalar.instances=nullptr;
+    scalar.indices=nullptr; scalar.meshes=nullptr; scalar.removed_meshes=nullptr; scalar.visible=nullptr; scalar.instances=nullptr; scalar.instance_slots=nullptr;
 
     if(f.epoch!=state.epoch) {
         for(auto& owner:state.meshesBySlot) {
             if(owner.active) {
-                owner.active=false;
-                slot.frame.Emplace<TerrainMesh>(std::move(owner));
+                RetireMesh(owner,slot.frame);
             }
         }
         state.meshesBySlot.clear();
@@ -489,10 +571,8 @@ bool TerrainResidency::PrepareFrame(rn_renderer* renderer,const rn_terrain_view_
             ++_layerGeometryVersion[owner.layout.layer];
             ++_partitionVersion;
             if(rawId<_hotSlots.size()) _hotSlots[size_t(rawId)]={};
-            owner.active=false;
             --state.residentMeshCount;
-            slot.frame.Emplace<TerrainMesh>(std::move(owner));
-            owner={};
+            RetireMesh(owner,slot.frame);
         }
     }
 
@@ -548,13 +628,8 @@ bool TerrainResidency::PrepareFrame(rn_renderer* renderer,const rn_terrain_view_
             auto& previous=state.meshesBySlot[slotId];
             if(previous.active) {
                 ++_layerGeometryVersion[previous.layout.layer];
-                for(auto& wire:previous.wireframes) {
-                    slot.frame.Emplace<TerrainWireframe>(std::move(wire));
-                }
-                previous.wireframes.clear();
                 if(x.layer==RN_MATERIAL_TRANSLUCENT && previous.layout.layer==x.layer) mesh.indices=std::move(previous.indices);
-                previous.active=false;
-                slot.frame.Emplace<TerrainMesh>(std::move(previous));
+                RetireMesh(previous,slot.frame);
             } else {
                 ++state.residentMeshCount;
             }
@@ -577,7 +652,7 @@ bool TerrainResidency::PrepareFrame(rn_renderer* renderer,const rn_terrain_view_
             uploadBytes+=owner.GetByteSize();
             slot.geometry.push_back({owner.GetGpuBuffer(),owner.GetByteOffset(),
                 radray::RDGUploadSource::BorrowedBytes(std::as_bytes(std::span{x.indices,x.count}))});
-            if(mesh.indices) slot.frame.Emplace<radray::IndexBufferSubAllocation>(std::move(mesh.indices));
+            if(mesh.indices) Retired(slot.frame).indices.push_back(std::move(mesh.indices));
             mesh.indices=std::move(owner);
             ++_layerGeometryVersion[RN_MATERIAL_TRANSLUCENT];
             markChanged(uint32_t(x.mesh_id));
@@ -590,18 +665,26 @@ bool TerrainResidency::PrepareFrame(rn_renderer* renderer,const rn_terrain_view_
 
     std::span<const rn_visible_item> activeVisible;
     std::span<const rn_instance> activeInstances;
-    const bool visibleIdentical=reuseVisible || cache.MatchesVisible(f);
-    const bool originsIdentical=reuseInstances || cache.MatchesOrigins(f);
-    const bool instancesIdentical=reuseInstances || cache.MatchesInstances(f);
+    const bool sameMode=pooled==cache.pooledInstances;
+    const bool visibleIdentical=reuseVisible || (sameMode && cache.MatchesVisible(f));
+    const bool originsIdentical=pooled ? f.instance_base_version && f.origins_version && f.origins_version==cache.originsVersion
+        : sameMode && (reuseInstances || cache.MatchesOrigins(f));
+    const bool instancesIdentical=!pooled && sameMode && (reuseInstances || cache.MatchesInstances(f));
     if(!visibleIdentical) {
         if(f.visible_count) cache.visible.assign(f.visible,f.visible+f.visible_count); else cache.visible.clear();
         cache.partitionVersion=0;
     }
     if(!reuseVisible) cache.visibleVersion=f.visible_version;
-    if(!instancesIdentical) {
+    if(pooled) {
+        if(!UpdateInstancePool(f,cache,slot)) return false;
+        frame.persistentInstances=cache.instancePool;
+        cache.instanceBuffer={};
+    } else if(!instancesIdentical) {
+        cache.instancePool=nullptr;
         if(f.instance_count) cache.instances.assign(f.instances,f.instances+f.instance_count); else cache.instances.clear();
     }
-    if(!reuseInstances) {
+    cache.pooledInstances=pooled;
+    if(!reuseInstances || pooled) {
         cache.originsVersion=f.origins_version;
         cache.instancesVersion=f.instances_version;
     }
@@ -690,6 +773,7 @@ bool TerrainResidency::PrepareFrame(rn_renderer* renderer,const rn_terrain_view_
             const size_t instanceCountTotal=activeInstances.size();
             size_t lastOitBucket=0;
 
+            radray::array<radray::InlineVector<uint32_t,16>,2> activePages;
             bool preparedItems=true;
             const auto processItem=[&](const rn_visible_item& item,const TerrainHotSlot& hot,uint32_t layer) {
                 const uint32_t requested=item.element_mask==UINT32_MAX?uint32_t(hot.fullMask):item.element_mask;
@@ -714,6 +798,7 @@ bool TerrainResidency::PrepareFrame(rn_renderer* renderer,const rn_terrain_view_
                     if(page>=buckets.size()) buckets.resize(size_t(page)+1);
                     auto& bucket=buckets[page];
                     if(bucket.args.empty()) {
+                        activePages[layer].push_back(page);
                         bucket.repSlotId=uint32_t(item.mesh);
                         bucket.wireMask=wire?requested:0;
                     }
@@ -802,20 +887,15 @@ bool TerrainResidency::PrepareFrame(rn_renderer* renderer,const rn_terrain_view_
                     auto& layerData=draws.layers[layer];
                     auto& prepared=layerData.prepared;
                     size_t totalArgs=0;
-                    size_t activeBuckets=0;
-                    for(const auto& bucket:_fastPageBuckets[layer]) {
-                        if(!bucket.args.empty()) {
-                            totalArgs+=bucket.args.size();
-                            ++activeBuckets;
-                        }
-                    }
+                    const size_t activeBuckets=activePages[layer].size();
+                    for(uint32_t page:activePages[layer]) totalArgs+=_fastPageBuckets[layer][page].args.size();
                     if(totalArgs>UINT32_MAX) { RADRAY_ERR_LOG("Terrain indirect argument count overflow"); return false; }
                     if(totalArgs) {
                         prepared.IndexedArguments.reserve(totalArgs);
                         prepared.Batches.reserve(activeBuckets);
                         layerData.fastCommands.reserve(activeBuckets);
-                        for(const auto& bucket:_fastPageBuckets[layer]) {
-                            if(bucket.args.empty()) continue;
+                        for(uint32_t page:activePages[layer]) {
+                            const auto& bucket=_fastPageBuckets[layer][page];
                             const auto& repMesh=meshesData[bucket.repSlotId];
                             const auto* indices=&_quadIndices;
                             if(bucket.wireMask) {
@@ -981,7 +1061,7 @@ bool TerrainResidency::PrepareFrame(rn_renderer* renderer,const rn_terrain_view_
         }
 
         cache.epoch=f.epoch;
-        if(!cache.instanceBuffer.Prepare(_device.GetDevice(),instancesIdentical,frame.instances.size_bytes(),
+        if(!pooled && !cache.instanceBuffer.Prepare(_device.GetDevice(),instancesIdentical,frame.instances.size_bytes(),
             BufferUse::Vertex,frame.persistentInstances,frame.uploadInstances,draws.hasAnyDraws)) return false;
         if(slot.useIndirect) {
             for(uint32_t layer=0;layer<3;++layer) {
