@@ -46,7 +46,7 @@ private:
     void OnFrameSlotRetired(radray::FrameSlot&,const radray::RDGGpuTimingSnapshot&) noexcept override;
     void ExtractFrameData(radray::FrameSlot&) noexcept override;
     void SetupGraph(radray::RDGBuilder&,radray::FrameSlot&) noexcept override;
-    bool SubmitFrame(radray::FrameSlot&,radray::gpu::CommandBuffer&) noexcept override;
+    bool SubmitFrame(radray::FrameSlot&,radray::RDGSubmitPlan&) noexcept override;
     // GPU objects reused by the slot's frames; written only after that slot's previous GPU work completed.
     struct SlotResources {
         FrameTimestamps timestamps;

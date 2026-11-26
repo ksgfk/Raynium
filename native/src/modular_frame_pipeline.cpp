@@ -91,22 +91,20 @@ void ModularFramePipeline::SetupGraph(radray::RDGBuilder& graph,radray::FrameSlo
     const auto& limits=slot.GetDevice().GetCapabilities().Limits;
     FrameTextureImports imports{graph,slot.GetScratchMemoryResource(),&limits};
     _pending->uploads->AddUploads(graph,imports,_pending->shadowWrites);
-    _tape->Replay(graph,imports,_readback,*_output,resources.timestamps,resources.readbacks,_pending->color);
+    const auto backBuffer=_pending->surfaceFrame ? graph.ImportBackBuffer(*_pending->surfaceFrame) : radray::RDGTextureHandle{};
+    _tape->Replay(graph,imports,_readback,*_output,resources.timestamps,resources.readbacks,backBuffer);
     resources.timestamps.Resolve(graph);
 }
-bool ModularFramePipeline::SubmitFrame(radray::FrameSlot& slot,CommandBuffer& graphCommands) noexcept {
-    if(_submitted==UINT64_MAX) RADRAY_ABORT("Submission sequence exhausted");
-    const auto& input=*_pending;
-    CommandBuffer* commands[]{&graphCommands};
-    radray::array<Fence*,1> signals{_completion.get()};
-    radray::array<uint64_t,1> signalValues{_submitted+1};
-    SwapChainSyncObject* acquire[]{input.waitToDraw}; SwapChainSyncObject* present[]{input.readyToPresent};
+bool ModularFramePipeline::SubmitFrame(radray::FrameSlot& slot,radray::RDGSubmitPlan& plan) noexcept {
+    if(_submitted>=UINT64_MAX-1) RADRAY_ABORT("Submission sequence exhausted");
+    const auto next=_submitted+1;
+    plan.AddSignalFence(_completion.get(),next);
     {
         RADRAY_PROFILE_SCOPE_N("Raynium.Frame.QueueSubmit");
-        if(!slot.GetQueue().Submit({.CmdBuffers=commands,.SignalFences=signals,.SignalValues=signalValues,
-            .WaitToExecute={acquire,input.waitToDraw?1u:0u},.ReadyToPresent={present,input.readyToPresent?1u:0u}})) return false;
+        if(!slot.GetQueue().Submit(plan.Build())) return false;
     }
-    _inFlight[slot.GetIndex()]=++_submitted;
+    _submitted=next;
+    _inFlight[slot.GetIndex()]=next;
     if(_hasCaptures) _readback.MarkSubmitted(_submitted);
     _slots[slot.GetIndex()].timestamps.Submitted(_submitted);
     _slots[slot.GetIndex()].readbacks.Submitted(_submitted);

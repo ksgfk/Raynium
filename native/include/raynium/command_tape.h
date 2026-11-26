@@ -6,6 +6,7 @@
 #include <raynium/immediate_pass.h>
 #include <raynium/resource_uploads.h>
 #include <radray/runtime/readback_queue.h>
+#include <radray/runtime/rdg.h>
 #include <functional>
 
 namespace raynium {
@@ -13,7 +14,7 @@ class OutputPassResources;
 class FrameTapePlan {
 public:
     void Measure(rn_frame_metrics&) const;
-    void Replay(radray::RDGBuilder&,FrameTextureImports&,radray::AsyncReadbackQueue&,const OutputPassResources&,const FrameTimestamps&,const FrameReadbacks&,radray::gpu::Texture* backBuffer);
+    void Replay(radray::RDGBuilder&,FrameTextureImports&,radray::AsyncReadbackQueue&,const OutputPassResources&,const FrameTimestamps&,const FrameReadbacks&,radray::RDGTextureHandle backBuffer);
 protected:
     std::span<TerrainView> _views;
     std::span<GeometryUpload> _worldUploads;

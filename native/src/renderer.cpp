@@ -121,11 +121,7 @@ bool Renderer::SubmitFrame(rn_renderer* owner,BatchEnvelope& envelope,FrameExecu
                 if(*outcome==RN_PRESENT_SURFACE_LOST) target->MarkBroken();
             }
         }
-        if(acquired.Frame) {
-            frame.color=acquired.Frame->GetBackBuffer();
-            frame.waitToDraw=acquired.Frame->GetWaitToDraw();
-            frame.readyToPresent=acquired.Frame->GetReadyToPresent();
-        }
+        if(acquired.Frame) frame.surfaceFrame=&*acquired.Frame;
     }
     if(measure) {
         RADRAY_PROFILE_SCOPE_N("Raynium.Benchmark.BatchMetrics");

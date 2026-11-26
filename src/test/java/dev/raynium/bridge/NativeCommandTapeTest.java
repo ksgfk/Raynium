@@ -271,6 +271,27 @@ class NativeCommandTapeTest {
         }
     }
     @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
+    void consecutiveSurfaceBlitsRetireAcrossFrameSlots(NativeEnvironment.Backend backend) throws Exception {
+        try(var env=new NativeEnvironment(NativeTestSupport.locate(directory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
+            var window=new NativeSwapchainTest.Window(); var runtime=env.createRuntime(); var renderer=runtime.createRenderer(NativeTestSupport.shaders());
+            var surface=renderer.createSwapchain(window.hwnd,64,32,NativeSwapchain.PresentMode.IMMEDIATE);
+            var texture=renderer.createTexture(64,32,1,1,NativeTexture.Format.RGBA8,NativeTexture.ATTACHMENT|NativeTexture.READBACK)) {
+            long lastSequence=0;
+            for(int i=0;i<8;i++) {
+                try(var tape=new CommandTape(renderer)) {
+                    tape.clearColor(new Region(texture,0,0,0,0,64,32),i/7.0f,0,0,1);
+                    tape.blitToSurface(texture,0,surface);
+                    var batch=tape.submit();
+                    assertTrue(batch.success());
+                    assertEquals(++lastSequence,batch.sequence());
+                }
+            }
+            int outcome=renderer.flush();
+            assertTrue(outcome==0 || outcome==4,"surface outcome "+outcome);
+            assertTrue(renderer.awaitSubmission(lastSequence,-1));
+        }
+    }
+    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
     void surfaceBlitUsesOnlyItsOwningBatch(NativeEnvironment.Backend backend) throws Exception {
         try(var env=new NativeEnvironment(NativeTestSupport.locate(directory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var window=new NativeSwapchainTest.Window(); var runtime=env.createRuntime(); var renderer=runtime.createRenderer(NativeTestSupport.shaders());

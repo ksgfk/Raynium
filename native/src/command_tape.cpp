@@ -381,7 +381,7 @@ void FrameTapePlan::ReplayTextureBuffer(radray::RDGBuilder& graph,FrameTextureIm
         graph.MarkOutput(real);
     }
 }
-void FrameTapePlan::Replay(radray::RDGBuilder& graph,FrameTextureImports& imports,radray::AsyncReadbackQueue& queue,const OutputPassResources& output,const FrameTimestamps& timestamps,const FrameReadbacks& readbacks,Texture* backBuffer) {
+void FrameTapePlan::Replay(radray::RDGBuilder& graph,FrameTextureImports& imports,radray::AsyncReadbackQueue& queue,const OutputPassResources& output,const FrameTimestamps& timestamps,const FrameReadbacks& readbacks,radray::RDGTextureHandle backBuffer) {
     for(auto& upload:_worldUploads) upload.Import(graph);
 
     radray::RDGBufferHandle instanceBuffer;
@@ -440,13 +440,12 @@ void FrameTapePlan::Replay(radray::RDGBuilder& graph,FrameTextureImports& import
         } else if(auto timestamp=command.Get<Timestamp>()) {
             timestamps.Write(graph,timestamp->physicalIndex);
         } else if(auto* blit=command.Get<Blit>()) {
-            if(backBuffer) {
+            if(backBuffer.IsValid()) {
                 const auto& r=blit->source.area;
-                auto source=imports.Import(blit->source.texture);
-                auto destination=graph.ImportTexture(backBuffer,TextureState::Undefined,TextureState::Present);
-                output.AddPass(graph,source,destination,std::min(r.Width,backBuffer->GetDesc().Width),
-                    std::min(r.Height,backBuffer->GetDesc().Height),r.MipLevel,true);
-                graph.MarkOutput(destination);
+                const auto source=imports.Import(blit->source.texture);
+                const auto desc=graph.GetTextureDescriptor(backBuffer);
+                output.AddPass(graph,source,backBuffer,std::min(r.Width,desc->Width),
+                    std::min(r.Height,desc->Height),r.MipLevel,true);
             }
         } else {
             const auto& imageCopy=*command.Get<Copy>();

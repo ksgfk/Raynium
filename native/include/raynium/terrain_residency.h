@@ -1,5 +1,7 @@
 #pragma once
 #include <radray/types.h>
+#include <radray/nullable.h>
+#include <radray/gpu/types.h>
 #include <radray/inline_vector.h>
 #include <radray/runtime/gpu_device.h>
 #include <radray/runtime/mesh_draw_command.h>
@@ -175,9 +177,7 @@ struct TerrainFrame {
     rn_terrain_view_desc parameters{};
     bool hasTranslucent{};
     uint32_t width{},height{};
-    radray::gpu::Texture* color{};
-    radray::gpu::SwapChainSyncObject* waitToDraw{};
-    radray::gpu::SwapChainSyncObject* readyToPresent{};
+    radray::Nullable<const radray::gpu::SwapChainFrame*> surfaceFrame{nullptr};
 };
 
 class TerrainResidency final {
