@@ -1,8 +1,9 @@
 package dev.raynium.bridge;
 
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.util.Objects;
 import org.slf4j.Logger;
-
 /** Owns a device session; the parent environment must outlive it. */
 public final class NativeRuntime implements AutoCloseable {
     private final NativeEnvironment environment;
@@ -20,35 +21,39 @@ public final class NativeRuntime implements AutoCloseable {
             handle = bindings.createRuntime();
             logger.info("Raynium runtime created: owner={}", Thread.currentThread().getName());
         } catch (RuntimeException | Error failure) {
-            if (!handle.equals(MemorySegment.NULL)) bindings.destroyRuntime(handle);
+            if (!handle.equals(MemorySegment.NULL))
+                bindings.destroyRuntime(handle);
             throw failure;
         }
     }
 
-    public NativeRenderer createRenderer(NativeShaderPack shaders) {
-        return createRenderer(shaders,TerrainSubmission.fromProperty(System.getProperty("raynium.terrain.submission","auto")));
+    public NativeEnvironment.Backend backend() {
+        return environment.backend();
     }
     public NativeDeviceInfo deviceInfo() {
         checkOpen();
-        try(var arena=java.lang.foreign.Arena.ofConfined()) {
-            var info=arena.allocate(NativeDeviceInfo.BYTE_SIZE,8);
-            NativeBindings.call(bindings.queryDeviceInfo,"query device info",handle,info,NativeDeviceInfo.BYTE_SIZE);
+        try (var arena = Arena.ofConfined()) {
+            var info = arena.allocate(NativeDeviceInfo.BYTE_SIZE, 8);
+            NativeBindings.call(bindings.queryDeviceInfo, "query device info", handle, info, NativeDeviceInfo.BYTE_SIZE);
             return NativeDeviceInfo.read(info);
         }
     }
-    public NativeRenderer createRenderer(NativeShaderPack shaders,TerrainSubmission submission) {
+    public NativeRenderer createRenderer(NativeShaderPack shaders, NativeRenderer.SubmissionMode submission) {
         checkOpen();
-        if(renderer!=null) throw new IllegalStateException("Runtime already has a renderer");
-        renderer=NativeRenderer.create(this,bindings,handle,java.util.Objects.requireNonNull(shaders),java.util.Objects.requireNonNull(submission));
+        if (renderer != null)
+            throw new IllegalStateException("Runtime already has a renderer");
+        renderer = NativeRenderer.create(this, bindings, handle, Objects.requireNonNull(shaders), Objects.requireNonNull(submission));
         return renderer;
     }
     void releasedRenderer(NativeRenderer value) {
-        if(renderer!=value) throw new IllegalStateException("Renderer owner mismatch");
-        renderer=null;
+        if (renderer != value)
+            throw new IllegalStateException("Renderer owner mismatch");
+        renderer = null;
     }
     void checkOpen() {
         environment.checkOpen();
-        if (closed) throw new IllegalStateException("Runtime is closed");
+        if (closed)
+            throw new IllegalStateException("Runtime is closed");
     }
 
     void checkThread() {
@@ -58,8 +63,10 @@ public final class NativeRuntime implements AutoCloseable {
     @Override
     public void close() {
         checkThread();
-        if (closed) return;
-        if (renderer != null) throw new IllegalStateException("Close the renderer before closing runtime");
+        if (closed)
+            return;
+        if (renderer != null)
+            throw new IllegalStateException("Close the renderer before closing runtime");
         if (!handle.equals(MemorySegment.NULL)) {
             bindings.destroyRuntime(handle);
             handle = MemorySegment.NULL;

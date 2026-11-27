@@ -1,5 +1,13 @@
 package dev.raynium.client.world;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 import com.mojang.blaze3d.vertex.PoseStack;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -11,21 +19,22 @@ import java.util.List;
 import java.util.Random;
 import net.minecraft.client.model.geom.ModelPart;
 import net.minecraft.client.particle.SingleQuadParticle;
+import net.minecraft.client.renderer.RenderPipelines;
+import net.minecraft.client.renderer.rendertype.PreparedRenderType;
+import net.minecraft.client.renderer.rendertype.RenderSetup;
+import net.minecraft.client.renderer.rendertype.RenderType;
 import net.minecraft.core.Direction;
 import net.minecraft.util.ARGB;
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 import org.junit.jupiter.api.Test;
-import static org.junit.jupiter.api.Assertions.*;
-
 class WorldFastTrackTest {
     @Test
     void extractsLocalMeshAndRejectsNonQuadOrNonAxialPolygons() {
         ModelPart.Cube cube = new ModelPart.Cube(
             0, 0, -4.0F, -8.0F, -4.0F, 8.0F, 16.0F, 8.0F,
-            0.0F, 0.0F, 0.0F, false, 64.0F, 64.0F, EnumSet.allOf(Direction.class)
-        );
+            0.0F, 0.0F, 0.0F, false, 64.0F, 64.0F, EnumSet.allOf(Direction.class));
         byte[] bytes = RetainedModelManager.extractLocalMesh(List.of(cube));
         assertNotNull(bytes);
         // 6 faces * 4 vertices * 24 bytes = 576 bytes.
@@ -55,17 +64,15 @@ class WorldFastTrackTest {
 
         // Non-axial normal must fall back (return null).
         ModelPart.Cube nonAxial = new ModelPart.Cube(
-            0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, false, 16, 16, EnumSet.of(Direction.UP)
-        );
+            0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, false, 16, 16, EnumSet.of(Direction.UP));
         ModelPart.Vertex[] quad = nonAxial.polygons[0].vertices();
         nonAxial.polygons[0] = new ModelPart.Polygon(quad, new Vector3f(0.6F, 0.8F, 0.0F));
         assertNull(RetainedModelManager.extractLocalMesh(List.of(nonAxial)));
 
         // Non-4-vertex polygon must fall back (return null).
         ModelPart.Cube tri = new ModelPart.Cube(
-            0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, false, 16, 16, EnumSet.of(Direction.UP)
-        );
-        tri.polygons[0] = new ModelPart.Polygon(new ModelPart.Vertex[]{quad[0], quad[1], quad[2]}, Direction.UP.getUnitVec3f());
+            0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, false, 16, 16, EnumSet.of(Direction.UP));
+        tri.polygons[0] = new ModelPart.Polygon(new ModelPart.Vertex[] {quad[0], quad[1], quad[2]}, Direction.UP.getUnitVec3f());
         assertNull(RetainedModelManager.extractLocalMesh(List.of(tri)));
     }
 
@@ -84,8 +91,7 @@ class WorldFastTrackTest {
             stack.rotate(new Quaternionf().rotationZYX(
                 (rng.nextFloat() - 0.5F) * 6.28F,
                 (rng.nextFloat() - 0.5F) * 6.28F,
-                (rng.nextFloat() - 0.5F) * 6.28F
-            ));
+                (rng.nextFloat() - 0.5F) * 6.28F));
             int mode = trial % 5;
             if (mode == 1) {
                 // Non-uniform scale.
@@ -126,12 +132,9 @@ class WorldFastTrackTest {
             float ly = (rng.nextFloat() - 0.5F) * 2.0F;
             float lz = (rng.nextFloat() - 0.5F) * 2.0F;
             pose.pose().transformPosition(lx, ly, lz, vanillaPos);
-            float gx = Float.intBitsToFloat(packed[0]) * lx + Float.intBitsToFloat(packed[1]) * ly
-                     + Float.intBitsToFloat(packed[2]) * lz + Float.intBitsToFloat(packed[3]);
-            float gy = Float.intBitsToFloat(packed[4]) * lx + Float.intBitsToFloat(packed[5]) * ly
-                     + Float.intBitsToFloat(packed[6]) * lz + Float.intBitsToFloat(packed[7]);
-            float gz = Float.intBitsToFloat(packed[8]) * lx + Float.intBitsToFloat(packed[9]) * ly
-                     + Float.intBitsToFloat(packed[10]) * lz + Float.intBitsToFloat(packed[11]);
+            float gx = Float.intBitsToFloat(packed[0]) * lx + Float.intBitsToFloat(packed[1]) * ly + Float.intBitsToFloat(packed[2]) * lz + Float.intBitsToFloat(packed[3]);
+            float gy = Float.intBitsToFloat(packed[4]) * lx + Float.intBitsToFloat(packed[5]) * ly + Float.intBitsToFloat(packed[6]) * lz + Float.intBitsToFloat(packed[7]);
+            float gz = Float.intBitsToFloat(packed[8]) * lx + Float.intBitsToFloat(packed[9]) * ly + Float.intBitsToFloat(packed[10]) * lz + Float.intBitsToFloat(packed[11]);
             assertEquals(vanillaPos.x, gx, 1e-5F);
             assertEquals(vanillaPos.y, gy, 1e-5F);
             assertEquals(vanillaPos.z, gz, 1e-5F);
@@ -169,15 +172,15 @@ class WorldFastTrackTest {
 
     @Test
     void compactParticlePackingAndQuaternionFormulaMatchVanilla() {
-        float[] floats = new float[]{
-            1.5F, -2.25F, 3.75F,     // x, y, z
-            0.3F, -0.4F, 0.5F, 1.2F, // intentionally non-unit quaternion (xRot, yRot, zRot, wRot)
-            0.75F,                   // scale
+        float[] floats = new float[] {
+            1.5F, -2.25F, 3.75F,       // x, y, z
+            0.3F, -0.4F, 0.5F, 1.2F,   // intentionally non-unit quaternion (xRot, yRot, zRot, wRot)
+            0.75F,                     // scale
             0.125F, 0.25F, 0.5F, 0.75F // u0, u1, v0, v1
         };
         int argb = 0xCC112233;
         int light = 0x00F00080;
-        int[] ints = new int[]{argb, light};
+        int[] ints = new int[] {argb, light};
         int[] dst = new int[ParticleFastTrack.INSTANCE_INTS];
         ParticleFastTrack.packParticles(floats, ints, 1, dst, 0);
 
@@ -238,13 +241,18 @@ class WorldFastTrackTest {
 
     @Test
     void oversizedModelBucketDoesNotReturnToIdlePool() {
-        var bucket=ModelFastTrack.acquireFastBucket(null,true);
-        var pose=new PoseStack().last();
-        var scratch=new Vector3f();
-        for(int i=0;i<257;i++) bucket.addInstance(null,1,0,pose,0,0,0,scratch);
+        var bucket = ModelFastTrack.acquireFastBucket(null, true);
+        var pose = new PoseStack().last();
+        var scratch = new Vector3f();
+        for (int i = 0; i < 257; i++)
+            bucket.addInstance(null, 1, 0, pose, 0, 0, 0, scratch);
         ModelFastTrack.recycleFastBucket(bucket);
-        var next=ModelFastTrack.acquireFastBucket(null,true);
-        try { assertNotSame(bucket,next); } finally { ModelFastTrack.recycleFastBucket(next); }
+        var next = ModelFastTrack.acquireFastBucket(null, true);
+        try {
+            assertNotSame(bucket, next);
+        } finally {
+            ModelFastTrack.recycleFastBucket(next);
+        }
     }
 
     @Test
@@ -258,12 +266,18 @@ class WorldFastTrackTest {
             bucket.addInstance(null, ids1[i], 0, pose.last(), 0xFF000000 | i, i, i + 100, scratch);
         }
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment dst = arena.allocate((long) ids1.length * RetainedModelManager.INSTANCE_BYTES, 16);
+            MemorySegment dst = arena.allocate((long)ids1.length * RetainedModelManager.INSTANCE_BYTES, 16);
             bucket.buildGroupedAndCopy(dst);
             assertEquals(3, bucket.runCount());
-            assertEquals(10, bucket.runMeshId(0)); assertEquals(0, bucket.runFirstInstance(0)); assertEquals(3, bucket.runInstanceCount(0));
-            assertEquals(20, bucket.runMeshId(1)); assertEquals(3, bucket.runFirstInstance(1)); assertEquals(2, bucket.runInstanceCount(1));
-            assertEquals(30, bucket.runMeshId(2)); assertEquals(5, bucket.runFirstInstance(2)); assertEquals(1, bucket.runInstanceCount(2));
+            assertEquals(10, bucket.runMeshId(0));
+            assertEquals(0, bucket.runFirstInstance(0));
+            assertEquals(3, bucket.runInstanceCount(0));
+            assertEquals(20, bucket.runMeshId(1));
+            assertEquals(3, bucket.runFirstInstance(1));
+            assertEquals(2, bucket.runInstanceCount(1));
+            assertEquals(30, bucket.runMeshId(2));
+            assertEquals(5, bucket.runFirstInstance(2));
+            assertEquals(1, bucket.runInstanceCount(2));
             // Verify overlay field (int offset 13) of grouped instances preserved original order per meshId.
             assertEquals(0, dst.get(ValueLayout.JAVA_INT, 0L * RetainedModelManager.INSTANCE_BYTES + 13 * 4L));
             assertEquals(2, dst.get(ValueLayout.JAVA_INT, 1L * RetainedModelManager.INSTANCE_BYTES + 13 * 4L));
@@ -282,11 +296,15 @@ class WorldFastTrackTest {
             reused.addInstance(null, ids2[i], 0, pose.last(), 0xFF000000 | (i + 10), i + 10, 0, scratch);
         }
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment dst = arena.allocate((long) ids2.length * RetainedModelManager.INSTANCE_BYTES, 16);
+            MemorySegment dst = arena.allocate((long)ids2.length * RetainedModelManager.INSTANCE_BYTES, 16);
             reused.buildGroupedAndCopy(dst);
             assertEquals(2, reused.runCount());
-            assertEquals(20, reused.runMeshId(0)); assertEquals(0, reused.runFirstInstance(0)); assertEquals(2, reused.runInstanceCount(0));
-            assertEquals(40, reused.runMeshId(1)); assertEquals(2, reused.runFirstInstance(1)); assertEquals(1, reused.runInstanceCount(1));
+            assertEquals(20, reused.runMeshId(0));
+            assertEquals(0, reused.runFirstInstance(0));
+            assertEquals(2, reused.runInstanceCount(0));
+            assertEquals(40, reused.runMeshId(1));
+            assertEquals(2, reused.runFirstInstance(1));
+            assertEquals(1, reused.runInstanceCount(1));
         }
         ModelFastTrack.recycleFastBucket(reused);
     }
@@ -301,7 +319,8 @@ class WorldFastTrackTest {
             PoseStack stack = new PoseStack();
             stack.translate((rng.nextFloat() - 0.5F) * 10.0F, (rng.nextFloat() - 0.5F) * 10.0F, (rng.nextFloat() - 0.5F) * 10.0F);
             stack.rotate(new Quaternionf().rotationZYX(rng.nextFloat() * 6.28F, rng.nextFloat() * 6.28F, rng.nextFloat() * 6.28F));
-            if ((i & 1) != 0) stack.scale(0.5F + rng.nextFloat() * 2.0F, -1.0F, 0.75F + rng.nextFloat());
+            if ((i & 1) != 0)
+                stack.scale(0.5F + rng.nextFloat() * 2.0F, -1.0F, 0.75F + rng.nextFloat());
             float tx = (rng.nextFloat() - 0.5F) * 4.0F;
             float ty = (rng.nextFloat() - 0.5F) * 4.0F;
             float tz = (rng.nextFloat() - 0.5F) * 4.0F;
@@ -321,18 +340,19 @@ class WorldFastTrackTest {
             var memory = arena.allocate(56, 8);
             int color = ARGB.white(0.375f);
             ShadowFastTrack.pack(memory, 0, pose, 2, -1, 3, 0.25f, 2, 7, color);
-            for (int x = 0; x <= 1; ++x) for (int z = 0; z <= 1; ++z) {
-                float px = x == 0 ? -1 : 3, pz = z == 0 ? 2 : 7;
-                var expected = pose.transformPosition(px, 0.25f, pz, new Vector3f());
-                for (int axis = 0; axis < 3; ++axis) {
-                    long at = axis * 4L;
-                    float actual = memory.get(ValueLayout.JAVA_FLOAT, at) +
-                        x * memory.get(ValueLayout.JAVA_FLOAT, 16 + at) + z * memory.get(ValueLayout.JAVA_FLOAT, 32 + at);
-                    assertEquals(expected.get(axis), actual, 2e-5f);
+            for (int x = 0; x <= 1; ++x)
+                for (int z = 0; z <= 1; ++z) {
+                    float px = x == 0 ? -1 : 3, pz = z == 0 ? 2 : 7;
+                    var expected = pose.transformPosition(px, 0.25f, pz, new Vector3f());
+                    for (int axis = 0; axis < 3; ++axis) {
+                        long at = axis * 4L;
+                        float actual = memory.get(ValueLayout.JAVA_FLOAT, at) +
+                                       x * memory.get(ValueLayout.JAVA_FLOAT, 16 + at) + z * memory.get(ValueLayout.JAVA_FLOAT, 32 + at);
+                        assertEquals(expected.get(axis), actual, 2e-5f);
+                    }
+                    assertEquals(-px / 4 + 0.5f, memory.get(ValueLayout.JAVA_FLOAT, x == 0 ? 12 : 28));
+                    assertEquals(-pz / 4 + 0.5f, memory.get(ValueLayout.JAVA_FLOAT, z == 0 ? 44 : 48));
                 }
-                assertEquals(-px / 4 + 0.5f, memory.get(ValueLayout.JAVA_FLOAT, x == 0 ? 12 : 28));
-                assertEquals(-pz / 4 + 0.5f, memory.get(ValueLayout.JAVA_FLOAT, z == 0 ? 44 : 48));
-            }
             assertEquals(color, memory.get(ValueLayout.JAVA_INT, 52));
         }
     }
@@ -341,59 +361,81 @@ class WorldFastTrackTest {
     void promotionSkipsFirstUseInEachEpoch() {
         class Handle implements RetainedModelManager.PartHandle {
             long epoch;
-            int id,page;
-            public long raynium$getMeshEpoch() { return epoch; }
-            public int raynium$getMeshId() { return id; }
-            public int raynium$getMeshPage() { return page; }
-            public void raynium$setMeshCache(long e,int i,int p) { epoch=e; id=i; page=p; }
-            public List<ModelPart.Cube> raynium$getCubes() { throw new AssertionError(); }
+            int id, page;
+            public long raynium$getMeshEpoch() {
+                return epoch;
+            }
+            public int raynium$getMeshId() {
+                return id;
+            }
+            public int raynium$getMeshPage() {
+                return page;
+            }
+            public void raynium$setMeshCache(long e, int i, int p) {
+                epoch = e;
+                id = i;
+                page = p;
+            }
+            public List<ModelPart.Cube> raynium$getCubes() {
+                throw new AssertionError();
+            }
         }
-        var handle=new Handle();
-        assertEquals(-1,RetainedModelManager.promotionState(handle,1));
-        assertEquals(-2,RetainedModelManager.promotionState(handle,1));
-        handle.raynium$setMeshCache(1,16,3);
-        assertEquals(16,RetainedModelManager.promotionState(handle,1));
-        assertEquals(-1,RetainedModelManager.promotionState(handle,2));
+        var handle = new Handle();
+        assertEquals(-1, RetainedModelManager.promotionState(handle, 1));
+        assertEquals(-2, RetainedModelManager.promotionState(handle, 1));
+        handle.raynium$setMeshCache(1, 16, 3);
+        assertEquals(16, RetainedModelManager.promotionState(handle, 1));
+        assertEquals(-1, RetainedModelManager.promotionState(handle, 2));
     }
 
     @Test
     void interleavedPagesProduceContiguousRunsAndInstanceBytes() {
-        var bucket=ModelFastTrack.acquireFastBucket(null,true);
-        var pose=new PoseStack().last();
-        var scratch=new Vector3f();
-        int[] ids={16,17,18,19,17};
-        for(int i=0;i<ids.length;i++) bucket.addInstance(null,ids[i],ids[i]%2,pose,-1,i,0,scratch);
-        try(var arena=Arena.ofConfined()) {
-            var dst=arena.allocate(80L*ids.length,8);
+        var bucket = ModelFastTrack.acquireFastBucket(null, true);
+        var pose = new PoseStack().last();
+        var scratch = new Vector3f();
+        int[] ids = {16, 17, 18, 19, 17};
+        for (int i = 0; i < ids.length; i++)
+            bucket.addInstance(null, ids[i], ids[i] % 2, pose, -1, i, 0, scratch);
+        try (var arena = Arena.ofConfined()) {
+            var dst = arena.allocate(80L * ids.length, 8);
             bucket.buildGroupedAndCopy(dst);
-            int[] expected={16,18,17,19};
-            int[] order={0,2,1,4,3};
-            for(int i=0;i<expected.length;i++) assertEquals(expected[i],bucket.runMeshId(i));
-            for(int i=0;i<order.length;i++) assertEquals(order[i],dst.get(ValueLayout.JAVA_INT,80L*i+52));
-        } finally { ModelFastTrack.recycleFastBucket(bucket); }
+            int[] expected = {16, 18, 17, 19};
+            int[] order = {0, 2, 1, 4, 3};
+            for (int i = 0; i < expected.length; i++)
+                assertEquals(expected[i], bucket.runMeshId(i));
+            for (int i = 0; i < order.length; i++)
+                assertEquals(order[i], dst.get(ValueLayout.JAVA_INT, 80L * i + 52));
+        } finally {
+            ModelFastTrack.recycleFastBucket(bucket);
+        }
     }
 
     @Test
     void equivalentTransientRenderTypesHitTheSameBucket() {
-        var setup=net.minecraft.client.renderer.rendertype.RenderSetup.builder(
-            net.minecraft.client.renderer.RenderPipelines.ENTITY_SOLID).createRenderSetup();
-        var ext=ModelFastTrack.acquireGroupExtension(true,0);
-        var groups=new ModelFastTrack.FastBucket[32];
+        var setup = RenderSetup.builder(
+                                   RenderPipelines.ENTITY_SOLID)
+                        .createRenderSetup();
+        var ext = ModelFastTrack.acquireGroupExtension(true, 0);
+        var groups = new ModelFastTrack.FastBucket[32];
         try {
-            for(int i=0;i<1000;i++) {
-                int key=i%groups.length;
-                var rt=net.minecraft.client.renderer.rendertype.RenderType.create("dynamic",setup);
-                var prepared=new net.minecraft.client.renderer.rendertype.PreparedRenderType("material"+key,
-                    rt.pipeline(),null,null,null,List.of());
-                var bucket=ext.acquireFastBucket(rt,prepared);
-                if(groups[key]==null) groups[key]=bucket;
-                else assertSame(groups[key],bucket);
+            for (int i = 0; i < 1000; i++) {
+                int key = i % groups.length;
+                var rt = RenderType.create("dynamic", setup);
+                var prepared = new PreparedRenderType("material" + key,
+                                                      rt.pipeline(), null, null, null, List.of());
+                var bucket = ext.acquireFastBucket(rt, prepared);
+                if (groups[key] == null)
+                    groups[key] = bucket;
+                else
+                    assertSame(groups[key], bucket);
             }
-        } finally { ext.recycle(); }
+        } finally {
+            ext.recycle();
+        }
     }
 
     private static float unpackSnorm8(int packed, int lane) {
-        byte signed = (byte) ((packed >>> (lane * 8)) & 0xFF);
+        byte signed = (byte)((packed >>> (lane * 8)) & 0xFF);
         return Math.max(-1.0F, signed / 127.0F);
     }
 }

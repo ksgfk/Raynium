@@ -1,16 +1,21 @@
 #pragma once
-#include <radray/types.h>
-#include <radray/runtime/gpu_device.h>
+
+#include <cstdint>
+#include <memory_resource>
+#include <span>
+#include <type_traits>
+
 #include <radray/runtime/frame_slot.h>
 #include <radray/runtime/geometry_buffer_pool.h>
+#include <radray/runtime/gpu_device.h>
+#include <radray/types.h>
 #include <raynium/terrain_residency.h>
-#include <span>
 
 namespace raynium {
 struct StaticMesh {
-    radray::VertexBufferSubAllocation geometry;
-    uint32_t vertexCount{};
-    uint32_t indexCount{};
+    radray::VertexBufferSubAllocation Geometry;
+    uint32_t VertexCount{};
+    uint32_t IndexCount{};
 };
 static_assert(std::is_nothrow_destructible_v<StaticMesh>);
 
@@ -35,14 +40,12 @@ public:
     void MeasureGeometry(rn_frame_metrics& metrics) const noexcept;
     void Reset() noexcept;
 
-    const radray::VertexBufferPool& VertexPool() const noexcept { return *_vertices; }
-    void BeginSlot() { _vertices->TrimEmptyPages(); }
+    const radray::VertexBufferPool& VertexPool() const noexcept;
+    void BeginSlot();
 
 private:
-    explicit StaticGeometryRegistry(radray::unique_ptr<radray::VertexBufferPool> vertices) noexcept
-        : _vertices(std::move(vertices)) {}
-    bool Store(int32_t meshId, std::span<const radray::byte> vertices, uint32_t vertexCount,
-        uint32_t indexCount, uint32_t& outPageId);
+    explicit StaticGeometryRegistry(radray::unique_ptr<radray::VertexBufferPool> vertices) noexcept;
+    bool Store(int32_t meshId, std::span<const radray::byte> vertices, uint32_t vertexCount, uint32_t indexCount, uint32_t& outPageId);
 
     radray::unique_ptr<radray::VertexBufferPool> _vertices;
     radray::vector<StaticMesh> _meshes;
@@ -50,4 +53,4 @@ private:
     radray::vector<radray::VertexBufferSubAllocation> _retired;
     uint32_t _maxVertexCount{};
 };
-}
+}  // namespace raynium

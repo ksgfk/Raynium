@@ -7,6 +7,7 @@
 | 定位已有子系统、当前状态与文档 | [架构地图](doc/architecture/overview.md)，再读所属文档 |
 | 准备依赖、构建、测试、启动与打包 | [构建与测试](doc/guide/build-test.md) |
 | 配置 IDEA、阅读 Minecraft 源码 | [开发环境](doc/guide/dev-environment.md) |
+| 查阅模块分层、配置命名与 Java/C++ 编码规范 | [编码与工程规范](doc/guide/conventions.md) |
 | 修改 C ABI、FFM、加载与跨语言寿命 | [互操作与加载](doc/architecture/interop.md) |
 | 修改 native 设备会话和所有权 | [Native runtime](doc/architecture/native-runtime.md) |
 | 查看 Fabric 生命周期与 MC 接入边界 | [Minecraft 接入](doc/architecture/minecraft-integration.md) |

@@ -1,50 +1,67 @@
 #pragma once
-#include <raynium/resource_handles.h>
+
+#include <cstdint>
 #include <memory_resource>
+#include <span>
 #include <unordered_set>
-#include <radray/types.h>
+
 #include <radray/runtime/gpu_device.h>
-#include <raynium/render_resources.h>
 #include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/rdg.h>
+#include <radray/types.h>
+#include <raynium/render_resources.h>
+#include <raynium/resource_handles.h>
 
 namespace raynium {
-radray::gpu::TextureFormat ToTextureFormat(rn_pixel_format) noexcept;
+radray::gpu::TextureFormat ToTextureFormat(rn_pixel_format format) noexcept;
+
 class FrameTextureImports final {
 public:
-    FrameTextureImports(radray::RDGBuilder& graph,std::pmr::memory_resource& scratch,const radray::gpu::DeviceLimits* limits=nullptr);
-    radray::RDGTextureHandle Import(const radray::IntrusivePtr<radray::GpuTexture>& texture,bool overwritesWholeSubresource=false);
-    std::pmr::memory_resource* Scratch() const { return _cleared.get_allocator().resource(); }
-    radray::RDGTextureHandle Import(const rn_texture* texture,bool overwrite=false) {
-        return Import(texture->texture,overwrite);
-    }
+    FrameTextureImports(
+        radray::RDGBuilder& graph,
+        std::pmr::memory_resource& scratch,
+        const radray::gpu::DeviceLimits* limits = nullptr);
+    radray::RDGTextureHandle Import(const radray::IntrusivePtr<radray::GpuTexture>& texture, bool overwritesWholeSubresource = false);
+    radray::RDGTextureHandle Import(const rn_texture* texture, bool overwrite = false);
+    std::pmr::memory_resource* Scratch() const noexcept;
+
 private:
     radray::RDGBuilder& _graph;
-    const radray::gpu::DeviceLimits* _limits;
+    const radray::gpu::DeviceLimits* _limits{};
     std::pmr::unordered_set<radray::GpuTexture*> _cleared;
 };
-radray::IntrusivePtr<radray::GpuTexture> CreateSceneTexture(radray::gpu::Device&,const rn_texture_desc&);
-radray::gpu::TextureView* GetSamplingView(radray::gpu::Device&,radray::GpuTexture&,const rn_texture_sampling&);
-radray::gpu::Sampler* GetTextureSampler(radray::gpu::Device&,uint32_t,const rn_texture_sampling&);
+
+radray::IntrusivePtr<radray::GpuTexture> CreateSceneTexture(radray::gpu::Device& device, const rn_texture_desc& desc);
+radray::gpu::TextureView* GetSamplingView(radray::gpu::Device& device, radray::GpuTexture& owner, const rn_texture_sampling& sampling);
+radray::gpu::Sampler* GetTextureSampler(radray::gpu::Device& device, uint32_t bits, const rn_texture_sampling& sampling);
+
 struct PendingTextureUpload {
-    radray::IntrusivePtr<radray::GpuTexture> target;
-    rn_texture_upload_desc desc;
-    radray::vector<radray::byte> bytes;
+    radray::IntrusivePtr<radray::GpuTexture> Target;
+    rn_texture_upload_desc Desc{};
+    radray::vector<radray::byte> Bytes;
 };
+
 struct PendingBufferUpload {
-    radray::IntrusivePtr<radray::GpuBuffer> target;
-    radray::vector<radray::byte> bytes;
+    radray::IntrusivePtr<radray::GpuBuffer> Target;
+    radray::vector<radray::byte> Bytes;
 };
+
 struct ShadowWrite {
-    radray::IntrusivePtr<radray::GpuBuffer> target;
-    uint64_t offset;
-    std::span<const radray::byte> bytes;
+    radray::IntrusivePtr<radray::GpuBuffer> Target;
+    uint64_t Offset{};
+    std::span<const radray::byte> Bytes;
 };
-struct PendingResourceOps {
-    radray::vector<PendingTextureUpload> textureUploads;
-    radray::vector<PendingBufferUpload> bufferUploads;
-    radray::vector<int32_t> removedModelMeshes;
-    void AddUploads(radray::RDGBuilder&,FrameTextureImports&,std::span<const ShadowWrite>);
+
+class PendingResourceOps final {
+public:
+    radray::vector<PendingTextureUpload> TextureUploads;
+    radray::vector<PendingBufferUpload> BufferUploads;
+    radray::vector<int32_t> RemovedModelMeshes;
+
+    void AddUploads(radray::RDGBuilder& graph, FrameTextureImports& imports, std::span<const ShadowWrite> shadows);
+    void Clear() noexcept;
 };
-bool ValidateTextureDesc(const radray::gpu::GpuDeviceCapabilities&,const rn_texture_desc&);
-bool PrepareTextureUpload(const rn_texture&,const rn_texture_upload_desc&,PendingTextureUpload&);
-}
+
+bool ValidateTextureDesc(const radray::gpu::GpuDeviceCapabilities& caps, const rn_texture_desc& desc);
+bool PrepareTextureUpload(const rn_texture& handle, const rn_texture_upload_desc& desc, PendingTextureUpload& pending);
+}  // namespace raynium

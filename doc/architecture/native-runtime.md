@@ -24,7 +24,7 @@
 
 ## 提交模式与参数
 
-`raynium.terrain.submission=auto|direct|indirect` 选择驻留地形的提交方式。每个视图从 `TerrainHotSlot` 构建分页绘制参数。Direct 和 Indirect 共用批次及代表命令，OIT 三个阶段共享透明层参数。[区块地形渲染](terrain-rendering.md)
+`<gameDir>/config/raynium.json` 中的 `terrainSubmission`（或内存覆盖 `-Draynium.terrain.submission=auto|direct|indirect`）选择驻留地形的提交方式。每个视图从 `TerrainHotSlot` 构建分页绘制参数。Direct 和 Indirect 共用批次及代表命令，OIT 三个阶段共享透明层参数。[区块地形渲染](terrain-rendering.md)
 
 ## 映射、时间戳与读回
 

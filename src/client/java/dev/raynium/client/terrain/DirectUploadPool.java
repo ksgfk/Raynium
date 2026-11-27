@@ -20,30 +20,33 @@ public final class DirectUploadPool {
     private final ConcurrentLinkedQueue<ByteBuffer>[] buckets = new ConcurrentLinkedQueue[MAX_SHIFT - MIN_SHIFT + 1];
     private final AtomicLong pooledBytes = new AtomicLong();
 
-    private static volatile DirectUploadPool current=new DirectUploadPool(1);
+    private static volatile DirectUploadPool current = new DirectUploadPool(1);
     private final long epoch;
     private DirectUploadPool(long epoch) {
-        this.epoch=epoch;
+        this.epoch = epoch;
         for (int i = 0; i < buckets.length; i++) {
             buckets[i] = new ConcurrentLinkedQueue<>();
         }
     }
 
     static void retire(long epoch) {
-        current=new DirectUploadPool(epoch);
+        current = new DirectUploadPool(epoch);
     }
 
     static int bucketIndex(int requiredBytes) {
-        if (requiredBytes <= MIN_BUCKET_BYTES) return 0;
+        if (requiredBytes <= MIN_BUCKET_BYTES)
+            return 0;
         int ceilShift = 32 - Integer.numberOfLeadingZeros(requiredBytes - 1);
         return ceilShift - MIN_SHIFT;
     }
 
-    static ByteBuffer acquire(int requiredBytes,long epoch) {
-        var pool=current;
-        if (requiredBytes < 0) throw new IllegalArgumentException("Negative direct upload buffer size: " + requiredBytes);
-        if (requiredBytes == 0) return EMPTY;
-        if (requiredBytes > MAX_BUCKET_BYTES || epoch!=pool.epoch) {
+    static ByteBuffer acquire(int requiredBytes, long epoch) {
+        var pool = current;
+        if (requiredBytes < 0)
+            throw new IllegalArgumentException("Negative direct upload buffer size: " + requiredBytes);
+        if (requiredBytes == 0)
+            return EMPTY;
+        if (requiredBytes > MAX_BUCKET_BYTES || epoch != pool.epoch) {
             return ByteBuffer.allocateDirect(requiredBytes).order(ByteOrder.nativeOrder());
         }
         int bucket = bucketIndex(requiredBytes);
@@ -60,15 +63,19 @@ public final class DirectUploadPool {
         return fresh;
     }
 
-    static void release(ByteBuffer buffer,long epoch) {
-        var pool=current;
-        if(epoch!=pool.epoch) return;
-        if (buffer == null || !buffer.isDirect() || buffer.isReadOnly()) return;
+    static void release(ByteBuffer buffer, long epoch) {
+        var pool = current;
+        if (epoch != pool.epoch)
+            return;
+        if (buffer == null || !buffer.isDirect() || buffer.isReadOnly())
+            return;
         int cap = buffer.capacity();
-        if (cap < MIN_BUCKET_BYTES || cap > MAX_BUCKET_BYTES || (cap & (cap - 1)) != 0) return;
+        if (cap < MIN_BUCKET_BYTES || cap > MAX_BUCKET_BYTES || (cap & (cap - 1)) != 0)
+            return;
         while (true) {
             long used = pool.pooledBytes.get();
-            if (used + cap > MAX_POOLED_BYTES) return;
+            if (used + cap > MAX_POOLED_BYTES)
+                return;
             if (pool.pooledBytes.compareAndSet(used, used + cap)) {
                 buffer.clear();
                 pool.buckets[Integer.numberOfTrailingZeros(cap) - MIN_SHIFT].offer(buffer);

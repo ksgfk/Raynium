@@ -8,7 +8,8 @@ import java.nio.ByteBuffer;
 /** Zero-allocation no-op StagingBuffer used by SectionRenderDispatcher when retained terrain is active. */
 public final class NoopTerrainStagingBuffer extends StagingBuffer {
     private final BufferHandle handle = new BufferHandle(0, 0) {
-        @Override public void close() {}
+        @Override
+        public void close() {}
     };
 
     @Override

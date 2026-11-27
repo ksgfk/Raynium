@@ -1,15 +1,17 @@
 #include <raynium/batch_envelope.h>
+
+#include <climits>
 #include <cstring>
 #include <span>
 
 namespace raynium {
 namespace {
-template<class T>
+template <class T>
 bool ValidArray(const T* data, uint64_t count, uint64_t limit) {
     return count <= limit && count <= PTRDIFF_MAX / sizeof(T) && (!count || data);
 }
 
-template<class T>
+template <class T>
 T* Copy(std::pmr::memory_resource& arena, const T* data, size_t count, size_t alignment = alignof(T)) {
     if (!count) return nullptr;
     auto* copy = static_cast<T*>(arena.allocate(count * sizeof(T), alignment));
@@ -21,13 +23,17 @@ bool FreezeView(std::pmr::memory_resource& arena, rn_terrain_view_desc& view, bo
     if (view.struct_size != sizeof(view) ||
         !ValidArray(view.indices, view.index_count, 65536) || !ValidArray(view.meshes, view.mesh_count, 65536) ||
         !ValidArray(view.removed_meshes, view.removed_mesh_count, 1048576) ||
-        !ValidArray(view.visible, view.visible_count, 1048576) || !ValidArray(view.instances, view.instance_count, 1048576)) return false;
-    const bool pooled=(view.flags&RN_FRAME_INSTANCE_POOL)!=0;
-    if (view.instance_reserved || (pooled ?
-        (view.instance_capacity>1048576 || !ValidArray(view.instance_slots,view.instance_count,1048576)) :
-        (view.instance_slots || view.instance_capacity || view.instance_base_version))) return false;
+        !ValidArray(view.visible, view.visible_count, 1048576) || !ValidArray(view.instances, view.instance_count, 1048576)) {
+        return false;
+    }
+    const bool pooled = (view.flags & RN_FRAME_INSTANCE_POOL) != 0;
+    if (view.instance_reserved || (pooled
+                                       ? (view.instance_capacity > 1048576 || !ValidArray(view.instance_slots, view.instance_count, 1048576))
+                                       : (view.instance_slots || view.instance_capacity || view.instance_base_version))) {
+        return false;
+    }
     if (borrow) return true;
-    if (pooled) view.instance_slots=Copy(arena,view.instance_slots,view.instance_count);
+    if (pooled) view.instance_slots = Copy(arena, view.instance_slots, view.instance_count);
     auto* meshes = Copy(arena, view.meshes, view.mesh_count);
     view.meshes = meshes;
     for (auto& mesh : std::span(meshes, view.mesh_count)) {
@@ -61,6 +67,10 @@ bool FreezeView(std::pmr::memory_resource& arena, rn_terrain_view_desc& view, bo
     view.instances = Copy(arena, view.instances, view.instance_count);
     return true;
 }
+}  // namespace
+
+std::pmr::memory_resource& BatchEnvelope::Memory() noexcept {
+    return _arena;
 }
 
 bool BatchEnvelope::Freeze(const rn_batch_desc& input) {
@@ -68,32 +78,37 @@ bool BatchEnvelope::Freeze(const rn_batch_desc& input) {
     if (desc.struct_size != sizeof(desc) || desc.reserved || desc.view_reserved || desc.capture_reserved || desc.query_reserved ||
         (desc.flags & ~(RN_BATCH_MEASURE | RN_BATCH_BORROW_POOLED)) ||
         !ValidArray(desc.views, desc.view_count, 65536) || !ValidArray(desc.dirty_ranges, desc.dirty_count, UINT32_MAX) ||
-        !ValidArray(desc.captures, desc.capture_count, 4096) || !ValidArray(desc.queries, desc.query_count, UINT32_MAX)) return {};
+        !ValidArray(desc.captures, desc.capture_count, 4096) || !ValidArray(desc.queries, desc.query_count, UINT32_MAX)) {
+        return false;
+    }
     const bool borrow = (desc.flags & RN_BATCH_BORROW_POOLED) != 0;
     auto freeze = [&](const void*& data, uint64_t size) {
         const auto* bytes = static_cast<const radray::byte*>(data);
         if (!ValidArray(bytes, size, PTRDIFF_MAX)) return false;
-        if (!borrow) data = Copy(arena, bytes, size, 8);
+        if (!borrow) data = Copy(_arena, bytes, size, 8);
         return true;
     };
     if (!freeze(desc.commands, desc.command_bytes) || !freeze(desc.uploads, desc.upload_bytes) ||
-        !freeze(desc.instance_uploads, desc.instance_upload_bytes)) return {};
-    auto* views = Copy(arena, desc.views, desc.view_count);
+        !freeze(desc.instance_uploads, desc.instance_upload_bytes)) {
+        return false;
+    }
+    auto* views = Copy(_arena, desc.views, desc.view_count);
     desc.views = views;
-    for (auto& view : std::span(views, desc.view_count)) if (!FreezeView(arena, view, borrow)) return {};
-    desc.dirty_ranges = Copy(arena, desc.dirty_ranges, desc.dirty_count);
+    for (auto& view : std::span(views, desc.view_count)) {
+        if (!FreezeView(_arena, view, borrow)) return false;
+    }
+    desc.dirty_ranges = Copy(_arena, desc.dirty_ranges, desc.dirty_count);
     desc.flags &= ~RN_BATCH_BORROW_POOLED;
-    desc.captures=Copy(arena,desc.captures,desc.capture_count);
-    desc.queries=Copy(arena,desc.queries,desc.query_count);
-    batch=desc;
+    desc.captures = Copy(_arena, desc.captures, desc.capture_count);
+    desc.queries = Copy(_arena, desc.queries, desc.query_count);
+    Batch = desc;
     return true;
 }
+
 void BatchEnvelope::Reset() {
-    resources.textureUploads.clear();
-    resources.bufferUploads.clear();
-    resources.removedModelMeshes.clear();
-    shadows.clear();
-    batch={};
-    arena.release();
+    Resources.Clear();
+    Shadows.clear();
+    Batch = {};
+    _arena.release();
 }
-}
+}  // namespace raynium

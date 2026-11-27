@@ -1,47 +1,117 @@
 #include <raynium/static_geometry_registry.h>
-#include <raynium/exception.h>
-#include <radray/logger.h>
+
 #include <algorithm>
 #include <cstring>
 #include <utility>
 
-namespace raynium {
-using namespace radray::gpu;
+#include <radray/logger.h>
+#include <raynium/exception.h>
 
-bool StaticGeometryRegistry::Create(Device& device, radray::unique_ptr<StaticGeometryRegistry>& out) {
+namespace raynium {
+StaticGeometryRegistry::StaticGeometryRegistry(radray::unique_ptr<radray::VertexBufferPool> vertices) noexcept
+    : _vertices(std::move(vertices)) {}
+
+const radray::VertexBufferPool& StaticGeometryRegistry::VertexPool() const noexcept {
+    return *_vertices;
+}
+
+void StaticGeometryRegistry::BeginSlot() {
+    _vertices->TrimEmptyPages();
+}
+
+bool StaticGeometryRegistry::Create(radray::gpu::Device& device, radray::unique_ptr<StaticGeometryRegistry>& out) {
     if (out) RADRAY_ABORT("StaticGeometryRegistry output occupied");
     const radray::array layouts{
-        VertexBufferLayout{0, kModelVertexStride, VertexStepMode::Vertex}};
+        radray::gpu::VertexBufferLayout{0, kModelVertexStride, radray::gpu::VertexStepMode::Vertex},
+    };
     const radray::array attributes{
-        radray::VertexInputAttribute{0, 0, "TEXCOORD", 0, VertexFormat::FLOAT32X3},
-        radray::VertexInputAttribute{0, 12, "TEXCOORD", 1, VertexFormat::FLOAT32X2},
-        radray::VertexInputAttribute{0, 20, "TEXCOORD", 2, VertexFormat::SNORM8X4}};
-    auto vertices = radray::VertexBufferPool::Create(device, {
-        .VertexStride = kModelVertexStride,
-        .PageVertexCapacity = (16u << 20) / kModelVertexStride,
-        .AdditionalUsage = BufferUse::Resource,
-        .Layouts = layouts,
-        .Attributes = attributes,
-        .DebugNamePrefix = "StaticVertices"}).Release();
+        radray::VertexInputAttribute{0, 0, "TEXCOORD", 0, radray::gpu::VertexFormat::FLOAT32X3},
+        radray::VertexInputAttribute{0, 12, "TEXCOORD", 1, radray::gpu::VertexFormat::FLOAT32X2},
+        radray::VertexInputAttribute{0, 20, "TEXCOORD", 2, radray::gpu::VertexFormat::SNORM8X4},
+    };
+    auto vertices = radray::VertexBufferPool::Create(
+                        device,
+                        {
+                            .VertexStride = kModelVertexStride,
+                            .PageVertexCapacity = (16u << 20) / kModelVertexStride,
+                            .AdditionalUsage = radray::gpu::BufferUse::Resource,
+                            .Layouts = layouts,
+                            .Attributes = attributes,
+                            .DebugNamePrefix = "StaticVertices",
+                        })
+                        .Release();
     if (!vertices) {
         RADRAY_ERR_LOG("Cannot create StaticVertices vertex buffer pool");
         return false;
     }
     auto registry = radray::unique_ptr<StaticGeometryRegistry>(new StaticGeometryRegistry(std::move(vertices)));
-    constexpr radray::array<float, 24> particle{
-         1,-1,0, 1,1,0,    1,1,0, 1,0,0,
-        -1, 1,0, 0,0,0,   -1,-1,0, 0,1,0};
-    constexpr radray::array<float, 24> shadow{
-        0,0,0, 0,0,0,    0,0,1, 0,0,0,
-        1,0,1, 0,0,0,    1,0,0, 0,0,0};
+    constexpr radray::array<float, 24> kParticle{
+        1,
+        -1,
+        0,
+        1,
+        1,
+        0,
+        1,
+        1,
+        0,
+        1,
+        0,
+        0,
+        -1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        -1,
+        -1,
+        0,
+        0,
+        1,
+        0,
+    };
+    constexpr radray::array<float, 24> kShadow{
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+    };
     uint32_t pageId{};
-    if (!registry->Store(kParticleUnitQuadId, std::as_bytes(std::span(particle)), 4, 6, pageId) ||
-        !registry->Store(kShadowUnitQuadId, std::as_bytes(std::span(shadow)), 4, 6, pageId)) return false;
+    if (!registry->Store(kParticleUnitQuadId, std::as_bytes(std::span(kParticle)), 4, 6, pageId) ||
+        !registry->Store(kShadowUnitQuadId, std::as_bytes(std::span(kShadow)), 4, 6, pageId)) {
+        return false;
+    }
     out = std::move(registry);
     return true;
 }
 
-bool StaticGeometryRegistry::Upsert(int32_t meshId, std::span<const radray::byte> vertices, uint32_t vertexCount, uint32_t indexCount, uint32_t& outPageId) {
+bool StaticGeometryRegistry::Upsert(
+    int32_t meshId,
+    std::span<const radray::byte> vertices,
+    uint32_t vertexCount,
+    uint32_t indexCount,
+    uint32_t& outPageId) {
     if (meshId < kFirstUserId) {
         RADRAY_ERR_LOG("Reserved static geometry id={}", meshId);
         return false;
@@ -49,11 +119,16 @@ bool StaticGeometryRegistry::Upsert(int32_t meshId, std::span<const radray::byte
     return Store(meshId, vertices, vertexCount, indexCount, outPageId);
 }
 
-bool StaticGeometryRegistry::Store(int32_t meshId, std::span<const radray::byte> vertices,
-    uint32_t vertexCount, uint32_t indexCount, uint32_t& outPageId) {
+bool StaticGeometryRegistry::Store(
+    int32_t meshId,
+    std::span<const radray::byte> vertices,
+    uint32_t vertexCount,
+    uint32_t indexCount,
+    uint32_t& outPageId) {
     if (!vertexCount || vertexCount % 4 || vertexCount > kMaxModelVertices ||
         vertices.size() != uint64_t(vertexCount) * kModelVertexStride || indexCount != (vertexCount / 4) * 6) {
-        RADRAY_ERR_LOG("Invalid rigid model mesh upsert: id={} bytes={} vertices={} indices={}",
+        RADRAY_ERR_LOG(
+            "Invalid rigid model mesh upsert: id={} bytes={} vertices={} indices={}",
             meshId, vertices.size(), vertexCount, indexCount);
         return false;
     }
@@ -73,9 +148,10 @@ bool StaticGeometryRegistry::Store(int32_t meshId, std::span<const radray::byte>
     _pendingUploads.push_back({
         subAlloc.GetGpuBuffer(),
         subAlloc.GetByteOffset(),
-        radray::RDGUploadSource::OwnedBytes(std::move(owned))});
+        radray::RDGUploadSource::OwnedBytes(std::move(owned)),
+    });
     auto& mesh = _meshes[meshId];
-    if (mesh.geometry) _retired.push_back(std::move(mesh.geometry));
+    if (mesh.Geometry) _retired.push_back(std::move(mesh.Geometry));
     mesh = StaticMesh{std::move(subAlloc), vertexCount, indexCount};
     outPageId = pageId;
     _maxVertexCount = std::max(_maxVertexCount, vertexCount);
@@ -89,17 +165,20 @@ bool StaticGeometryRegistry::Remove(int32_t meshId) {
     }
     if (Find(meshId)) {
         auto& mesh = _meshes[meshId];
-        _retired.push_back(std::move(mesh.geometry));
+        _retired.push_back(std::move(mesh.Geometry));
         mesh = {};
     }
     return true;
 }
 
 const StaticMesh* StaticGeometryRegistry::Find(int32_t meshId) const noexcept {
-    return meshId >= 0 && size_t(meshId) < _meshes.size() && _meshes[meshId].geometry ? &_meshes[meshId] : nullptr;
+    return meshId >= 0 && size_t(meshId) < _meshes.size() && _meshes[meshId].Geometry ? &_meshes[meshId] : nullptr;
 }
 
-bool StaticGeometryRegistry::PrepareQuadIndices(TerrainResidency& terrain, radray::FrameSlot& slot, std::pmr::vector<GeometryUpload>& uploads) {
+bool StaticGeometryRegistry::PrepareQuadIndices(
+    TerrainResidency& terrain,
+    radray::FrameSlot& slot,
+    std::pmr::vector<GeometryUpload>& uploads) {
     if (!_maxVertexCount) return true;
     bool grew = false;
     if (!terrain.EnsureQuadIndices(_maxVertexCount, uploads, &slot, nullptr, &grew)) return false;
@@ -129,4 +208,4 @@ void StaticGeometryRegistry::Reset() noexcept {
     _retired.clear();
     _maxVertexCount = 0;
 }
-}
+}  // namespace raynium

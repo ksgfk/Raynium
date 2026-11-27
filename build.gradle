@@ -6,16 +6,45 @@ base {
     archivesName = 'raynium'
 }
 
-def gameRunDir = providers.gradleProperty('gameRunDir').getOrElse('run')
+def gameRunDir = localConfig('gameRunDir', 'run')
+def rayniumSystemProps = providers.systemPropertiesPrefixedBy('raynium.').get()
+
+def combinedAccessWidener = layout.buildDirectory.file('loom/combined.accesswidener').get().asFile
+def combinedAwContent = {
+    def lines = ['accessWidener v2 official']
+    [file('src/client/resources/raynium.accesswidener'), file('src/harness/resources/raynium-harness.accesswidener')].each { awFile ->
+        awFile.readLines('UTF-8').eachWithIndex { line, idx ->
+            if (idx == 0) {
+                if (line.trim() != 'accessWidener v2 official') {
+                    throw new GradleException("Unexpected access widener header in ${awFile}: ${line}")
+                }
+            } else if (!line.trim().isEmpty()) {
+                lines.add(line)
+            }
+        }
+    }
+    return lines.join('\n') + '\n'
+}()
+if (!combinedAccessWidener.exists() || combinedAccessWidener.getText('UTF-8') != combinedAwContent) {
+    combinedAccessWidener.parentFile.mkdirs()
+    combinedAccessWidener.setText(combinedAwContent, 'UTF-8')
+}
+
+sourceSets {
+    harness
+}
 
 loom {
     splitEnvironmentSourceSets()
-    accessWidenerPath = file('src/client/resources/raynium.accesswidener')
+    accessWidenerPath = combinedAccessWidener
 
     mods {
         raynium {
             sourceSet sourceSets.main
             sourceSet sourceSets.client
+        }
+        'raynium-harness' {
+            sourceSet sourceSets.harness
         }
     }
 
@@ -27,105 +56,70 @@ loom {
             runDir = gameRunDir
             programArg '--gameDir'
             programArg file(gameRunDir).absolutePath
-            if (providers.gradleProperty('gameUsername').isPresent()) {
-                def username = providers.gradleProperty('gameUsername').get()
-                if (!(username ==~ /[a-zA-Z0-9_]{1,16}/)) {
-                    throw new GradleException('gameUsername must contain 1–16 letters, digits or underscores')
-                }
-                programArg '--username'
-                programArg username
-            }
-            if (providers.gradleProperty('quickPlayWorld').isPresent()) {
-                programArg '--quickPlaySingleplayer'
-                programArg providers.gradleProperty('quickPlayWorld').get()
-            }
-            if (providers.gradleProperty('captureTracyImages').getOrElse('false').toBoolean()) {
-                programArg '--tracy'
-            }
             vmArg '--enable-native-access=ALL-UNNAMED'
-            if (providers.gradleProperty('benchmarkConfig').isPresent()) {
-                property 'org.lwjgl.util.NoChecks', 'true'
-                property 'org.lwjgl.util.NoFunctionChecks', 'true'
-                vmArg '-da'
-            }
-            if (providers.gradleProperty('jfrFile').isPresent()) {
-                vmArg '-XX:StartFlightRecording=name=Raynium,settings=profile,disk=true,dumponexit=true,maxsize=1g,filename=' +
-                    file(providers.gradleProperty('jfrFile').get()).absolutePath
-            }
-            property 'raynium.rhi.backend', providers.gradleProperty('rhiBackend').getOrElse('d3d12')
-            property 'raynium.rhi.validation', providers.gradleProperty('rhiValidation').getOrElse('false')
-            property 'raynium.terrain.submission', providers.gradleProperty('terrainSubmission').getOrElse('auto')
-            if (providers.gradleProperty('validationConfig').isPresent()) {
-                property 'raynium.validation.config', file(providers.gradleProperty('validationConfig').get()).absolutePath
-                if (providers.gradleProperty('validationReadOnlyRegions').getOrElse('false').toBoolean()) {
-                    property 'MC_DEBUG_ENABLED', 'true'
-                    property 'MC_DEBUG_DONT_SAVE_WORLD', 'true'
-                }
-            }
+            properties(rayniumSystemProps)
         }
         clientNative {
             inherit client
             getJvmArguments().set(client.getJvmArguments())
-            runDir = gameRunDir
-            programArg '--gameDir'
-            programArg file(gameRunDir).absolutePath
-            if (providers.gradleProperty('quickPlayWorld').isPresent()) {
-                programArg '--quickPlaySingleplayer'
-                programArg providers.gradleProperty('quickPlayWorld').get()
-            }
-            if (providers.gradleProperty('benchmarkConfig').isPresent()) {
-                if (!providers.gradleProperty('benchmarkRunDir').isPresent()) {
-                    throw new GradleException('benchmarkConfig requires benchmarkRunDir')
-                }
-                runDir = file(providers.gradleProperty('benchmarkRunDir').get()).absolutePath
-                property 'raynium.benchmark.config', file(providers.gradleProperty('benchmarkConfig').get()).absolutePath
-                programArg '--gameDir'
-                programArg file(providers.gradleProperty('benchmarkRunDir').get()).absolutePath
-                programArg '--quickPlaySingleplayer'
-                programArg 'benchmark'
-            }
             configName = 'Minecraft Client (Raynium Native)'
             ideConfigGenerated = true
-            property 'raynium.native.dir', layout.buildDirectory.dir(
-                "native/stage/windows-x86_64/${providers.gradleProperty('nativeConfig').getOrElse('Debug')}"
-            ).get().asFile.absolutePath
-        }
-        clientReference {
-            inherit client
-            getJvmArguments().set(client.getJvmArguments())
-            configName = 'Minecraft Client (Vanilla Reference)'
-            property 'raynium.reference', 'true'
-            programArg '--graphicsBackend'
-            programArg 'VULKAN'
             runDir = gameRunDir
             programArg '--gameDir'
             programArg file(gameRunDir).absolutePath
-            if (providers.gradleProperty('benchmarkConfig').isPresent()) {
-                if (!providers.gradleProperty('benchmarkRunDir').isPresent()) {
-                    throw new GradleException('benchmarkConfig requires benchmarkRunDir')
-                }
-                runDir = file(providers.gradleProperty('benchmarkRunDir').get()).absolutePath
-                property 'raynium.benchmark.config', file(providers.gradleProperty('benchmarkConfig').get()).absolutePath
-                programArg '--gameDir'
-                programArg file(providers.gradleProperty('benchmarkRunDir').get()).absolutePath
-                programArg '--quickPlaySingleplayer'
-                programArg 'benchmark'
-            }
+            property 'raynium.native.dir', layout.buildDirectory.dir('native/stage/windows-x86_64/Debug').get().asFile.absolutePath
+        }
+        clientNativeRelease {
+            inherit client
+            getJvmArguments().set(client.getJvmArguments())
+            configName = 'Minecraft Client (Raynium Native Release)'
+            ideConfigGenerated = false
+            runDir = gameRunDir
+            programArg '--gameDir'
+            programArg file(gameRunDir).absolutePath
+            property 'raynium.native.dir', layout.buildDirectory.dir('native/stage/windows-x86_64/Release').get().asFile.absolutePath
+        }
+        clientReference {
+            client()
+            source(sourceSets.harness)
+            configName = 'Minecraft Client (Vanilla Reference)'
+            ideConfigGenerated = false
+            runDir = gameRunDir
+            programArg '--gameDir'
+            programArg file(gameRunDir).absolutePath
+            programArg '--graphicsBackend'
+            programArg 'VULKAN'
+            vmArg '--enable-native-access=ALL-UNNAMED'
+            properties(rayniumSystemProps)
+            property 'fabric.classPathGroups', sourceSets.harness.output.files.collect { it.absolutePath }.join(File.pathSeparator)
         }
         remove server
     }
+}
+
+tasks.matching { it.name == 'runClientReference' }.configureEach {
+    def excluded = (sourceSets.main.output.files + sourceSets.client.output.files).collect { it.toPath().toAbsolutePath().normalize() } as Set
+    classpath = classpath.filter { file -> !excluded.contains(file.toPath().toAbsolutePath().normalize()) }
+}
+
+configurations {
+    harnessCompileClasspath.extendsFrom(clientCompileClasspath)
+    harnessRuntimeClasspath.extendsFrom(clientRuntimeClasspath)
 }
 
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
     implementation "net.fabricmc:fabric-loader:${project.loader_version}"
     implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+    harnessCompileOnly sourceSets.main.output
+    harnessCompileOnly sourceSets.client.output
+    testImplementation sourceSets.harness.output
     testImplementation platform("org.junit:junit-bom:${project.junit_version}")
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
-processResources {
+tasks.withType(ProcessResources).configureEach {
     def properties = [
         version: project.version,
         minecraft_version: project.minecraft_version,

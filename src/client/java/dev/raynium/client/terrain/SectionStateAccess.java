@@ -5,5 +5,5 @@ public interface SectionStateAccess {
     State raynium$state();
     long raynium$captureGen();
     int raynium$captureSlot();
-    void raynium$setCaptureSlot(long generation,int slot);
+    void raynium$setCaptureSlot(long generation, int slot);
 }

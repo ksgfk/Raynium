@@ -1,6 +1,6 @@
-> - 适用: 配置 Java/IDEA、生成和阅读 MC 源码
-> - 权威: 本文维护开发环境和源码获取方法；native 依赖、构建与测试见构建指南
-> - 锚点: `gradle.properties`, `gradle/wrapper/gradle-wrapper.properties`, `build.gradle`, `settings.gradle`, `.gitignore`
+> - 适用: 配置 Java/IDEA、本机配置、格式化工具与阅读 MC 源码
+> - 权威: 本文维护开发环境和源码获取方法；native 依赖、构建与测试见构建指南，代码规范见编码与工程规范
+> - 锚点: `gradle.properties`, `local.properties.example`, `.clang-format`, `gradle/wrapper/gradle-wrapper.properties`, `build.gradle`, `settings.gradle`, `.gitignore`
 
 # 开发环境
 
@@ -19,12 +19,24 @@
 
 安装本机 JDK 25，并为 Gradle JVM 与项目 SDK 选择它。IDEA 的 JDK 路径与运行配置是本机状态，不在公共文档写死。
 
+## 本机配置 `local.properties`
+
+仓库不提交本机代理、Python 路径或游戏目录配置。按需将根目录 [local.properties.example](../../local.properties.example) 复制为被 Git 忽略的 `local.properties`：
+
+- `proxy`：可选 HTTP(S) 代理 URL（如 `http://127.0.0.1:10808`），由 `settings.gradle` 在 Gradle 启动前（当 JVM 未显式传入 `-Dhttp.proxyHost` 时）与 `tools/fetch_radray.py` 读取；留空则直连。
+- `python`：Python 可执行文件路径，默认 `python`。
+- `parallel`：CMake/Ninja 并行度，默认 `8`。
+- `radraySourceDir`：可选本地 RadRay 源码覆盖路径；留空时使用锁定检出 `external/RadRay`。
+- `gameRunDir`：开发客户端游戏目录，默认 `run`。
+
+根目录 [.clang-format](../../.clang-format) 同时覆盖 C++ 与 Java 格式化规则，使用方式见[编码与工程规范](conventions.md#代码格式化)。
+
 ## 在 IntelliJ IDEA 中打开
 
 1. 使用 **File → Open** 打开本仓库根目录，按 Gradle 工程导入，等待同步和索引结束。
 2. **Settings → Build, Execution, Deployment → Build Tools → Gradle** 中使用项目的 **Wrapper**，Gradle JVM 选择 **JDK 25**。若本机路径未自动解析，选择本机 JDK 25 目录。
 3. **File → Project Structure → Project SDK** 选择 **JDK 25**。项目使用 Java 25 toolchain。
-4. 运行/调试配置为 **Minecraft Client (Raynium)**，由 Loom 生成。若首次导入后暂未显示，可重新加载 Gradle 工程。
+4. Loom 会为 `client` 与 `clientNative` 生成运行/调试配置（如 **Minecraft Client (Raynium)**）。若首次导入后暂未显示，可执行 `ideaSyncTask` 或重新加载 Gradle 工程。
 
 ## 阅读 Minecraft 源码
 
@@ -40,7 +52,7 @@ Minecraft 26.3 使用未混淆的官方名称，本工程使用 `net.fabricmc.fa
 
 MC 26.3 的渲染入口与职责如下：
 
-| 类 / 包 | 源码职责 |
+| 类 / 方法 / 包 | 源码职责 |
 | --- | --- |
 | `net.minecraft.client.Minecraft` | 客户端生命周期、主循环、窗口与渲染调度 |
 | `net.minecraft.client.renderer.GameRenderer` | 帧级渲染组织、相机与画面输出 |
@@ -51,7 +63,7 @@ MC 26.3 的渲染入口与职责如下：
 
 ## 缓存与产物
 
-`.gradle/`、`.idea/`、`build/`、`run/` 是本机缓存和产物，不提交配置、日志或测试世界。
+`.gradle/`、`.idea/`、`build/`、`run/` 与 `local.properties` 是本机缓存、配置和产物，不提交到仓库。
 构建、开发客户端和 native 运行命令见[构建与测试](build-test.md)。
 
 ## 工具参考

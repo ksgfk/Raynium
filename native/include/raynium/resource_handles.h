@@ -1,71 +1,101 @@
 #pragma once
-#include <raynium/bridge.h>
-#include <radray/runtime/gpu_resource.h>
-#include <radray/types.h>
-#include <radray/runtime/rdg.h>
+
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <mutex>
 
+#include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/rdg.h>
+#include <radray/types.h>
+#include <raynium/bridge.h>
+
 namespace raynium {
-template<class T> struct ResourceHandle {
-    rn_renderer* owner{};
-    bool live{};
-    T* next{};
-    T** link{};
+template <class T>
+struct ResourceHandle {
+    rn_renderer* Owner{};
+    bool Live{};
+    T* Next{};
+    T** Link{};
 };
-template<class T> class HandleList final {
+
+template <class T>
+class HandleList final {
 public:
-    ~HandleList() { while (_head) delete Remove(_head); }
-    T* Insert(rn_renderer* owner, radray::unique_ptr<T> entry) {
-        auto* value=entry.release();
-        value->owner=owner;
-        value->live=true;
-        value->next=_head;
-        value->link=&_head;
-        if(_head) _head->link=&value->next;
-        return _head=value;
+    ~HandleList() {
+        while (_head) delete Remove(_head);
     }
+
+    T* Insert(rn_renderer* owner, radray::unique_ptr<T> entry) {
+        auto* value = entry.release();
+        value->Owner = owner;
+        value->Live = true;
+        value->Next = _head;
+        value->Link = &_head;
+        if (_head) _head->Link = &value->Next;
+        return _head = value;
+    }
+
     T* Remove(T* value) {
-        *value->link=value->next;
-        if(value->next) value->next->link=value->link;
-        value->live=false;
+        *value->Link = value->Next;
+        if (value->Next) value->Next->Link = value->Link;
+        value->Live = false;
         return value;
     }
+
 private:
     T* _head{};
 };
-template<class T> T* ResolveHandle(rn_renderer* owner,T* value) {
-    return value && value->owner==owner && value->live ? value : nullptr;
-}
-struct HostReadStorage final : radray::ThreadSafeRefCountedBase<HostReadStorage> {
-    explicit HostReadStorage(size_t size):bytes(size) {}
-    std::atomic<bool> alive{true};
-    radray::vector<radray::byte> bytes;
-};
-struct QuerySlot { uint64_t sequence{},ticks{}; bool available{}; };
-struct QueryPoolStorage final : radray::ThreadSafeRefCountedBase<QueryPoolStorage> {
-    explicit QueryPoolStorage(uint32_t count):slots(count) {}
-    std::mutex mutex;
-    radray::vector<QuerySlot> slots;
-};
+
+template <class T>
+T* ResolveHandle(rn_renderer* owner, T* value) {
+    return value && value->Owner == owner && value->Live ? value : nullptr;
 }
 
+class HostReadStorage final : public radray::ThreadSafeRefCountedBase<HostReadStorage> {
+public:
+    explicit HostReadStorage(size_t size);
+
+    std::atomic<bool> Alive{true};
+    radray::vector<radray::byte> Bytes;
+};
+
+struct QuerySlot {
+    uint64_t Sequence{};
+    uint64_t Ticks{};
+    bool Available{};
+};
+
+class QueryPoolStorage final : public radray::ThreadSafeRefCountedBase<QueryPoolStorage> {
+public:
+    explicit QueryPoolStorage(uint32_t count);
+
+    std::mutex Mutex;
+    radray::vector<QuerySlot> Slots;
+};
+}  // namespace raynium
+
 struct rn_query_pool : raynium::ResourceHandle<rn_query_pool> {
-    radray::IntrusivePtr<raynium::QueryPoolStorage> storage;
+    radray::IntrusivePtr<raynium::QueryPoolStorage> Storage;
 };
+
 struct rn_texture : raynium::ResourceHandle<rn_texture> {
-    rn_texture_desc desc{};
-    radray::IntrusivePtr<radray::GpuTexture> texture;
+    rn_texture_desc Desc{};
+    radray::IntrusivePtr<radray::GpuTexture> Texture;
 };
+
 struct rn_buffer : raynium::ResourceHandle<rn_buffer> {
-    uint32_t usage{};
-    uint64_t size{};
-    radray::IntrusivePtr<radray::GpuBuffer> gpu;
-    radray::IntrusivePtr<raynium::HostReadStorage> readbackHost;
-    radray::vector<radray::byte> shadowHost;
-    radray::byte* mapped{};
-    bool IsHostVisible() const noexcept { return gpu && gpu->IsHostVisible(); }
-    bool IsReadback() const { return (usage & RN_BUFFER_MAP_READ)!=0; }
-    bool Contains(uint64_t offset,uint64_t length) const { return length && offset<=size && length<=size-offset; }
-    radray::RDGBufferHandle Import(radray::RDGBuilder&) const;
+    uint32_t Usage{};
+    uint64_t Size{};
+    radray::IntrusivePtr<radray::GpuBuffer> Gpu;
+    radray::IntrusivePtr<raynium::HostReadStorage> ReadbackHost;
+    radray::vector<radray::byte> ShadowHost;
+    radray::byte* Mapped{};
 };
+
+namespace raynium {
+bool IsHostVisibleBuffer(const rn_buffer& buffer) noexcept;
+bool IsReadbackBuffer(const rn_buffer& buffer) noexcept;
+bool BufferContainsRange(const rn_buffer& buffer, uint64_t offset, uint64_t length) noexcept;
+radray::RDGBufferHandle ImportBuffer(const rn_buffer& buffer, radray::RDGBuilder& graph);
+}  // namespace raynium

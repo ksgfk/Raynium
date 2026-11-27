@@ -1,4 +1,19 @@
 pluginManagement {
+    def localFile = new File(settingsDir, 'local.properties')
+    if (localFile.isFile()) {
+        def props = new Properties()
+        localFile.withInputStream { props.load(it) }
+        def proxyValue = props.getProperty('proxy')?.trim()
+        if (proxyValue && !System.getProperty('http.proxyHost')) {
+            def uri = URI.create(proxyValue)
+            if (uri.host && uri.port > 0) {
+                System.setProperty('http.proxyHost', uri.host)
+                System.setProperty('http.proxyPort', String.valueOf(uri.port))
+                System.setProperty('https.proxyHost', uri.host)
+                System.setProperty('https.proxyPort', String.valueOf(uri.port))
+            }
+        }
+    }
     repositories {
         maven {
             name = 'Fabric'
@@ -6,6 +21,26 @@ pluginManagement {
         }
         mavenCentral()
         gradlePluginPortal()
+    }
+}
+
+def localPropsText = providers.fileContents(layout.settingsDirectory.file('local.properties')).asText.orNull
+def localProps = new Properties()
+if (localPropsText != null) {
+    localProps.load(new StringReader(localPropsText))
+}
+
+gradle.rootProject { root ->
+    root.ext.localConfig = { String key, String defaultValue = null ->
+        def gradleProp = root.providers.gradleProperty(key).orNull
+        if (gradleProp != null && !gradleProp.trim().isEmpty()) {
+            return gradleProp.trim()
+        }
+        def localVal = localProps.getProperty(key)?.trim()
+        if (localVal != null && !localVal.isEmpty()) {
+            return localVal
+        }
+        return defaultValue
     }
 }
 

@@ -1,22 +1,34 @@
 package dev.raynium.bridge;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 import com.mojang.blaze3d.buffers.Std140Builder;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import com.mojang.renderpearl.api.commands.RenderPass;
-import com.mojang.renderpearl.api.textures.*;
+import com.mojang.renderpearl.api.textures.AddressMode;
+import com.mojang.renderpearl.api.textures.FilterMode;
+import com.mojang.renderpearl.api.textures.GpuTexture;
 import dev.raynium.client.renderpearl.CommandTape;
 import dev.raynium.client.renderpearl.RayniumGpuDevice;
 import dev.raynium.client.world.ParticleFastTrack;
 import dev.raynium.client.world.RetainedModelManager;
+import java.io.IOException;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Path;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.concurrent.Executors;
+import java.util.function.Consumer;
 import net.minecraft.client.renderer.RenderPipelines;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
@@ -25,16 +37,16 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
-import static org.junit.jupiter.api.Assertions.*;
-
 @Tag("native")
 class NativeWorldFeaturesTest {
-    @TempDir Path directory;
+    @TempDir
+    Path directory;
 
-    @ParameterizedTest @EnumSource(NativeEnvironment.Backend.class)
-    void reuploadUsesTheRealPageWhileTheRemovedMeshIsRetained(NativeEnvironment.Backend backend) throws java.io.IOException {
-        try (var env = new NativeEnvironment(NativeTestSupport.locate(directory), backend, NativeTestSupport.recordingLogger(new ArrayList<>()));
-             var runtime = env.createRuntime(); var renderer = runtime.createRenderer(NativeTestSupport.shaders());
+    @ParameterizedTest
+    @EnumSource(NativeEnvironment.Backend.class)
+    void reuploadUsesTheRealPageWhileTheRemovedMeshIsRetained(NativeEnvironment.Backend backend) throws IOException {
+        try (var env = new NativeEnvironment(NativeTestSupport.locate(directory), backend, NativeTestSupport.validation(), NativeTestSupport.recordingLogger(new ArrayList<>()));
+             var runtime = env.createRuntime(); var renderer = runtime.createRenderer(NativeTestSupport.shaders(), NativeTestSupport.submissionMode());
              var tape = new CommandTape(renderer)) {
             int vertices = 400_000; // Two such meshes cannot share the 16 MiB page.
             var data = new byte[vertices * 24];
@@ -49,7 +61,7 @@ class NativeWorldFeaturesTest {
         }
     }
 
-    private static GpuBuffer makeUbo(RayniumGpuDevice device, int bytes, java.util.function.Consumer<Std140Builder> writer) {
+    private static GpuBuffer makeUbo(RayniumGpuDevice device, int bytes, Consumer<Std140Builder> writer) {
         ByteBuffer buf = ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder());
         writer.accept(Std140Builder.intoBuffer(buf));
         buf.flip();
@@ -61,13 +73,12 @@ class NativeWorldFeaturesTest {
         ByteBuffer buf = ByteBuffer.allocate(4 * 24).order(ByteOrder.LITTLE_ENDIAN);
         float[][] verts = {
             {-0.5F, -0.5F, 0.0F, 0.0F, 1.0F},
-            { 0.5F, -0.5F, 0.0F, 1.0F, 1.0F},
-            { 0.5F,  0.5F, 0.0F, 1.0F, 0.0F},
-            {-0.5F,  0.5F, 0.0F, 0.0F, 0.0F}
-        };
+            {0.5F, -0.5F, 0.0F, 1.0F, 1.0F},
+            {0.5F, 0.5F, 0.0F, 1.0F, 0.0F},
+            {-0.5F, 0.5F, 0.0F, 0.0F, 0.0F}};
         for (float[] v : verts) {
             buf.putFloat(v[0]).putFloat(v[1]).putFloat(v[2]).putFloat(v[3]).putFloat(v[4]);
-            buf.put((byte) 0).put((byte) 0).put((byte) 127).put((byte) 0);
+            buf.put((byte)0).put((byte)0).put((byte)127).put((byte)0);
         }
         return buf.array();
     }
@@ -76,18 +87,17 @@ class NativeWorldFeaturesTest {
     @EnumSource(NativeEnvironment.Backend.class)
     void retainedModelsAndCompactParticlesRenderAndValidateAcrossBackends(NativeEnvironment.Backend api) throws Exception {
         List<String> logs = new ArrayList<>();
-        try (var env = new NativeEnvironment(NativeTestSupport.locate(directory), api, NativeTestSupport.recordingLogger(logs));
+        try (var env = new NativeEnvironment(NativeTestSupport.locate(directory), api, NativeTestSupport.validation(), NativeTestSupport.recordingLogger(logs));
              var runtime = env.createRuntime();
-             var renderer = runtime.createRenderer(NativeTestSupport.shaders());
+             var renderer = runtime.createRenderer(NativeTestSupport.shaders(), NativeTestSupport.submissionMode());
              var device = new RayniumGpuDevice(runtime, renderer, true, directory);
              var sources = new NativeRenderPearlTest.Sources();
              var executor = Executors.newSingleThreadExecutor()) {
-
             // ABI 22 validation for rn_upsert_model_mesh / rn_remove_model_mesh.
             byte[] quadMesh = makeUnitQuadModelMesh();
             assertThrows(IllegalArgumentException.class, () -> renderer.upsertModelMesh(0, quadMesh, 4, 6));
             assertThrows(IllegalArgumentException.class, () -> renderer.removeModelMesh(-1));
-            assertThrows(IllegalStateException.class, () -> renderer.upsertModelMesh(16, quadMesh, 4, 5)); // wrong index count
+            assertThrows(IllegalStateException.class, () -> renderer.upsertModelMesh(16, quadMesh, 4, 5));     // wrong index count
             assertThrows(IllegalStateException.class, () -> renderer.upsertModelMesh(16, new byte[24], 1, 6)); // non-quad vertex count
 
             // Upsert, replace, and remove cleanly.
@@ -99,11 +109,9 @@ class NativeWorldFeaturesTest {
 
             // Compile vanilla ENTITY_SOLID and OPAQUE_PARTICLE and confirm built-in instanced pipelines registered.
             var entityPipeline = Objects.requireNonNull(
-                device.compilePipeline(RenderPipelines.ENTITY_SOLID, sources, executor).join().finishCompile()
-            );
+                device.compilePipeline(RenderPipelines.ENTITY_SOLID, sources, executor).join().finishCompile());
             var particlePipeline = Objects.requireNonNull(
-                device.compilePipeline(RenderPipelines.OPAQUE_PARTICLE, sources, executor).join().finishCompile()
-            );
+                device.compilePipeline(RenderPipelines.OPAQUE_PARTICLE, sources, executor).join().finishCompile());
             assertTrue(device.supportsInstanced(RenderPipelines.ENTITY_SOLID, "entity"));
             assertTrue(device.supportsInstanced(RenderPipelines.OPAQUE_PARTICLE, "particle"));
 
@@ -118,23 +126,15 @@ class NativeWorldFeaturesTest {
                  var whiteView = device.createTextureView(whiteTex);
                  var sampler = device.createSampler(AddressMode.CLAMP_TO_EDGE, AddressMode.CLAMP_TO_EDGE, FilterMode.NEAREST, FilterMode.NEAREST, 1, OptionalDouble.empty());
                  var projectionUbo = makeUbo(device, 64, b -> b.putMat4f(new Matrix4f().identity()));
-                 var dynamicUbo = makeUbo(device, 192, b -> b
-                     .putMat4f(new Matrix4f().identity())
-                     .putMat4f(new Matrix4f().identity())
-                     .putVec4(1, 1, 1, 1)
-                     .putVec3(0, 0, 0));
-                 var fogUbo = makeUbo(device, 48, b -> b
-                     .putVec4(0, 0, 0, 0)
-                     .putFloat(1000).putFloat(2000).putFloat(1000).putFloat(2000).putFloat(1000).putFloat(2000));
+                 var dynamicUbo = makeUbo(device, 192, b -> b.putMat4f(new Matrix4f().identity()).putMat4f(new Matrix4f().identity()).putVec4(1, 1, 1, 1).putVec3(0, 0, 0));
+                 var fogUbo = makeUbo(device, 48, b -> b.putVec4(0, 0, 0, 0).putFloat(1000).putFloat(2000).putFloat(1000).putFloat(2000).putFloat(1000).putFloat(2000));
                  var lightingUbo = makeUbo(device, 32, b -> b.putVec3(0, 0, 1).putVec3(0, 0, 1));
                  var readback = device.createBuffer(() -> "readback", GpuBuffer.USAGE_COPY_DST | GpuBuffer.USAGE_MAP_READ, 4 * 4 * 4)) {
-
                 var encoder = device.createCommandEncoder();
                 ByteBuffer whitePixel = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder()).putInt(0xFFFFFFFF).flip();
                 encoder.writeToTexture(whiteTex, whitePixel, 0, 0, 0, 0, 1, 1);
 
-                try (RenderPass pass = encoder.createRenderPass(() -> "mixed-world-pass",
-                        colorView, Optional.of(new Vector4f(0, 0, 0, 1)), depthView, OptionalDouble.of(0.0))) {
+                try (RenderPass pass = encoder.createRenderPass(() -> "mixed-world-pass", colorView, Optional.of(new Vector4f(0, 0, 0, 1)), depthView, OptionalDouble.of(0.0))) {
                     CommandTape tape = RayniumGpuDevice.activeTape(pass);
 
                     // The model instances cover the top two rows.
@@ -161,28 +161,24 @@ class NativeWorldFeaturesTest {
                     pass.setUniform("Sampler1", whiteView, sampler);
                     pass.setUniform("Sampler2", whiteView, sampler);
                     // Multi-run same-page batch (meshId 1 + meshId 3) exercises same-page indirect draw batching (P2.4).
-                    assertTrue(RayniumGpuDevice.recordInstancedGeometry(pass, "entity", modelOffset, 2, 80, new int[]{16, 18}, new int[]{0, 1}, new int[]{1, 1}, 2));
+                    assertTrue(RayniumGpuDevice.recordInstancedGeometry(pass, "entity", modelOffset, 2, 80, new int[] {16, 18}, new int[] {0, 1}, new int[] {1, 1}, 2));
                     // Re-submit same uploadOffset to exercise zero-copy BorrowedBytes OIT slice reuse (P2.1).
-                    assertTrue(RayniumGpuDevice.recordInstancedGeometry(pass, "entity", modelOffset, 2, 80, new int[]{16, 18}, new int[]{0, 1}, new int[]{1, 1}, 2));
-
+                    assertTrue(RayniumGpuDevice.recordInstancedGeometry(pass, "entity", modelOffset, 2, 80, new int[] {16, 18}, new int[] {0, 1}, new int[] {1, 1}, 2));
                 }
                 try (var transfer = device.createBuffer(() -> "interleaved upload", GpuBuffer.USAGE_COPY_DST, 2 << 20)) {
                     encoder.writeToBuffer(transfer.slice(), ByteBuffer.allocateDirect(2 << 20));
                     encoder.writeToTexture(whiteTex, whitePixel.duplicate(), 0, 0, 0, 0, 1, 1);
                 }
-                try (RenderPass pass = encoder.createRenderPass(() -> "particles",
-                        colorView, Optional.empty(), depthView, OptionalDouble.empty())) {
+                try (RenderPass pass = encoder.createRenderPass(() -> "particles", colorView, Optional.empty(), depthView, OptionalDouble.empty())) {
                     CommandTape tape = RayniumGpuDevice.activeTape(pass);
                     // The particle instances cover the bottom two rows.
                     // Bottom-left: pure blue (ARGB 0xFF0000FF); Bottom-right: pure yellow (ARGB 0xFFFFFF00).
-                    float[] particleFloats = new float[]{
-                        -0.5F,  0.5F, 0.5F,  0, 0, 0, 1,  0.5F,  0, 1, 0, 1,
-                         0.5F,  0.5F, 0.5F,  0, 0, 0, 1,  0.5F,  0, 1, 0, 1
-                    };
-                    int[] particleColorsLight = new int[]{
+                    float[] particleFloats = new float[] {
+                        -0.5F, 0.5F, 0.5F, 0, 0, 0, 1, 0.5F, 0, 1, 0, 1,
+                        0.5F, 0.5F, 0.5F, 0, 0, 0, 1, 0.5F, 0, 1, 0, 1};
+                    int[] particleColorsLight = new int[] {
                         0xFF0000FF, 0x00F000F0,
-                        0xFFFFFF00, 0x00F000F0
-                    };
+                        0xFFFFFF00, 0x00F000F0};
                     int[] particleInts = new int[2 * ParticleFastTrack.INSTANCE_INTS];
                     ParticleFastTrack.packParticles(particleFloats, particleColorsLight, 2, particleInts, 0);
                     long particleOffset = tape.reserveInstanceUpload(2L * ParticleFastTrack.INSTANCE_BYTES, 8);
@@ -195,8 +191,8 @@ class NativeWorldFeaturesTest {
                     pass.setUniform("Fog", fogUbo.slice());
                     pass.setUniform("Sampler0", whiteView, sampler);
                     pass.setUniform("Sampler2", whiteView, sampler);
-                    assertTrue(RayniumGpuDevice.recordInstancedGeometry(pass, "particle", particleOffset, 2, 56, new int[]{1}, new int[]{0}, new int[]{2}, 1));
-                    assertTrue(RayniumGpuDevice.recordInstancedGeometry(pass, "particle", particleOffset, 2, 56, new int[]{1}, new int[]{0}, new int[]{2}, 1));
+                    assertTrue(RayniumGpuDevice.recordInstancedGeometry(pass, "particle", particleOffset, 2, 56, new int[] {1}, new int[] {0}, new int[] {2}, 1));
+                    assertTrue(RayniumGpuDevice.recordInstancedGeometry(pass, "particle", particleOffset, 2, 56, new int[] {1}, new int[] {0}, new int[] {2}, 1));
                 }
 
                 encoder.copyTextureToBuffer(colorTex, readback, 0, () -> {}, 0);
@@ -214,41 +210,40 @@ class NativeWorldFeaturesTest {
                     // RGBA8 little-endian: byte0=R, byte1=G, byte2=B, byte3=A.
                     // ENTITY_SOLID applies diffuse lighting (strictly >0 on red/green channels) and white texture.
                     assertTrue((topLeft & 0xFF) > 100 && ((topLeft >>> 8) & 0xFF) == 0 && ((topLeft >>> 16) & 0xFF) == 0,
-                        "Expected red model in top-left, got 0x" + Integer.toHexString(topLeft));
+                               "Expected red model in top-left, got 0x" + Integer.toHexString(topLeft));
                     assertTrue((topRight & 0xFF) == 0 && ((topRight >>> 8) & 0xFF) > 100 && ((topRight >>> 16) & 0xFF) == 0,
-                        "Expected green model in top-right, got 0x" + Integer.toHexString(topRight));
+                               "Expected green model in top-right, got 0x" + Integer.toHexString(topRight));
                     // Particle is unlit (pure blue = 0xFFFF0000 in ABGR, pure yellow = 0xFF00FFFF in ABGR).
                     assertEquals(0xFFFF0000, botLeft, "Expected blue particle in bottom-left");
                     assertEquals(0xFF00FFFF, botRight, "Expected yellow particle in bottom-right");
                 }
-                try (RenderPass pass = encoder.createRenderPass(() -> "shadow", colorView,
-                        Optional.of(new Vector4f(0, 0, 0, 1)), depthView, OptionalDouble.of(0.0))) {
-                    var tape=RayniumGpuDevice.activeTape(pass);
-                    long offset=tape.reserveInstanceUpload(56,8);
-                    var bytes=tape.instanceUploadSlice(offset,56);
-                    float[] corners={-1,1,0.5f,0, 2,0,0,1, 0,-2,0,0, 1};
-                    MemorySegment.copy(corners,0,bytes,ValueLayout.JAVA_FLOAT,0,corners.length);
-                    bytes.set(ValueLayout.JAVA_INT,52,0x80ffffff);
+                try (RenderPass pass = encoder.createRenderPass(() -> "shadow", colorView, Optional.of(new Vector4f(0, 0, 0, 1)), depthView, OptionalDouble.of(0.0))) {
+                    var tape = RayniumGpuDevice.activeTape(pass);
+                    long offset = tape.reserveInstanceUpload(56, 8);
+                    var bytes = tape.instanceUploadSlice(offset, 56);
+                    float[] corners = {-1, 1, 0.5f, 0, 2, 0, 0, 1, 0, -2, 0, 0, 1};
+                    MemorySegment.copy(corners, 0, bytes, ValueLayout.JAVA_FLOAT, 0, corners.length);
+                    bytes.set(ValueLayout.JAVA_INT, 52, 0x80ffffff);
                     pass.setPipeline(shadowPipeline);
-                    pass.setUniform("DynamicTransforms",dynamicUbo.slice());
-                    pass.setUniform("Projection",projectionUbo.slice());
-                    pass.setUniform("Fog",fogUbo.slice());
-                    pass.setUniform("Sampler0",whiteView,sampler);
-                    assertTrue(RayniumGpuDevice.recordInstancedGeometry(pass,"shadow",offset,1,56,
-                        new int[]{2},new int[]{0},new int[]{1},1));
+                    pass.setUniform("DynamicTransforms", dynamicUbo.slice());
+                    pass.setUniform("Projection", projectionUbo.slice());
+                    pass.setUniform("Fog", fogUbo.slice());
+                    pass.setUniform("Sampler0", whiteView, sampler);
+                    assertTrue(RayniumGpuDevice.recordInstancedGeometry(pass, "shadow", offset, 1, 56,
+                                                                        new int[] {2}, new int[] {0}, new int[] {1}, 1));
                 }
-                encoder.copyTextureToBuffer(colorTex,readback,0,() -> {},0);
-                try(var fence=encoder.createFence()) {
+                encoder.copyTextureToBuffer(colorTex, readback, 0, () -> {}, 0);
+                try (var fence = encoder.createFence()) {
                     encoder.submit();
                     assertTrue(fence.awaitCompletion(-1));
                 }
-                try(var mapped=readback.slice().map(true,false)) {
-                    for(int pixel=0;pixel<16;pixel++)
-                        assertEquals(0x808080,mapped.data().getInt(pixel*4)&0xffffff,"Blended shadow pixel "+pixel);
+                try (var mapped = readback.slice().map(true, false)) {
+                    for (int pixel = 0; pixel < 16; pixel++)
+                        assertEquals(0x808080, mapped.data().getInt(pixel * 4) & 0xffffff, "Blended shadow pixel " + pixel);
                 }
             }
             assertTrue(logs.stream().noneMatch(line -> line.contains("VALIDATION") || line.contains("ERROR")),
-                "Unexpected GPU validation errors: " + logs);
+                       "Unexpected GPU validation errors: " + logs);
         }
     }
 }

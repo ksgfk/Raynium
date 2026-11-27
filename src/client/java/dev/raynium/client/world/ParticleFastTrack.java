@@ -22,7 +22,9 @@ public final class ParticleFastTrack {
     public static final int INSTANCE_INTS = 14;
     private static final int[] QUAD = {1}, FIRST_INSTANCE = {0};
     public interface RawParticleAccess {
-        default boolean raynium$hasCompactSlice(SingleQuadParticle.Layer layer) { return true; }
+        default boolean raynium$hasCompactSlice(SingleQuadParticle.Layer layer) {
+            return true;
+        }
         int raynium$appendCompactLayer(SingleQuadParticle.Layer layer, CompactLayerBatch out);
     }
 
@@ -48,13 +50,13 @@ public final class ParticleFastTrack {
     }
 
     public static boolean isLayerEligible(RayniumGpuDevice device, SingleQuadParticle.Layer layer, boolean useOit) {
-        if (!device.supportsInstanced(layer.pipeline(), "particle")) return false;
+        if (!device.supportsInstanced(layer.pipeline(), "particle"))
+            return false;
         if (layer.translucent() && useOit) {
             OitPipelineSet oitSet = layer.oitPipelineSet();
-            if (oitSet == null) return false;
-            return device.supportsInstanced(oitSet.getPipeline(OitStage.DEPTH_BOUNDS), "particle")
-                && device.supportsInstanced(oitSet.getPipeline(OitStage.TRANSMITTANCE), "particle")
-                && device.supportsInstanced(oitSet.getPipeline(OitStage.ACCUMULATE), "particle");
+            if (oitSet == null)
+                return false;
+            return device.supportsInstanced(oitSet.getPipeline(OitStage.DEPTH_BOUNDS), "particle") && device.supportsInstanced(oitSet.getPipeline(OitStage.TRANSMITTANCE), "particle") && device.supportsInstanced(oitSet.getPipeline(OitStage.ACCUMULATE), "particle");
         }
         return true;
     }
@@ -91,7 +93,7 @@ public final class ParticleFastTrack {
 
     /** Packs count particles directly from Storage arrays into off-heap CommandTape upload memory with zero heap copy. */
     public static void packParticlesToSegment(float[] floatValues, int[] intValues, int count,
-            MemorySegment dst, long dstByteOffset) {
+                                              MemorySegment dst, long dstByteOffset) {
         long off = dstByteOffset;
         for (int i = 0, fi = 0, ii = 0; i < count; ++i, fi += 12, ii += 2, off += INSTANCE_BYTES) {
             dst.set(ValueLayout.JAVA_FLOAT, off, floatValues[fi]);
@@ -123,7 +125,9 @@ public final class ParticleFastTrack {
         private @Nullable CommandTape uploadedTape;
         private long uploadedOffset;
 
-        public CompactLayerBatch(SingleQuadParticle.Layer layer) { this(layer, 4); }
+        public CompactLayerBatch(SingleQuadParticle.Layer layer) {
+            this(layer, 4);
+        }
 
         public CompactLayerBatch(SingleQuadParticle.Layer layer, int slices) {
             this.layer = layer;
@@ -132,8 +136,12 @@ public final class ParticleFastTrack {
             sliceCounts = new int[slices];
         }
 
-        public void setTexture(AbstractTexture texture) { this.texture = texture; }
-        public int particleCount() { return particleCount; }
+        public void setTexture(AbstractTexture texture) {
+            this.texture = texture;
+        }
+        public int particleCount() {
+            return particleCount;
+        }
 
         private void ensureSliceCapacity() {
             if (sliceCount == sliceCounts.length) {
@@ -145,7 +153,8 @@ public final class ParticleFastTrack {
         }
 
         public void append(float[] floatValues, int[] intValues, int count) {
-            if (count <= 0) return;
+            if (count <= 0)
+                return;
             ensureSliceCapacity();
             sliceFloats[sliceCount] = floatValues;
             sliceInts[sliceCount] = intValues;
@@ -155,17 +164,18 @@ public final class ParticleFastTrack {
         }
 
         public void execute(RenderPass renderPass, @Nullable OitStage stage) {
-            if (particleCount <= 0) return;
+            if (particleCount <= 0)
+                return;
             CommandTape tape = RayniumGpuDevice.activeTape(renderPass);
             if (uploadedTape != tape) {
-                long totalBytes = (long) particleCount * INSTANCE_BYTES;
+                long totalBytes = (long)particleCount * INSTANCE_BYTES;
                 long offset = tape.reserveInstanceUpload(totalBytes, 8);
                 MemorySegment dst = tape.instanceUploadSlice(offset, totalBytes);
                 long dstByteOffset = 0L;
                 for (int s = 0; s < sliceCount; ++s) {
                     int count = sliceCounts[s];
                     packParticlesToSegment(sliceFloats[s], sliceInts[s], count, dst, dstByteOffset);
-                    dstByteOffset += (long) count * INSTANCE_BYTES;
+                    dstByteOffset += (long)count * INSTANCE_BYTES;
                 }
                 uploadedTape = tape;
                 uploadedOffset = offset;
@@ -173,7 +183,8 @@ public final class ParticleFastTrack {
             RenderPipeline targetPipeline;
             if (stage != null) {
                 OitPipelineSet oitSet = layer.oitPipelineSet();
-                if (oitSet == null) throw new IllegalStateException("OIT pipeline set for particle layer not specified.");
+                if (oitSet == null)
+                    throw new IllegalStateException("OIT pipeline set for particle layer not specified.");
                 targetPipeline = oitSet.getPipeline(stage);
             } else {
                 targetPipeline = layer.pipeline();

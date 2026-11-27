@@ -11,6 +11,7 @@ Windows 后端将原版 RenderPearl 命令录入同一个批次，通过 FFM 交
 | --- | --- |
 | 工具链、IDEA、阅读 Minecraft 源码 | [开发环境](doc/guide/dev-environment.md) |
 | 依赖、构建、全部测试、开发启动与打包 | [构建与测试](doc/guide/build-test.md) |
+| 模块分层、配置命名、编码与格式化规范 | [编码与工程规范](doc/guide/conventions.md) |
 | 架构、当前进度与完整文档索引 | [架构地图](doc/architecture/overview.md) |
 | 历史计划、开发验证与采样记录 | [历史索引](doc/history/README.md) |
 | 仓库约束与文档工作流程 | [AGENTS](AGENTS.md)、[文档维护](doc/guide/documentation.md) |

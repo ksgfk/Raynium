@@ -1,10 +1,14 @@
 #pragma once
+
+#include <cstdint>
+#include <span>
+
+#include <radray/gpu/types.h>
+#include <radray/nullable.h>
 #include <radray/types.h>
 #include <raynium/render_resources.h>
 #include <raynium/resource_uploads.h>
 #include <raynium/shader_pack.h>
-#include <span>
-#include <utility>
 
 namespace raynium {
 enum TerrainPass : uint32_t {
@@ -19,31 +23,38 @@ enum TerrainPass : uint32_t {
 
 class MeshPassResources final {
 public:
-    static bool Create(radray::gpu::Device&,std::span<const radray::byte>,radray::unique_ptr<MeshPassResources>&,
-        radray::Nullable<radray::gpu::PipelineCache*> cache=nullptr);
-    const radray::shared_ptr<radray::gpu::BindingGroupLayout>& PassGroupLayout() const { return _objects->passGroupLayout; }
-    radray::gpu::GraphicsPipelineState* Pipeline() const { return _objects->programs[Solid].pipeline.get(); }
-    bool SupportsWireframe() const { return bool(_objects->wireframe); }
-    radray::gpu::GraphicsPipelineState* WireframePipeline() const { return _objects->wireframe.get(); }
-    radray::gpu::GraphicsPipelineState* Pipeline(uint32_t pass,bool wireframe=false) const {
-        if(pass==Wireframe || (wireframe && pass<=Translucent)) return _objects->wireframe.get();
-        return _objects->programs[pass].pipeline.get();
-    }
-    const radray::shared_ptr<radray::gpu::BindingGroupLayout>& OitGroupLayout() const { return _objects->oitGroupLayout; }
-    const radray::shared_ptr<radray::gpu::BindingGroupLayout>& MaterialGroupLayout() const { return _objects->materialGroupLayout; }
+    static bool Create(
+        radray::gpu::Device& device,
+        std::span<const radray::byte> shaders,
+        radray::unique_ptr<MeshPassResources>& output,
+        radray::Nullable<radray::gpu::PipelineCache*> cache = nullptr);
+    const radray::shared_ptr<radray::gpu::BindingGroupLayout>& PassGroupLayout() const noexcept;
+    radray::gpu::GraphicsPipelineState* Pipeline() const noexcept;
+    bool SupportsWireframe() const noexcept;
+    radray::gpu::GraphicsPipelineState* WireframePipeline() const noexcept;
+    radray::gpu::GraphicsPipelineState* Pipeline(uint32_t pass, bool wireframe = false) const noexcept;
+    const radray::shared_ptr<radray::gpu::BindingGroupLayout>& OitGroupLayout() const noexcept;
+    const radray::shared_ptr<radray::gpu::BindingGroupLayout>& MaterialGroupLayout() const noexcept;
+
 private:
     struct Program {
-        radray::unique_ptr<ShaderProgram> program;
-        radray::unique_ptr<radray::gpu::PipelineLayout> pipelineLayout;
-        radray::unique_ptr<radray::gpu::Shader> vs,ps;
-        radray::unique_ptr<radray::gpu::GraphicsPipelineState> pipeline;
+        radray::unique_ptr<ShaderProgram> Shader;
+        radray::unique_ptr<radray::gpu::PipelineLayout> PipelineLayout;
+        radray::unique_ptr<radray::gpu::Shader> Vs;
+        radray::unique_ptr<radray::gpu::Shader> Ps;
+        radray::unique_ptr<radray::gpu::GraphicsPipelineState> Pipeline;
     };
+
     struct Objects {
-        radray::shared_ptr<radray::gpu::BindingGroupLayout> passGroupLayout,materialGroupLayout,oitGroupLayout;
-        radray::array<Program,6> programs;
-        radray::unique_ptr<radray::gpu::GraphicsPipelineState> wireframe;
+        radray::shared_ptr<radray::gpu::BindingGroupLayout> PassGroupLayout;
+        radray::shared_ptr<radray::gpu::BindingGroupLayout> MaterialGroupLayout;
+        radray::shared_ptr<radray::gpu::BindingGroupLayout> OitGroupLayout;
+        radray::array<Program, 6> Programs;
+        radray::unique_ptr<radray::gpu::GraphicsPipelineState> Wireframe;
     };
-    explicit MeshPassResources(radray::unique_ptr<Objects> objects):_objects(std::move(objects)) {}
+
+    explicit MeshPassResources(radray::unique_ptr<Objects> objects);
+
     radray::unique_ptr<Objects> _objects;
 };
-}
+}  // namespace raynium

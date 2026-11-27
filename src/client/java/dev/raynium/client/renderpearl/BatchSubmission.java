@@ -8,7 +8,9 @@ final class BatchSubmission {
         boolean awaitAndPublish(long sequence, long timeoutNs);
     }
 
-    private enum State { RECORDING, ENQUEUED, FAILED }
+    private enum State { RECORDING,
+                         ENQUEUED,
+                         FAILED }
 
     private final Waiter waiter;
     private State state = State.RECORDING;
@@ -19,30 +21,40 @@ final class BatchSubmission {
     }
 
     void enqueued(long sequence) {
-        if (sequence <= 0 || state != State.RECORDING) throw new IllegalStateException("Invalid submission transition");
+        if (sequence <= 0 || state != State.RECORDING)
+            throw new IllegalStateException("Invalid submission transition");
         this.sequence = sequence;
         state = State.ENQUEUED;
     }
 
     void failed() {
-        sequence=0;
+        sequence = 0;
         state = State.FAILED;
     }
 
-    long submittedSequence() { return sequence; }
+    long submittedSequence() {
+        return sequence;
+    }
 
     GpuFence createFence() {
         return new GpuFence() {
             private boolean closed;
 
-            @Override public boolean awaitCompletion(long timeoutNs) {
-                if (closed) throw new IllegalStateException("Fence is closed");
-                if (state == State.ENQUEUED) return waiter.awaitAndPublish(sequence, timeoutNs);
-                if (timeoutNs == 0) return false;
+            @Override
+            public boolean awaitCompletion(long timeoutNs) {
+                if (closed)
+                    throw new IllegalStateException("Fence is closed");
+                if (state == State.ENQUEUED)
+                    return waiter.awaitAndPublish(sequence, timeoutNs);
+                if (timeoutNs == 0)
+                    return false;
                 throw new IllegalStateException("Cannot wait for a " + state + " batch");
             }
 
-            @Override public void close() { closed = true; }
+            @Override
+            public void close() {
+                closed = true;
+            }
         };
     }
 }

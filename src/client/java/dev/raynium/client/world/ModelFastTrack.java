@@ -12,6 +12,8 @@ import java.lang.foreign.ValueLayout;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Objects;
 import net.minecraft.client.model.geom.ModelPart;
@@ -22,7 +24,6 @@ import net.minecraft.client.renderer.rendertype.PreparedRenderType;
 import net.minecraft.client.renderer.rendertype.RenderType;
 import org.joml.Vector3f;
 import org.jspecify.annotations.Nullable;
-
 /** Coordinates world rigid ModelPart capture, meshId run grouping, OIT upload reuse, and fallback draws. */
 public final class ModelFastTrack {
     public interface FeatureRendererAccess {
@@ -31,7 +32,8 @@ public final class ModelFastTrack {
 
     public interface GroupAccess {
         GroupExtension raynium$extension();
-        @Nullable GroupExtension raynium$extensionOrNull();
+        @Nullable
+        GroupExtension raynium$extensionOrNull();
         void raynium$recycleExtension();
         PreparedRenderType raynium$prepareRenderType(RenderType renderType);
         VertexConsumer raynium$fallbackConsumer(RenderType renderType);
@@ -48,18 +50,24 @@ public final class ModelFastTrack {
 
     private ModelFastTrack() {}
 
-    public static void beginCapture(ModelSink sink) { activeSink = sink; }
-    public static void endCapture() { activeSink = null; }
+    public static void beginCapture(ModelSink sink) {
+        activeSink = sink;
+    }
+    public static void endCapture() {
+        activeSink = null;
+    }
 
     public static GroupExtension acquireGroupExtension(boolean canReorder, int existingFallbackCount) {
         return new GroupExtension(canReorder, existingFallbackCount);
     }
 
     public static void finishGrouping() {
-        if(grouping.instanceRun.length>4096 && grouping.peakInstances<=256) {
-            if(++grouping.quietExecutions>=120) grouping=new GroupingScratch();
-        } else grouping.quietExecutions=0;
-        grouping.peakInstances=0;
+        if (grouping.instanceRun.length > 4096 && grouping.peakInstances <= 256) {
+            if (++grouping.quietExecutions >= 120)
+                grouping = new GroupingScratch();
+        } else
+            grouping.quietExecutions = 0;
+        grouping.peakInstances = 0;
     }
     static void clearCachedGeometry() {
         grouping = new GroupingScratch();
@@ -102,7 +110,8 @@ public final class ModelFastTrack {
         int getOrInsert(int key, int newRun) {
             int slot = mix(key) & mask;
             while (stamps[slot] == stamp) {
-                if (keys[slot] == key) return values[slot];
+                if (keys[slot] == key)
+                    return values[slot];
                 slot = (slot + 1) & mask;
             }
             if (size == keys.length / 2) {
@@ -125,7 +134,8 @@ public final class ModelFastTrack {
             int[] newStamps = new int[newCap];
             int currentStamp = stamp;
             for (int i = 0; i < oldCap; ++i) {
-                if (stamps[i] != currentStamp) continue;
+                if (stamps[i] != currentStamp)
+                    continue;
                 int k = keys[i];
                 int slot = mix(k) & newMask;
                 while (newStamps[slot] == currentStamp) {
@@ -148,30 +158,35 @@ public final class ModelFastTrack {
     }
 
     public static boolean supportsOitInstanced(RayniumGpuDevice device, OitPipelineSet oitSet) {
-        return device.supportsInstanced(oitSet.getPipeline(OitStage.DEPTH_BOUNDS), "entity")
-            && device.supportsInstanced(oitSet.getPipeline(OitStage.TRANSMITTANCE), "entity")
-            && device.supportsInstanced(oitSet.getPipeline(OitStage.ACCUMULATE), "entity");
+        return device.supportsInstanced(oitSet.getPipeline(OitStage.DEPTH_BOUNDS), "entity") && device.supportsInstanced(oitSet.getPipeline(OitStage.TRANSMITTANCE), "entity") && device.supportsInstanced(oitSet.getPipeline(OitStage.ACCUMULATE), "entity");
     }
 
     public static boolean tryCompilePart(ModelPart part, PoseStack.Pose pose, VertexConsumer builder,
-            int lightCoords, int overlayCoords, int color) {
+                                         int lightCoords, int overlayCoords, int color) {
         ModelSink sink = activeSink;
-        if (sink == null || builder != sink) return false;
+        if (sink == null || builder != sink)
+            return false;
         int meshId = RetainedModelManager.resolveMeshId(sink.device, part);
-        if (meshId == 0) return true; // Empty ModelPart: nothing to draw.
-        if (meshId < 0) return false; // Ineligible geometry: fall back to vanilla cube.compile into sink.
+        if (meshId == 0)
+            return true; // Empty ModelPart: nothing to draw.
+        if (meshId < 0)
+            return false; // Ineligible geometry: fall back to vanilla cube.compile into sink.
         sink.recordInstance(part, meshId, ((RetainedModelManager.PartHandle)(Object)part).raynium$getMeshPage(), pose, color, overlayCoords, lightCoords);
         return true;
     }
 
     public static boolean tryCompileTranslatedLeaf(ModelPart part, PoseStack.Pose pose, VertexConsumer builder,
-            float tx, float ty, float tz, int lightCoords, int overlayCoords, int color) {
+                                                   float tx, float ty, float tz, int lightCoords, int overlayCoords, int color) {
         ModelSink sink = activeSink;
-        if (sink == null || builder != sink) return false;
-        if (!RetainedModelManager.hasResidentMesh(sink.device,(RetainedModelManager.PartHandle)(Object)part)) return false;
+        if (sink == null || builder != sink)
+            return false;
+        if (!RetainedModelManager.hasResidentMesh(sink.device, (RetainedModelManager.PartHandle)(Object)part))
+            return false;
         int meshId = RetainedModelManager.resolveMeshId(sink.device, part);
-        if (meshId == 0) return true;
-        if (meshId < 0) return false;
+        if (meshId == 0)
+            return true;
+        if (meshId < 0)
+            return false;
         sink.recordTranslatedInstance(part, meshId, ((RetainedModelManager.PartHandle)(Object)part).raynium$getMeshPage(), pose, tx, ty, tz, color, overlayCoords, lightCoords);
         return true;
     }
@@ -182,20 +197,21 @@ public final class ModelFastTrack {
         private int syncedFallbackCount;
         private @Nullable FastBucket lastFastBucket;
         private @Nullable RenderType lastFastRenderType;
-        private final java.util.IdentityHashMap<RenderType, FastBucket> byRenderType;
-        private final java.util.HashMap<PreparedRenderType, FastBucket> byPreparedType;
+        private final IdentityHashMap<RenderType, FastBucket> byRenderType;
+        private final HashMap<PreparedRenderType, FastBucket> byPreparedType;
 
         GroupExtension(boolean canReorder, int existingFallbackCount) {
             this.canReorder = canReorder;
             entries = new ArrayList<>(Math.max(4, Math.addExact(existingFallbackCount, 1)));
-            byRenderType = canReorder ? new java.util.IdentityHashMap<>(4) : null;
-            byPreparedType = canReorder ? java.util.HashMap.newHashMap(4) : null;
+            byRenderType = canReorder ? new IdentityHashMap<>(4) : null;
+            byPreparedType = canReorder ? HashMap.newHashMap(4) : null;
             syncFallbackDraws(existingFallbackCount);
         }
 
         public void recycle() {
             for (Object entry : entries) {
-                if (entry instanceof FastBucket bucket) recycleFastBucket(bucket);
+                if (entry instanceof FastBucket bucket)
+                    recycleFastBucket(bucket);
             }
             entries.clear();
             if (canReorder) {
@@ -208,7 +224,8 @@ public final class ModelFastTrack {
 
         public void syncFallbackDraws(int totalFallbackCount) {
             int additional = totalFallbackCount - syncedFallbackCount;
-            if (additional > 1) entries.ensureCapacity(Math.addExact(entries.size(), additional));
+            if (additional > 1)
+                entries.ensureCapacity(Math.addExact(entries.size(), additional));
             while (syncedFallbackCount < totalFallbackCount) {
                 entries.add(Integer.valueOf(syncedFallbackCount++));
                 if (!canReorder) {
@@ -225,7 +242,8 @@ public final class ModelFastTrack {
             }
             if (consolidate) {
                 var existing = byRenderType.get(renderType);
-                if (existing == null) existing = byPreparedType.get(prepared);
+                if (existing == null)
+                    existing = byPreparedType.get(prepared);
                 if (existing != null) {
                     lastFastBucket = existing;
                     lastFastRenderType = renderType;
@@ -248,7 +266,7 @@ public final class ModelFastTrack {
         }
 
         public void execute(StagedVertexBuffer stagedBuffer, @Nullable OitStage stage, RenderPass renderPass,
-                List<StagedVertexBuffer.Draw> draws, List<PreparedRenderType> drawRenderTypes) {
+                            List<StagedVertexBuffer.Draw> draws, List<PreparedRenderType> drawRenderTypes) {
             for (int i = 0; i < entries.size(); ++i) {
                 Object entry = entries.get(i);
                 if (entry instanceof FastBucket bucket) {
@@ -256,12 +274,14 @@ public final class ModelFastTrack {
                 } else if (entry instanceof ShadowFastTrack shadow) {
                     shadow.execute(stage, renderPass);
                 } else {
-                    int idx = ((Integer) entry).intValue();
+                    int idx = ((Integer)entry).intValue();
                     PreparedRenderType renderType = drawRenderTypes.get(idx);
                     StagedVertexBuffer.ExecuteInfo info = stagedBuffer.getExecuteInfo(draws.get(idx));
                     if (info != null) {
-                        if (stage != null) renderType.drawFromBufferOit(info, stage, renderPass);
-                        else renderType.drawFromBuffer(info, renderPass);
+                        if (stage != null)
+                            renderType.drawFromBufferOit(info, stage, renderPass);
+                        else
+                            renderType.drawFromBuffer(info, renderPass);
                     }
                 }
             }
@@ -270,8 +290,8 @@ public final class ModelFastTrack {
 
     static RenderPipeline bind(PreparedRenderType renderType, @Nullable OitStage stage, RenderPass renderPass) {
         RenderPipeline targetPipeline = stage != null
-            ? Objects.requireNonNull(renderType.oitPipelineSet(), "Render type " + renderType.name() + " missing OIT pipeline set").getPipeline(stage)
-            : renderType.pipeline();
+                                            ? Objects.requireNonNull(renderType.oitPipelineSet(), "Render type " + renderType.name() + " missing OIT pipeline set").getPipeline(stage)
+                                            : renderType.pipeline();
         renderPass.setPipeline(RenderSystem.getCompiledPipeline(targetPipeline));
         if (renderType.scissorState().enabled()) {
             var scissor = renderType.scissorState();
@@ -289,19 +309,21 @@ public final class ModelFastTrack {
         final MeshRunTable meshes = new MeshRunTable(), pages = new MeshRunTable();
         int[] instanceRun = new int[32];
         int[] runPages = new int[8], pageCursors = new int[8], groupedIds = new int[8],
-            groupedCounts = new int[8], runCursors = new int[8];
+              groupedCounts = new int[8], runCursors = new int[8];
 
         int peakInstances, quietExecutions;
 
         void begin(int instances) {
-            peakInstances=Math.max(peakInstances,instances);
+            peakInstances = Math.max(peakInstances, instances);
             meshes.reset();
             pages.reset();
-            if (instanceRun.length < instances) instanceRun = new int[Math.max(instances, instanceRun.length * 2)];
+            if (instanceRun.length < instances)
+                instanceRun = new int[Math.max(instances, instanceRun.length * 2)];
         }
 
         void ensureRuns(int needed) {
-            if (runPages.length >= needed) return;
+            if (runPages.length >= needed)
+                return;
             int cap = Math.max(needed, runPages.length * 2);
             runPages = Arrays.copyOf(runPages, cap);
             pageCursors = Arrays.copyOf(pageCursors, cap);
@@ -359,12 +381,12 @@ public final class ModelFastTrack {
             pageIds[instanceCount] = pageId;
             meshIds[instanceCount] = meshId;
             RetainedModelManager.packInstance(pose, colorArgb, overlayCoords, lightCoords,
-                instanceInts, instanceCount * RetainedModelManager.INSTANCE_INTS, scratch);
+                                              instanceInts, instanceCount * RetainedModelManager.INSTANCE_INTS, scratch);
             ++instanceCount;
         }
 
         void addTranslatedInstance(ModelPart owner, int meshId, int pageId, PoseStack.Pose pose, float tx, float ty, float tz,
-                int colorArgb, int overlayCoords, int lightCoords, Vector3f scratch) {
+                                   int colorArgb, int overlayCoords, int lightCoords, Vector3f scratch) {
             if (instanceCount == meshIds.length) {
                 int next = meshIds.length * 2;
                 owners = Arrays.copyOf(owners, next);
@@ -376,13 +398,14 @@ public final class ModelFastTrack {
             pageIds[instanceCount] = pageId;
             meshIds[instanceCount] = meshId;
             RetainedModelManager.packInstanceTranslated(pose, tx, ty, tz, colorArgb, overlayCoords, lightCoords,
-                instanceInts, instanceCount * RetainedModelManager.INSTANCE_INTS, scratch);
+                                                        instanceInts, instanceCount * RetainedModelManager.INSTANCE_INTS, scratch);
             ++instanceCount;
         }
 
         private void ensureUploaded(CommandTape tape) {
-            if (uploadedTape == tape) return;
-            long totalBytes = (long) instanceCount * RetainedModelManager.INSTANCE_BYTES;
+            if (uploadedTape == tape)
+                return;
+            long totalBytes = (long)instanceCount * RetainedModelManager.INSTANCE_BYTES;
             long offset = tape.reserveInstanceUpload(totalBytes, 8);
             MemorySegment dst = tape.instanceUploadSlice(offset, totalBytes);
             if (!canReorder || instanceCount == 1) {
@@ -400,7 +423,10 @@ public final class ModelFastTrack {
             int runs = 0;
             int prev = -1;
             for (int i = 0; i < instanceCount; ++i) {
-                if (meshIds[i] != prev) { ++runs; prev = meshIds[i]; }
+                if (meshIds[i] != prev) {
+                    ++runs;
+                    prev = meshIds[i];
+                }
             }
             ensureRunCapacity(runs);
             runCount = 0;
@@ -408,7 +434,8 @@ public final class ModelFastTrack {
             while (start < instanceCount) {
                 int id = meshIds[start];
                 int end = start + 1;
-                while (end < instanceCount && meshIds[end] == id) ++end;
+                while (end < instanceCount && meshIds[end] == id)
+                    ++end;
                 ownerIndices[runCount] = start;
                 runMeshIds[runCount] = id;
                 runFirstInstances[runCount] = start;
@@ -423,7 +450,10 @@ public final class ModelFastTrack {
             int firstId = meshIds[0];
             boolean singleMesh = true;
             for (int i = 1; i < instanceCount; ++i) {
-                if (meshIds[i] != firstId) { singleMesh = false; break; }
+                if (meshIds[i] != firstId) {
+                    singleMesh = false;
+                    break;
+                }
             }
             if (singleMesh) {
                 MemorySegment.copy(instanceInts, 0, dst, ValueLayout.JAVA_INT, 0, instanceCount * RetainedModelManager.INSTANCE_INTS);
@@ -475,7 +505,8 @@ public final class ModelFastTrack {
                 }
                 System.arraycopy(scratch.groupedIds, 0, runMeshIds, 0, runs);
                 System.arraycopy(scratch.groupedCounts, 0, runInstanceCounts, 0, runs);
-                for (int i = 0; i < instanceCount; ++i) scratch.instanceRun[i] = scratch.runPages[scratch.instanceRun[i]];
+                for (int i = 0; i < instanceCount; ++i)
+                    scratch.instanceRun[i] = scratch.runPages[scratch.instanceRun[i]];
             }
             runCount = runs;
             int prefix = 0;
@@ -487,8 +518,8 @@ public final class ModelFastTrack {
             for (int i = 0; i < instanceCount; ++i) {
                 int dstIndex = scratch.runCursors[scratch.instanceRun[i]]++;
                 MemorySegment.copy(instanceInts, i * RetainedModelManager.INSTANCE_INTS,
-                    dst, ValueLayout.JAVA_INT, (long) dstIndex * RetainedModelManager.INSTANCE_BYTES,
-                    RetainedModelManager.INSTANCE_INTS);
+                                   dst, ValueLayout.JAVA_INT, (long)dstIndex * RetainedModelManager.INSTANCE_BYTES,
+                                   RetainedModelManager.INSTANCE_INTS);
             }
         }
 
@@ -502,19 +533,28 @@ public final class ModelFastTrack {
             }
         }
 
-        int runCount() { return runCount; }
-        int runMeshId(int r) { return runMeshIds[r]; }
-        int runFirstInstance(int r) { return runFirstInstances[r]; }
-        int runInstanceCount(int r) { return runInstanceCounts[r]; }
+        int runCount() {
+            return runCount;
+        }
+        int runMeshId(int r) {
+            return runMeshIds[r];
+        }
+        int runFirstInstance(int r) {
+            return runFirstInstances[r];
+        }
+        int runInstanceCount(int r) {
+            return runInstanceCounts[r];
+        }
 
         void execute(@Nullable OitStage stage, RenderPass renderPass) {
-            if (instanceCount == 0) return;
+            if (instanceCount == 0)
+                return;
             CommandTape tape = RayniumGpuDevice.activeTape(renderPass);
             ensureUploaded(tape);
             renderPass.pushDebugGroup(() -> "Render Type " + renderType.name());
             var targetPipeline = bind(renderType, stage, renderPass);
             if (!RayniumGpuDevice.recordInstancedGeometry(renderPass, "entity", uploadedOffset, instanceCount, RetainedModelManager.INSTANCE_BYTES,
-                    runMeshIds, runFirstInstances, runInstanceCounts, runCount)) {
+                                                          runMeshIds, runFirstInstances, runInstanceCounts, runCount)) {
                 throw new IllegalStateException("Instanced rigid model pipeline unavailable during execute for " + targetPipeline.getLocation());
             }
             renderPass.popDebugGroup();
@@ -557,7 +597,7 @@ public final class ModelFastTrack {
         }
 
         void recordTranslatedInstance(ModelPart owner, int meshId, int pageId, PoseStack.Pose pose, float tx, float ty, float tz,
-                int colorArgb, int overlayCoords, int lightCoords) {
+                                      int colorArgb, int overlayCoords, int lightCoords) {
             GroupExtension ext = group.raynium$extension();
             if (fastBucket == null) {
                 fastBucket = ext.acquireFastBucket(renderType, prepared);
@@ -573,16 +613,44 @@ public final class ModelFastTrack {
             return fallback;
         }
 
-        @Override public VertexConsumer addVertex(float x, float y, float z) { return fallback().addVertex(x, y, z); }
-        @Override public VertexConsumer setColor(int r, int g, int b, int a) { return fallback().setColor(r, g, b, a); }
-        @Override public VertexConsumer setColor(int color) { return fallback().setColor(color); }
-        @Override public VertexConsumer setUv(float u, float v) { return fallback().setUv(u, v); }
-        @Override public VertexConsumer setUv1(int u, int v) { return fallback().setUv1(u, v); }
-        @Override public VertexConsumer setUv2(int u, int v) { return fallback().setUv2(u, v); }
-        @Override public VertexConsumer setUv3(float u, float v) { return fallback().setUv3(u, v); }
-        @Override public VertexConsumer setNormal(float x, float y, float z) { return fallback().setNormal(x, y, z); }
-        @Override public VertexConsumer setLineWidth(float width) { return fallback().setLineWidth(width); }
-        @Override public void addVertex(float x, float y, float z, int color, float u, float v, int overlayCoords, int lightCoords, float nx, float ny, float nz) {
+        @Override
+        public VertexConsumer addVertex(float x, float y, float z) {
+            return fallback().addVertex(x, y, z);
+        }
+        @Override
+        public VertexConsumer setColor(int r, int g, int b, int a) {
+            return fallback().setColor(r, g, b, a);
+        }
+        @Override
+        public VertexConsumer setColor(int color) {
+            return fallback().setColor(color);
+        }
+        @Override
+        public VertexConsumer setUv(float u, float v) {
+            return fallback().setUv(u, v);
+        }
+        @Override
+        public VertexConsumer setUv1(int u, int v) {
+            return fallback().setUv1(u, v);
+        }
+        @Override
+        public VertexConsumer setUv2(int u, int v) {
+            return fallback().setUv2(u, v);
+        }
+        @Override
+        public VertexConsumer setUv3(float u, float v) {
+            return fallback().setUv3(u, v);
+        }
+        @Override
+        public VertexConsumer setNormal(float x, float y, float z) {
+            return fallback().setNormal(x, y, z);
+        }
+        @Override
+        public VertexConsumer setLineWidth(float width) {
+            return fallback().setLineWidth(width);
+        }
+        @Override
+        public void addVertex(float x, float y, float z, int color, float u, float v, int overlayCoords, int lightCoords, float nx, float ny, float nz) {
             fallback().addVertex(x, y, z, color, u, v, overlayCoords, lightCoords, nx, ny, nz);
         }
     }

@@ -9,7 +9,18 @@ import shutil
 import subprocess
 import time
 
-from benchmark import ROOT, gradle_command, locked_world, process_options, terminate_tree, write_json
+from benchmark import (
+    LAUNCH_SPEC_PATH,
+    ROOT,
+    build_jvm_launch_command,
+    gradle_command,
+    locked_world,
+    process_options,
+    read_json,
+    terminate_tree,
+    write_json,
+    write_raynium_config,
+)
 
 
 def check_capture_log(text):
@@ -17,6 +28,50 @@ def check_capture_log(text):
         raise RuntimeError('Scene input failed Minecraft decoding; inspect game.log before accepting its images')
     if '[critical]' in text or 'VUID-' in text or re.search(r'\[error\][^\n]*(?:d3d12 validation|vk Validation|RHI validation)|\[error\][^\n]*\r?\n(?:d3d12 validation|vk Validation|RHI validation)', text):
         raise RuntimeError('GPU validation or native abort in capture; inspect game.log')
+
+
+def build_gradle_args(modes, configuration):
+    args = ['harnessClasses']
+    if any(mode != 'reference' for mode in modes):
+        args.extend(['classes', 'clientClasses', f'nativeStage{configuration}'])
+    args.append('writeLaunchSpec')
+    return args
+
+
+def build_validation_command(spec, game, scenes_path, mode, configuration, *, tracy_images=False,
+                             in_place_world=False, classpath_argfile=None):
+    is_raynium = mode != 'reference'
+    extra_system_properties = {'raynium.validation.config': str(scenes_path)}
+    if in_place_world:
+        extra_system_properties['MC_DEBUG_ENABLED'] = 'true'
+        extra_system_properties['MC_DEBUG_DONT_SAVE_WORLD'] = 'true'
+    extra_program_args = ['--gameDir', str(game), '--username', 'RayniumTest', '--quickPlaySingleplayer', 'validation']
+    if not is_raynium:
+        extra_program_args.extend(['--graphicsBackend', 'VULKAN'])
+    if tracy_images:
+        extra_program_args.append('--tracy')
+    return build_jvm_launch_command(
+        spec,
+        include_raynium=is_raynium,
+        native_config=configuration if is_raynium else None,
+        extra_system_properties=extra_system_properties,
+        extra_program_args=extra_program_args,
+        classpath_argfile=classpath_argfile,
+    )
+
+
+def build_artifacts(output, modes, configuration):
+    print(f'Building visual validation artifacts ({", ".join(modes)}, {configuration})...', flush=True)
+    build = None
+    try:
+        with (output / 'build.log').open('wb') as log:
+            build = subprocess.Popen(gradle_command(*build_gradle_args(modes, configuration)),
+                                     cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, **process_options())
+            if build.wait(timeout=1800) != 0:
+                raise RuntimeError(f'Build failed; see {output / "build.log"}')
+    finally:
+        terminate_tree(build)
+    return read_json(LAUNCH_SPEC_PATH)
 
 
 def link_region_storage(world, save, cleanup):
@@ -38,12 +93,14 @@ def link_region_storage(world, save, cleanup):
                 shutil.copy2(source / name, target / name)
 
 
-def capture(world, options, scenes, output, mode, configuration, validation, tracy_images=False, in_place_world=False):
+def capture(world, options, scenes, output, mode, configuration, validation, tracy_images=False, in_place_world=False, spec=None):
     with ExitStack() as cleanup:
-        return capture_session(world, options, scenes, output, mode, configuration, validation, tracy_images, in_place_world, cleanup)
+        return capture_session(world, options, scenes, output, mode, configuration, validation, tracy_images, in_place_world, cleanup, spec)
 
 
-def capture_session(world, options, scenes, output, mode, configuration, validation, tracy_images, in_place_world, cleanup):
+def capture_session(world, options, scenes, output, mode, configuration, validation, tracy_images, in_place_world, cleanup, spec=None):
+    if spec is None:
+        spec = read_json(LAUNCH_SPEC_PATH)
     session = output / mode
     session.mkdir(parents=True, exist_ok=False)
     game = session / 'game'
@@ -57,22 +114,27 @@ def capture_session(world, options, scenes, output, mode, configuration, validat
     packs = options.parent / 'resourcepacks'
     if packs.is_dir():
         shutil.copytree(packs, game / 'resourcepacks')
-    shutil.copyfile(scenes, session / 'scenes.json')
-    command = gradle_command('runClientReference' if mode == 'reference' else 'runClientNative',
-                            '-PgameRunDir=' + str(game), '-PquickPlayWorld=validation', '-PgameUsername=RayniumTest',
-                            '-PvalidationConfig=' + str(session / 'scenes.json'), '-PnativeConfig=' + configuration,
-                            '-PrhiValidation=' + str(validation).lower(), '-PnativeProfiler=false',
-                            '-PcaptureTracyImages=' + str(tracy_images).lower(),
-                            '-PrhiBackend=' + ('vulkan' if mode == 'reference' else mode))
-    if in_place_world:
-        command.append('-PvalidationReadOnlyRegions=true')
+    if mode != 'reference':
+        write_raynium_config(game, backend=mode, rhi_validation=validation, terrain_submission='auto')
+    scenes_copy = session / 'scenes.json'
+    shutil.copyfile(scenes, scenes_copy)
+    command = build_validation_command(
+        spec,
+        game,
+        scenes_copy,
+        mode,
+        configuration,
+        tracy_images=tracy_images,
+        in_place_world=in_place_world,
+        classpath_argfile=session / 'classpath.args',
+    )
     write_json(session / 'command.json', command)
     print(f'Capturing {mode}: {session}', flush=True)
     count = len(json.loads(scenes.read_text(encoding='utf-8-sig'))['scenes'])
     process = None
     try:
         with (session / 'game.log').open('wb') as log:
-            process = subprocess.Popen(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, **process_options())
+            process = subprocess.Popen(command, cwd=game, stdout=log, stderr=subprocess.STDOUT, **process_options())
             deadline = time.monotonic() + 300 * (count + 2)
             while process.poll() is None:
                 if time.monotonic() > deadline:
@@ -106,12 +168,12 @@ def compare(output, modes):
         directory = output / mode / 'differences'
         directory.mkdir(exist_ok=True)
         report = {'status': 'requires-local-review', 'images': []}
-        paths=set(reference.glob('*.png'))
-        result=read_capture_result(reference)
+        paths = set(reference.glob('*.png'))
+        result = read_capture_result(reference)
         for scene in result['scenes']:
             paths.update(reference / name for name in scene.get('exports', []))
         for path in sorted(paths):
-            relative=path.relative_to(reference)
+            relative = path.relative_to(reference)
             target = output / mode / relative
             if not target.is_file():
                 raise RuntimeError(f'Missing image: {target}')
@@ -121,8 +183,8 @@ def compare(output, modes):
                 raise RuntimeError(f'Image extent differs: {target}')
             delta = np.abs(left - right).astype(np.uint8)
             error = delta.max(axis=2)
-            difference=directory / relative
-            difference.parent.mkdir(parents=True,exist_ok=True)
+            difference = directory / relative
+            difference.parent.mkdir(parents=True, exist_ok=True)
             visible = np.maximum(delta[:, :, :3], delta[:, :, 3:4])
             Image.fromarray(np.minimum(visible.astype(np.uint16) * 8, 255).astype(np.uint8)).save(difference)
             tiles = []
@@ -161,8 +223,10 @@ def main():
         if output.is_relative_to(args.world.resolve()):
             parser.error('--output must be outside the source world')
         output.mkdir(parents=True, exist_ok=True)
+        spec = build_artifacts(output, args.modes, args.configuration)
         for mode in args.modes:
-            capture(args.world.resolve(), args.options.resolve(), args.scenes.resolve(), output, mode, args.configuration, not args.no_validation, args.tracy_images, args.in_place_world)
+            capture(args.world.resolve(), args.options.resolve(), args.scenes.resolve(), output, mode,
+                    args.configuration, not args.no_validation, args.tracy_images, args.in_place_world, spec)
     compare(output, args.modes)
 
 

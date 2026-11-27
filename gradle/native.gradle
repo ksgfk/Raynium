@@ -1,11 +1,11 @@
+import groovy.json.JsonOutput
+
 // Native commands are explicit tasks; project sync never invokes CMake or downloads dependencies.
-def nativePython = providers.gradleProperty('nativePython').getOrElse('python')
-def nativeConfig = providers.gradleProperty('nativeConfig').getOrElse('Debug')
-def nativeParallel = providers.gradleProperty('nativeParallel').getOrElse('8')
-def radraySource = providers.gradleProperty('radraySourceDir').orNull
-if (!(nativeConfig in ['Debug', 'Release'])) {
-    throw new GradleException('nativeConfig must be Debug or Release')
-}
+def nativePython = localConfig('python', 'python')
+def nativeParallel = localConfig('parallel', '8')
+def radraySource = localConfig('radraySourceDir', null)
+def buildProfiler = providers.gradleProperty('raynium.build.profiler').getOrElse('false').toBoolean()
+def rayniumTestSystemProps = providers.systemPropertiesPrefixedBy('raynium.').get()
 def nativeScript = layout.projectDirectory.file('tools/native.py').asFile.absolutePath
 
 def verifyShaderPack = tasks.register('verifyShaderPack', Exec) {
@@ -23,6 +23,7 @@ tasks.register('testShaderPackTools', Exec) {
     commandLine nativePython, '-m', 'unittest', 'discover', '-s', 'tools/tests', '-v'
 }
 tasks.named('check') { dependsOn tasks.named('testShaderPackTools') }
+
 def registerNative = { String name, String command, String configuration ->
     tasks.register(name, Exec) {
         group = 'native'
@@ -32,26 +33,43 @@ def registerNative = { String name, String command, String configuration ->
         if (radraySource != null) {
             args '--radray-source', radraySource
         }
-        if (providers.gradleProperty('nativeProfiler').getOrElse('false').toBoolean()) {
+        if (buildProfiler) {
             args '--profiler'
         }
         // Let CMake/Ninja decide what is stale, including transitive RadRay sources.
     }
 }
-def configureNative = registerNative('nativeConfigure', 'configure', nativeConfig)
-def buildNative = registerNative('nativeBuild', 'build', nativeConfig)
-buildNative.configure { dependsOn configureNative }
-def stageNative = registerNative('nativeStage', 'stage', nativeConfig)
-stageNative.configure { dependsOn buildNative }
+
+def configureDebug = registerNative('nativeConfigureDebug', 'configure', 'Debug')
+def buildDebug = registerNative('nativeBuildDebug', 'build', 'Debug')
+buildDebug.configure { dependsOn configureDebug }
+def stageDebug = registerNative('nativeStageDebug', 'stage', 'Debug')
+stageDebug.configure { dependsOn buildDebug }
 
 def configureRelease = registerNative('nativeConfigureRelease', 'configure', 'Release')
 def buildRelease = registerNative('nativeBuildRelease', 'build', 'Release')
 buildRelease.configure { dependsOn configureRelease }
 def stageRelease = registerNative('nativeStageRelease', 'stage', 'Release')
 stageRelease.configure { dependsOn buildRelease }
-// Avoid two chains writing the Release CMake tree concurrently in a combined invocation.
-configureRelease.configure { mustRunAfter stageNative }
-tasks.matching { it.name == 'runClientNative' }.configureEach { dependsOn stageNative }
+
+tasks.register('nativeConfigure') {
+    group = 'native'
+    description = 'Configure the default (Debug) native payload'
+    dependsOn configureDebug
+}
+tasks.register('nativeBuild') {
+    group = 'native'
+    description = 'Build the default (Debug) native payload'
+    dependsOn buildDebug
+}
+tasks.register('nativeStage') {
+    group = 'native'
+    description = 'Stage the default (Debug) native payload'
+    dependsOn stageDebug
+}
+
+tasks.matching { it.name == 'runClientNative' }.configureEach { dependsOn stageDebug }
+tasks.matching { it.name == 'runClientNativeRelease' }.configureEach { dependsOn stageRelease }
 
 def javaJar = tasks.named('jar', Jar)
 def nativeJar = layout.buildDirectory.file("libs/${base.archivesName.get()}-${project.version}-windows-x86_64.jar")
@@ -72,51 +90,205 @@ tasks.register('verifyNativePackage', Exec) {
     commandLine nativePython, nativeScript, 'verify', '--input-jar', nativeJar.get().asFile.absolutePath
 }
 
-def faultLayerDir = layout.buildDirectory.dir("native/vulkan-surface-test/${nativeConfig}").get().asFile
-def buildFaultLayer = registerNative('buildVulkanSurfaceTestLayer', 'vulkan-test-layer', nativeConfig)
-buildFaultLayer.configure {
+def faultLayerDir = layout.buildDirectory.dir('native/vulkan-surface-test').get().asFile
+def buildFaultLayer = tasks.register('buildVulkanSurfaceTestLayer', Exec) {
+    group = 'native'
+    description = 'Build the Vulkan surface fault injection test layer'
+    workingDir layout.projectDirectory.asFile
+    commandLine nativePython, nativeScript, 'vulkan-test-layer'
+    if (radraySource != null) {
+        args '--radray-source', radraySource
+    }
     inputs.files('native/tests/vulkan_surface_layer.cpp', 'native/radray.lock.json', nativeScript)
     inputs.dir(new File(file(radraySource ?: 'external/RadRay'), 'third_party/Vulkan-Headers/include/vulkan'))
     outputs.files(new File(faultLayerDir, 'surface_test.dll'), new File(faultLayerDir, 'surface_test.json'))
 }
-def faultTest = tasks.register('vulkanSurfaceTest', Test) {
-    group = 'verification'
-    description = 'Inject driver results beneath the staged Vulkan renderer and exercise the complete surface lifecycle'
-    dependsOn tasks.named('testClasses'), stageNative, buildFaultLayer
-    testClassesDirs = sourceSets.test.output.classesDirs
-    classpath = sourceSets.test.runtimeClasspath
-    useJUnitPlatform { includeTags 'vulkan-surface-fault' }
-    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
-    jvmArgs '--enable-native-access=ALL-UNNAMED'
-    systemProperty 'junit.jupiter.execution.parallel.enabled', 'false'
-    systemProperty 'raynium.rhi.validation', 'true'
-    systemProperty 'raynium.native.dir', layout.buildDirectory.dir("native/stage/windows-x86_64/${nativeConfig}").get().asFile.absolutePath
-    systemProperty 'raynium.test.surfaceLayer', new File(faultLayerDir, 'surface_test.dll').absolutePath
-    environment 'VK_ADD_LAYER_PATH', faultLayerDir.absolutePath
-    environment 'VK_INSTANCE_LAYERS', 'VK_LAYER_RAYNIUM_surface_test'
-    outputs.upToDateWhen { false }
-    outputs.cacheIf { false }
-}
-tasks.register('nativeTest', Test) {
-    group = 'verification'
-    description = 'Run JUnit tests against the staged DLL and real D3D12/Vulkan devices (requires GPU drivers)'
-    dependsOn tasks.named('testClasses'), stageNative
-    dependsOn faultTest
-    shouldRunAfter tasks.named('test')
-    testClassesDirs = sourceSets.test.output.classesDirs
-    classpath = sourceSets.test.runtimeClasspath
-    useJUnitPlatform { includeTags 'native'; excludeTags 'vulkan-surface-fault' }
-    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
-    jvmArgs '--enable-native-access=ALL-UNNAMED'
-    maxParallelForks = 1
-    systemProperty 'junit.jupiter.execution.parallel.enabled', 'false'
-    systemProperty 'raynium.terrain.submission', providers.gradleProperty('terrainSubmission').getOrElse('auto')
-    systemProperty 'raynium.rhi.validation', providers.gradleProperty('rhiValidation').getOrElse('false')
-    systemProperty 'raynium.native.dir', layout.buildDirectory.dir("native/stage/windows-x86_64/${nativeConfig}").get().asFile.absolutePath
-    // GPU/driver state is external to Gradle's inputs; explicit invocations always run.
-    outputs.upToDateWhen { false }
-    outputs.cacheIf { false }
+
+def registerNativeTestPair = { String configuration, TaskProvider stageTask ->
+    def stageDir = layout.buildDirectory.dir("native/stage/windows-x86_64/${configuration}").get().asFile.absolutePath
+    def faultName = "vulkanSurfaceTest${configuration}"
+    def testName = "nativeTest${configuration}"
+
+    def faultTask = tasks.register(faultName, Test) {
+        group = 'verification'
+        description = "Inject driver results beneath the staged ${configuration} Vulkan renderer and exercise the complete surface lifecycle"
+        dependsOn tasks.named('testClasses'), stageTask, buildFaultLayer
+        testClassesDirs = sourceSets.test.output.classesDirs
+        classpath = sourceSets.test.runtimeClasspath
+        useJUnitPlatform { includeTags 'vulkan-surface-fault' }
+        javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
+        jvmArgs '--enable-native-access=ALL-UNNAMED'
+        reports.html.outputLocation = layout.buildDirectory.dir("reports/tests/${faultName}")
+        reports.junitXml.outputLocation = layout.buildDirectory.dir("test-results/${faultName}")
+        binaryResultsDirectory = layout.buildDirectory.dir("test-results/${faultName}/binary")
+        rayniumTestSystemProps.each { key, value -> systemProperty key, value }
+        systemProperty 'junit.jupiter.execution.parallel.enabled', 'false'
+        systemProperty 'raynium.rhi.validation', 'true'
+        systemProperty 'raynium.native.dir', stageDir
+        systemProperty 'raynium.test.surface-layer', new File(faultLayerDir, 'surface_test.dll').absolutePath
+        environment 'VK_ADD_LAYER_PATH', faultLayerDir.absolutePath
+        environment 'VK_INSTANCE_LAYERS', 'VK_LAYER_RAYNIUM_surface_test'
+        outputs.upToDateWhen { false }
+        outputs.cacheIf { false }
+    }
+
+    def nativeTask = tasks.register(testName, Test) {
+        group = 'verification'
+        description = "Run JUnit tests against the staged ${configuration} DLL and real D3D12/Vulkan devices (requires GPU drivers)"
+        dependsOn tasks.named('testClasses'), stageTask, faultTask
+        shouldRunAfter tasks.named('test')
+        testClassesDirs = sourceSets.test.output.classesDirs
+        classpath = sourceSets.test.runtimeClasspath
+        useJUnitPlatform { includeTags 'native'; excludeTags 'vulkan-surface-fault' }
+        javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
+        jvmArgs '--enable-native-access=ALL-UNNAMED'
+        maxParallelForks = 1
+        reports.html.outputLocation = layout.buildDirectory.dir("reports/tests/${testName}")
+        reports.junitXml.outputLocation = layout.buildDirectory.dir("test-results/${testName}")
+        binaryResultsDirectory = layout.buildDirectory.dir("test-results/${testName}/binary")
+        rayniumTestSystemProps.each { key, value -> systemProperty key, value }
+        systemProperty 'junit.jupiter.execution.parallel.enabled', 'false'
+        systemProperty 'raynium.native.dir', stageDir
+        // GPU/driver state is external to Gradle's inputs; explicit invocations always run.
+        outputs.upToDateWhen { false }
+        outputs.cacheIf { false }
+    }
+
+    return [fault: faultTask, native: nativeTask]
 }
 
-// Packaging can share the selected Release tree with the staged-DLL tests.
-configureRelease.configure { mustRunAfter tasks.named('nativeTest') }
+def debugTests = registerNativeTestPair('Debug', stageDebug)
+def releaseTests = registerNativeTestPair('Release', stageRelease)
+
+tasks.register('vulkanSurfaceTest') {
+    group = 'verification'
+    description = 'Run the default (Debug) Vulkan surface fault test suite'
+    dependsOn debugTests.fault
+}
+tasks.register('nativeTest') {
+    group = 'verification'
+    description = 'Run the default (Debug) native GPU test suite'
+    dependsOn debugTests.native
+}
+
+abstract class WriteLaunchSpecTask extends DefaultTask {
+    @Input
+    abstract Property<String> getJavaExecutable()
+
+    @Input
+    abstract Property<String> getMinecraftVersion()
+
+    @InputFile
+    @PathSensitive(PathSensitivity.ABSOLUTE)
+    abstract RegularFileProperty getLaunchConfigFile()
+
+    @InputFiles
+    @Classpath
+    abstract ConfigurableFileCollection getClientRuntimeClasspath()
+
+    @Input
+    abstract ListProperty<String> getRayniumModPaths()
+
+    @Input
+    abstract ListProperty<String> getHarnessModPaths()
+
+    @Input
+    abstract Property<String> getDebugStageDir()
+
+    @Input
+    abstract Property<String> getReleaseStageDir()
+
+    @OutputFile
+    abstract RegularFileProperty getOutputFile()
+
+    @TaskAction
+    void writeSpec() {
+        def launchCfg = launchConfigFile.get().asFile
+        if (!launchCfg.isFile()) {
+            throw new GradleException("Missing Loom launch config: ${launchCfg}")
+        }
+        def commonSystemProperties = new LinkedHashMap<String, String>()
+        def commonProgramArgs = new ArrayList<String>()
+        String section = null
+        launchCfg.readLines('UTF-8').each { rawLine ->
+            if (rawLine.isEmpty()) {
+                return
+            }
+            if (!rawLine.startsWith('\t')) {
+                section = rawLine.trim()
+                return
+            }
+            def entry = rawLine.substring(1)
+            if (section == 'commonProperties' || section == 'clientProperties') {
+                def eq = entry.indexOf('=')
+                if (eq > 0) {
+                    def key = entry.substring(0, eq)
+                    def value = entry.substring(eq + 1)
+                    if (key != 'fabric.classPathGroups') {
+                        commonSystemProperties.put(key, value)
+                    }
+                }
+            } else if (section == 'commonArgs' || section == 'clientArgs') {
+                commonProgramArgs.add(entry)
+            }
+        }
+        if (!commonProgramArgs.contains('--version')) {
+            commonProgramArgs.add('--version')
+            commonProgramArgs.add(minecraftVersion.get())
+        }
+
+        def rayniumPaths = rayniumModPaths.get().collect { new File(it).toPath().toAbsolutePath().normalize().toString() }
+        def harnessPaths = harnessModPaths.get().collect { new File(it).toPath().toAbsolutePath().normalize().toString() }
+        def excluded = new HashSet<String>(rayniumPaths)
+        excluded.addAll(harnessPaths)
+
+        def baseClasspath = new ArrayList<String>()
+        def seen = new HashSet<String>()
+        clientRuntimeClasspath.files.each { file ->
+            def normalized = file.toPath().toAbsolutePath().normalize().toString()
+            if (!excluded.contains(normalized) && seen.add(normalized)) {
+                baseClasspath.add(normalized)
+            }
+        }
+
+        def spec = new LinkedHashMap<String, Object>()
+        spec.put('schemaVersion', 1)
+        spec.put('javaExecutable', javaExecutable.get())
+        spec.put('mainClass', 'net.fabricmc.loader.impl.launch.knot.KnotClient')
+        spec.put('commonJvmArgs', [
+            '--enable-native-access=ALL-UNNAMED',
+            '-XX:StackShadowPages=32',
+            '--sun-misc-unsafe-memory-access=allow'
+        ])
+        spec.put('commonSystemProperties', commonSystemProperties)
+        spec.put('commonProgramArgs', commonProgramArgs)
+        spec.put('baseClasspath', baseClasspath)
+        spec.put('mods', [
+            raynium: rayniumPaths,
+            rayniumHarness: harnessPaths
+        ])
+        spec.put('nativeStageDirs', [
+            Debug: debugStageDir.get(),
+            Release: releaseStageDir.get()
+        ])
+
+        def out = outputFile.get().asFile
+        out.parentFile.mkdirs()
+        out.setText(JsonOutput.prettyPrint(JsonOutput.toJson(spec)) + '\n', 'UTF-8')
+    }
+}
+
+tasks.register('writeLaunchSpec', WriteLaunchSpecTask) {
+    group = 'native'
+    description = 'Export launch-spec.json for direct JVM launches by benchmark and visual validation scripts'
+    dependsOn tasks.named('configureClientLaunch')
+    javaExecutable = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }.map { it.executablePath.asFile.absolutePath }
+    minecraftVersion = project.minecraft_version.toString()
+    launchConfigFile = layout.projectDirectory.file('.gradle/loom-cache/launch.cfg')
+    clientRuntimeClasspath.from(sourceSets.client.runtimeClasspath)
+    rayniumModPaths = (sourceSets.main.output.files + sourceSets.client.output.files).collect { it.absolutePath }
+    harnessModPaths = sourceSets.harness.output.files.collect { it.absolutePath }
+    debugStageDir = layout.buildDirectory.dir('native/stage/windows-x86_64/Debug').get().asFile.absolutePath
+    releaseStageDir = layout.buildDirectory.dir('native/stage/windows-x86_64/Release').get().asFile.absolutePath
+    outputFile = layout.buildDirectory.file('native/launch-spec.json')
+}

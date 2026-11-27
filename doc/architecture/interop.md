@@ -1,6 +1,6 @@
 > - 适用: 修改 C ABI、FFM、native payload 和加载寿命
 > - 权威: 本文维护跨语言、内存所有权与加载契约；操作步骤见构建指南
-> - 锚点: `native/include/raynium/bridge.h`, `native/src/bridge.cpp`, `src/client/java/dev/raynium/bridge/*.java`, `src/client/java/dev/raynium/client/RayniumClient.java`, `tools/native.py`
+> - 锚点: `native/include/raynium/bridge.h`, `native/src/bridge.cpp`, `src/client/java/dev/raynium/bridge/*.java`, `src/client/java/dev/raynium/client/renderpearl/RayniumGpuBackend.java`, `tools/native.py`
 
 # 互操作与加载
 
@@ -79,7 +79,7 @@ loader 的选择顺序为：显式开发目录 `-Draynium.native.dir=...`，否�
 1. 读取 manifest，确认 JVM 架构、ABI 和配置。
 2. 将实际 payload 发布到游戏目录下 `.raynium/natives/windows-x86_64/<content-hash>/`。
 3. 检查已有完整副本，或写入独立 staging 目录，校验后再发布；多进程使用文件锁协调解包。
-4. 客户端初始化入口检查游戏 JVM native access 权限，将规范化的绝对路径转换为 Windows 扩展路径（含 UNC），使用 `SymbolLookup.libraryLookup(String, Arena)` 加载 bridge；保留长路径前缀，避免 Path 重解析后触发 Windows 路径长度限制。
+4. 后端加载阶段检查游戏 JVM native access 权限，将规范化的绝对路径转换为 Windows 扩展路径（含 UNC），使用 `SymbolLookup.libraryLookup(String, Arena)` 加载 bridge；保留长路径前缀，避免 Path 重解析后触发 Windows 路径长度限制。
 5. 先调用版本入口核对 ABI 27，再用 `rn_query_abi` 检查布局与构建身份。
 6. 游戏后端执行 loadLibrary 时创建环境。createDevice 创建 runtime 与 renderer，createSurface 将交换链关联到 SDL 窗口。
 

@@ -2,6 +2,7 @@
 .gradle/
 build/
 out/
+/local.properties
 
 # Script-managed native dependency and machine-local CMake configuration
 /external/RadRay/

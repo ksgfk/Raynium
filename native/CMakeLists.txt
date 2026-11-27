@@ -153,7 +153,9 @@ if(NOT TARGET RadRay::runtime)
 endif()
 
 add_library(rayniumruntime SHARED
-    src/bridge.cpp include/raynium/bridge.h include/raynium/exception.h
+    src/bridge.cpp include/raynium/bridge.h
+    src/exception.cpp include/raynium/exception.h
+    src/resource_handles.cpp include/raynium/resource_handles.h
     src/render_channel.cpp include/raynium/render_channel.h
     src/batch_envelope.cpp include/raynium/batch_envelope.h
     src/renderer_frontend.cpp include/raynium/renderer_frontend.h
@@ -161,20 +163,20 @@ add_library(rayniumruntime SHARED
     src/buffer_pool.cpp include/raynium/buffer_pool.h
     src/frame_readbacks.cpp include/raynium/frame_readbacks.h
     src/timestamp_queries.cpp include/raynium/timestamp_queries.h
-    src/terrain_feature.cpp
+    src/terrain_feature.cpp include/raynium/terrain_feature.h
     src/static_geometry_registry.cpp include/raynium/static_geometry_registry.h
     src/world_features.cpp include/raynium/world_features.h
-    src/immediate_draw.cpp
-    src/immediate_pipeline.cpp
+    src/immediate_draw.cpp include/raynium/immediate_draw.h
+    src/immediate_pipeline.cpp include/raynium/immediate_pipeline.h
     src/immediate_pass.cpp include/raynium/immediate_pass.h
     src/command_tape.cpp include/raynium/command_tape.h include/raynium/raster_records.h
     src/renderer.cpp include/raynium/renderer.h
     src/terrain_residency.cpp include/raynium/terrain_residency.h
     src/terrain_draw.cpp include/raynium/terrain_draw.h
     src/modular_frame_pipeline.cpp include/raynium/modular_frame_pipeline.h
-    src/frame_upload.cpp include/raynium/frame_upload.h
+    src/frame_upload.cpp include/raynium/frame_upload.h include/raynium/frame_plan.h
     src/render_resources.cpp include/raynium/render_resources.h
-    src/device_info.cpp
+    src/device_info.cpp include/raynium/device_info.h
     src/resource_uploads.cpp include/raynium/resource_uploads.h
     src/output_pass.cpp include/raynium/output_pass.h
     src/render_program.cpp include/raynium/render_program.h
@@ -200,7 +202,26 @@ if(RAYNIUM_BUILD_TESTS)
     find_package(GTest CONFIG REQUIRED)
     enable_testing()
     include(GoogleTest)
-    add_executable(test_raynium_terrain "${RADRAY_SOURCE_DIR}/modules/runtime/tests/test_fakes.cpp" tests/test_terrain_draw.cpp tests/test_surface_submission.cpp src/surface_submission.cpp src/terrain_draw.cpp src/frame_upload.cpp src/terrain_residency.cpp src/mesh_pass.cpp src/static_geometry_registry.cpp src/world_features.cpp src/buffer_pool.cpp src/immediate_pipeline.cpp src/render_program.cpp src/shader_pack.cpp src/resource_uploads.cpp src/render_resources.cpp)
+    add_executable(test_raynium_terrain
+        "${RADRAY_SOURCE_DIR}/modules/runtime/tests/test_fakes.cpp"
+        tests/test_terrain_draw.cpp
+        tests/test_surface_submission.cpp
+        src/exception.cpp
+        src/resource_handles.cpp
+        src/surface_submission.cpp
+        src/terrain_draw.cpp
+        src/frame_upload.cpp
+        src/terrain_residency.cpp
+        src/terrain_feature.cpp
+        src/mesh_pass.cpp
+        src/static_geometry_registry.cpp
+        src/world_features.cpp
+        src/buffer_pool.cpp
+        src/immediate_pipeline.cpp
+        src/render_program.cpp
+        src/shader_pack.cpp
+        src/resource_uploads.cpp
+        src/render_resources.cpp)
     target_compile_features(test_raynium_terrain PRIVATE cxx_std_20)
     target_compile_definitions(test_raynium_terrain PRIVATE RAYNIUM_SHADER_PACK_PATH="${RAYNIUM_ROOT}/src/client/resources/assets/raynium/shaderpacks/default.rnsp")
     target_include_directories(test_raynium_terrain PRIVATE include "${RADRAY_SOURCE_DIR}/modules/runtime/tests")
@@ -210,7 +231,7 @@ if(RAYNIUM_BUILD_TESTS)
 endif()
 
 if(RAYNIUM_BUILD_SHADER_TOOLS)
-    add_executable(raynium_shader_pack tools/shader_pack.cpp src/shader_pack.cpp)
+    add_executable(raynium_shader_pack tools/shader_pack.cpp src/shader_pack.cpp src/exception.cpp)
     target_include_directories(raynium_shader_pack PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_link_libraries(raynium_shader_pack PRIVATE RadRay::shader)
     target_compile_features(raynium_shader_pack PRIVATE cxx_std_20)

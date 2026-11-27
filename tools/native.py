@@ -233,8 +233,8 @@ def stage_native(root, binary, radray, config, environment):
 def package_mod(root, input_jar, output_jar):
     snapshot = current_snapshot(root / 'build/native/stage/windows-x86_64/Release')
     manifest = verify_snapshot(snapshot)
-    if manifest['configuration'] != 'Release' or manifest['radrayDirty']:
-        raise RuntimeError('Distribution requires a clean Release native build.')
+    if manifest['configuration'] != 'Release' or manifest['radrayDirty'] or manifest.get('profilerEnabled') is not False:
+        raise RuntimeError('Distribution requires a clean Release native build without profiler instrumentation.')
     locked = read_json(root / 'native/radray.lock.json')['commit']
     if manifest['radrayCommit'] != locked:
         raise RuntimeError('Distribution requires the pinned RadRay commit.')
@@ -275,8 +275,8 @@ def verify_package(path):
             raise RuntimeError('Input is not the Raynium mod.')
         manifest = json.loads(archive.read('natives/windows-x86_64/native-manifest.json'))
         check_manifest(manifest)
-        if manifest['configuration'] != 'Release' or manifest['radrayDirty']:
-            raise RuntimeError('Packaged native payload is not a clean Release build.')
+        if manifest['configuration'] != 'Release' or manifest['radrayDirty'] or manifest.get('profilerEnabled') is not False:
+            raise RuntimeError('Packaged native payload is not a clean Release build without profiler instrumentation.')
         for entry in manifest['files'] + manifest['licenses']:
             name = ('META-INF/licenses/raynium-native/' + entry['path'][len('licenses/'):]
                     if entry['path'].startswith('licenses/') else 'natives/windows-x86_64/' + entry['path'])
@@ -286,8 +286,8 @@ def verify_package(path):
     print(f'Package structure and hashes OK: {path.name}')
 
 
-def build_vulkan_test_layer(root, radray, config, environment):
-    output = root / 'build/native/vulkan-surface-test' / config
+def build_vulkan_test_layer(root, radray, environment):
+    output = root / 'build/native/vulkan-surface-test'
     output.mkdir(parents=True, exist_ok=True)
     headers = radray / 'third_party/Vulkan-Headers/include'
     run(['cl', '/nologo', '/std:c++20', '/EHsc', '/MT', '/LD', '/I' + str(headers),
@@ -316,7 +316,7 @@ def main():
     if args.parallel < 1:
         parser.error('--parallel must be positive')
     if args.command == 'vulkan-test-layer':
-        build_vulkan_test_layer(root, radray, args.config, msvc_environment())
+        build_vulkan_test_layer(root, radray, msvc_environment())
     elif args.command == 'package':
         if args.input_jar is None or args.output_jar is None:
             parser.error('package requires --input-jar and --output-jar')

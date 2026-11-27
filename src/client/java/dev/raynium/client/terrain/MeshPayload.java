@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Solid/Cutout quads are classified into 6 directional groups + general (7th) and reordered on the
  * worker thread into a pooled DirectByteBuffer so the render thread uploads via zero-copy pointers.
  */
-public final class MeshPayload {
+public final class MeshPayload implements NativeFrameBuffer.PinnedPayload {
     /** Render-thread dense slot ID (1..maxSlot) assigned by TerrainResidency while staged/resident; 0 when unassigned. */
     public int slotId;
     public final long epoch;
@@ -24,67 +24,84 @@ public final class MeshPayload {
         public byte[] originalQuadGroups;
     }
     private volatile UploadLayout uploadLayout;
-    public UploadLayout uploadLayout() { return uploadLayout; }
+    public UploadLayout uploadLayout() {
+        return uploadLayout;
+    }
     public final int layoutFlags;
     public volatile IndexSnapshot indices;
 
     /** The thread dropping the last pin after release owns the sole return to the pool. */
     private static final class PinnedBytes {
-        private static final int RELEASED=Integer.MIN_VALUE;
-        private final AtomicInteger state=new AtomicInteger();
+        private static final int RELEASED = Integer.MIN_VALUE;
+        private final AtomicInteger state = new AtomicInteger();
         private volatile ByteBuffer buffer;
         private MemorySegment bytes;
         private final long epoch;
-        PinnedBytes(ByteBuffer buffer,int size,long epoch) {
-            this.epoch=epoch;
-            this.buffer=buffer;
-            bytes=MemorySegment.ofBuffer(buffer).asSlice(0,size).asReadOnly();
+        PinnedBytes(ByteBuffer buffer, int size, long epoch) {
+            this.epoch = epoch;
+            this.buffer = buffer;
+            bytes = MemorySegment.ofBuffer(buffer).asSlice(0, size).asReadOnly();
         }
         MemorySegment pin() {
             int current;
             do {
-                current=state.get();
-                if(current<0 || current==0x3fff_ffff) throw new IllegalStateException("Terrain upload cannot be pinned");
-            } while(!state.compareAndSet(current,current+1));
+                current = state.get();
+                if (current < 0 || current == 0x3fff_ffff)
+                    throw new IllegalStateException("Terrain upload cannot be pinned");
+            } while (!state.compareAndSet(current, current + 1));
             return bytes;
         }
         boolean unpin() {
             int current;
             do {
-                current=state.get();
-                if((current&Integer.MAX_VALUE)==0) throw new IllegalStateException("Unbalanced terrain upload pin");
-            } while(!state.compareAndSet(current,current-1));
-            return current==RELEASED+1 && recycle();
+                current = state.get();
+                if ((current & Integer.MAX_VALUE) == 0)
+                    throw new IllegalStateException("Unbalanced terrain upload pin");
+            } while (!state.compareAndSet(current, current - 1));
+            return current == RELEASED + 1 && recycle();
         }
         boolean release() {
-            return state.getAndUpdate(value->value|RELEASED)==0 && recycle();
+            return state.getAndUpdate(value -> value | RELEASED) == 0 && recycle();
         }
         private boolean recycle() {
-            var retired=buffer;
-            buffer=null;
-            bytes=null;
-            DirectUploadPool.release(retired,epoch);
+            var retired = buffer;
+            buffer = null;
+            bytes = null;
+            DirectUploadPool.release(retired, epoch);
             return true;
         }
         ByteBuffer readable(int size) {
-            var current=buffer;
-            return current==null?null:current.slice(0,size).asReadOnlyBuffer().order(ByteOrder.nativeOrder());
+            var current = buffer;
+            return current == null ? null : current.slice(0, size).asReadOnlyBuffer().order(ByteOrder.nativeOrder());
         }
     }
 
-    public static final class IndexSnapshot {
+    public static final class IndexSnapshot implements NativeFrameBuffer.PinnedPayload {
         public final int count;
         private final PinnedBytes indices;
-        IndexSnapshot(ByteBuffer directBuffer,int count,long epoch) {
-            this.count=count;
-            indices=new PinnedBytes(directBuffer,count*4,epoch);
+        IndexSnapshot(ByteBuffer directBuffer, int count, long epoch) {
+            this.count = count;
+            indices = new PinnedBytes(directBuffer, count * 4, epoch);
         }
-        boolean hasData() { return indices.buffer!=null; }
-        public int byteSize() { return count*4; }
-        public ByteBuffer directBuffer() { return indices.readable(byteSize()); }
-        public MemorySegment pin() { return indices.pin(); }
-        public void unpin() { indices.unpin(); }
-        public void releaseBuffer() { indices.release(); }
+        boolean hasData() {
+            return indices.buffer != null;
+        }
+        public int byteSize() {
+            return count * 4;
+        }
+        public ByteBuffer directBuffer() {
+            return indices.readable(byteSize());
+        }
+        public MemorySegment pin() {
+            return indices.pin();
+        }
+        @Override
+        public void unpin() {
+            indices.unpin();
+        }
+        public void releaseBuffer() {
+            indices.release();
+        }
     }
 
     public MeshPayload(long epoch, ByteBuffer source) {
@@ -92,12 +109,14 @@ public final class MeshPayload {
     }
 
     public MeshPayload(long epoch, ByteBuffer source, int mode) {
-        if (mode < 0 || mode > 2) throw new IllegalArgumentException("Invalid terrain material mode: " + mode);
+        if (mode < 0 || mode > 2)
+            throw new IllegalArgumentException("Invalid terrain material mode: " + mode);
         this.epoch = epoch;
         this.mode = mode;
         ByteBuffer data = source.slice().order(ByteOrder.nativeOrder());
         int byteSize = data.remaining();
-        if (byteSize % 112 != 0) throw new IllegalArgumentException("Terrain mesh is not a 28-byte quad stream");
+        if (byteSize % 112 != 0)
+            throw new IllegalArgumentException("Terrain mesh is not a 28-byte quad stream");
         int quadCount = byteSize / 112;
         this.vertexCount = quadCount * 4;
         if (quadCount == 0) {
@@ -127,22 +146,32 @@ public final class MeshPayload {
                     if (!Float.isFinite(x) || !Float.isFinite(y) || !Float.isFinite(z)) {
                         finite = false;
                     } else {
-                        if (x < minX) minX = x;
-                        if (x > maxX) maxX = x;
-                        if (y < minY) minY = y;
-                        if (y > maxY) maxY = y;
-                        if (z < minZ) minZ = z;
-                        if (z > maxZ) maxZ = z;
+                        if (x < minX)
+                            minX = x;
+                        if (x > maxX)
+                            maxX = x;
+                        if (y < minY)
+                            minY = y;
+                        if (y > maxY)
+                            maxY = y;
+                        if (z < minZ)
+                            minZ = z;
+                        if (z > maxZ)
+                            maxZ = z;
                     }
                 }
             }
             groupQuadCounts[6] = quadCount;
-            ByteBuffer direct = DirectUploadPool.acquire(byteSize,epoch);
+            ByteBuffer direct = DirectUploadPool.acquire(byteSize, epoch);
             MemorySegment.copy(MemorySegment.ofBuffer(data), 0L, MemorySegment.ofBuffer(direct), 0L, byteSize);
-            this.vertices = new PinnedBytes(direct,byteSize,epoch);
+            this.vertices = new PinnedBytes(direct, byteSize, epoch);
             if (finite) {
-                minBounds[0] = minX; minBounds[1] = minY; minBounds[2] = minZ;
-                maxBounds[0] = maxX; maxBounds[1] = maxY; maxBounds[2] = maxZ;
+                minBounds[0] = minX;
+                minBounds[1] = minY;
+                minBounds[2] = minZ;
+                maxBounds[0] = maxX;
+                maxBounds[1] = maxY;
+                maxBounds[2] = maxZ;
                 this.layoutFlags = NativeFrameBuffer.LAYOUT_FLAG_FINITE_BOUNDS;
             } else {
                 this.layoutFlags = 0;
@@ -160,10 +189,7 @@ public final class MeshPayload {
             float x3 = data.getFloat(base + 84), y3 = data.getFloat(base + 88), z3 = data.getFloat(base + 92);
 
             int g = 6;
-            if (Float.isFinite(x0) && Float.isFinite(y0) && Float.isFinite(z0)
-                    && Float.isFinite(x1) && Float.isFinite(y1) && Float.isFinite(z1)
-                    && Float.isFinite(x2) && Float.isFinite(y2) && Float.isFinite(z2)
-                    && Float.isFinite(x3) && Float.isFinite(y3) && Float.isFinite(z3)) {
+            if (Float.isFinite(x0) && Float.isFinite(y0) && Float.isFinite(z0) && Float.isFinite(x1) && Float.isFinite(y1) && Float.isFinite(z1) && Float.isFinite(x2) && Float.isFinite(y2) && Float.isFinite(z2) && Float.isFinite(x3) && Float.isFinite(y3) && Float.isFinite(z3)) {
                 minX = Math.min(minX, Math.min(Math.min(x0, x1), Math.min(x2, x3)));
                 maxX = Math.max(maxX, Math.max(Math.max(x0, x1), Math.max(x2, x3)));
                 minY = Math.min(minY, Math.min(Math.min(y0, y1), Math.min(y2, y3)));
@@ -174,16 +200,17 @@ public final class MeshPayload {
             } else {
                 finite = false;
             }
-            groups[q] = (byte) g;
+            groups[q] = (byte)g;
             groupQuadCounts[g]++;
         }
 
         int nonEmptyGroups = 0;
         for (int g = 0; g < 7; g++) {
-            if (groupQuadCounts[g] != 0) nonEmptyGroups++;
+            if (groupQuadCounts[g] != 0)
+                nonEmptyGroups++;
         }
 
-        ByteBuffer direct = DirectUploadPool.acquire(byteSize,epoch);
+        ByteBuffer direct = DirectUploadPool.acquire(byteSize, epoch);
         MemorySegment srcSeg = MemorySegment.ofBuffer(data);
         MemorySegment dstSeg = MemorySegment.ofBuffer(direct);
         if (nonEmptyGroups <= 1) {
@@ -204,16 +231,21 @@ public final class MeshPayload {
                 int bit = q * 3;
                 int b = bit >>> 3;
                 int shift = bit & 7;
-                packed[b] |= (byte) (g << shift);
-                if (shift > 5) packed[b + 1] |= (byte) (g >>> (8 - shift));
+                packed[b] |= (byte)(g << shift);
+                if (shift > 5)
+                    packed[b + 1] |= (byte)(g >>> (8 - shift));
             }
             layout.originalQuadGroups = packed;
         }
-        this.vertices = new PinnedBytes(direct,byteSize,epoch);
+        this.vertices = new PinnedBytes(direct, byteSize, epoch);
         int flags = 0;
         if (finite) {
-            minBounds[0] = minX; minBounds[1] = minY; minBounds[2] = minZ;
-            maxBounds[0] = maxX; maxBounds[1] = maxY; maxBounds[2] = maxZ;
+            minBounds[0] = minX;
+            minBounds[1] = minY;
+            minBounds[2] = minZ;
+            maxBounds[0] = maxX;
+            maxBounds[1] = maxY;
+            maxBounds[2] = maxZ;
             flags |= NativeFrameBuffer.LAYOUT_FLAG_FINITE_BOUNDS;
         }
         if (layout.originalQuadGroups != null) {
@@ -223,51 +255,65 @@ public final class MeshPayload {
     }
 
     private static int classifyQuad(
-            float x0, float y0, float z0,
-            float x1, float y1, float z1,
-            float x2, float y2, float z2,
-            float x3, float y3, float z3) {
+        float x0, float y0, float z0,
+        float x1, float y1, float z1,
+        float x2, float y2, float z2,
+        float x3, float y3, float z3) {
         if (x0 == x1 && x0 == x2 && x0 == x3) {
-            double b1 = (double) y1 - y0, c1 = (double) z1 - z0;
-            double b2 = (double) y2 - y0, c2 = (double) z2 - z0;
-            double b3 = (double) y3 - y0, c3 = (double) z3 - z0;
+            double b1 = (double)y1 - y0, c1 = (double)z1 - z0;
+            double b2 = (double)y2 - y0, c2 = (double)z2 - z0;
+            double b3 = (double)y3 - y0, c3 = (double)z3 - z0;
             double n = b1 * c2 - c1 * b2;
             double m = b2 * c3 - c2 * b3;
-            if (n > 0.0 && m > 0.0) return 0;
-            if (n < 0.0 && m < 0.0) return 1;
+            if (n > 0.0 && m > 0.0)
+                return 0;
+            if (n < 0.0 && m < 0.0)
+                return 1;
         }
         if (y0 == y1 && y0 == y2 && y0 == y3) {
-            double b1 = (double) z1 - z0, c1 = (double) x1 - x0;
-            double b2 = (double) z2 - z0, c2 = (double) x2 - x0;
-            double b3 = (double) z3 - z0, c3 = (double) x3 - x0;
+            double b1 = (double)z1 - z0, c1 = (double)x1 - x0;
+            double b2 = (double)z2 - z0, c2 = (double)x2 - x0;
+            double b3 = (double)z3 - z0, c3 = (double)x3 - x0;
             double n = b1 * c2 - c1 * b2;
             double m = b2 * c3 - c2 * b3;
-            if (n > 0.0 && m > 0.0) return 2;
-            if (n < 0.0 && m < 0.0) return 3;
+            if (n > 0.0 && m > 0.0)
+                return 2;
+            if (n < 0.0 && m < 0.0)
+                return 3;
         }
         if (z0 == z1 && z0 == z2 && z0 == z3) {
-            double b1 = (double) x1 - x0, c1 = (double) y1 - y0;
-            double b2 = (double) x2 - x0, c2 = (double) y2 - y0;
-            double b3 = (double) x3 - x0, c3 = (double) y3 - y0;
+            double b1 = (double)x1 - x0, c1 = (double)y1 - y0;
+            double b2 = (double)x2 - x0, c2 = (double)y2 - y0;
+            double b3 = (double)x3 - x0, c3 = (double)y3 - y0;
             double n = b1 * c2 - c1 * b2;
             double m = b2 * c3 - c2 * b3;
-            if (n > 0.0 && m > 0.0) return 4;
-            if (n < 0.0 && m < 0.0) return 5;
+            if (n > 0.0 && m > 0.0)
+                return 4;
+            if (n < 0.0 && m < 0.0)
+                return 5;
         }
         return 6;
     }
 
     public ByteBuffer directVertices() {
-        return vertices==null?null:vertices.readable(vertexCount*28);
+        return vertices == null ? null : vertices.readable(vertexCount * 28);
     }
-    public boolean hasVertices() { return vertices!=null && vertices.buffer!=null; }
+    public boolean hasVertices() {
+        return vertices != null && vertices.buffer != null;
+    }
     public MemorySegment pin() {
-        if(vertices==null) throw new IllegalStateException("Empty terrain mesh");
+        if (vertices == null)
+            throw new IllegalStateException("Empty terrain mesh");
         return vertices.pin();
     }
-    public void unpin() { if(vertices.unpin()) uploadLayout=null; }
+    @Override
+    public void unpin() {
+        if (vertices.unpin())
+            uploadLayout = null;
+    }
     public void releaseVertices() {
-        if(vertices!=null && vertices.release()) uploadLayout=null;
+        if (vertices != null && vertices.release())
+            uploadLayout = null;
     }
 
     public IndexSnapshot copyIndices(ByteBuffer source, int stride) {
@@ -275,24 +321,26 @@ public final class MeshPayload {
         int count = vertexCount / 4 * 6;
         if ((stride != 2 && stride != 4) || data.remaining() != count * stride)
             throw new IllegalArgumentException("Invalid transparent indices");
-        ByteBuffer direct = DirectUploadPool.acquire(count * 4,epoch);
+        ByteBuffer direct = DirectUploadPool.acquire(count * 4, epoch);
         try {
             if (stride == 2) {
                 for (int i = 0; i < count; i++) {
                     int value = Short.toUnsignedInt(data.getShort(i * 2));
-                    if (value >= vertexCount) throw new IllegalArgumentException("Transparent index outside mesh");
+                    if (value >= vertexCount)
+                        throw new IllegalArgumentException("Transparent index outside mesh");
                     direct.putInt(i * 4, value);
                 }
             } else {
                 for (int i = 0; i < count; i++) {
                     int value = data.getInt(i * 4);
-                    if (value < 0 || value >= vertexCount) throw new IllegalArgumentException("Transparent index outside mesh");
+                    if (value < 0 || value >= vertexCount)
+                        throw new IllegalArgumentException("Transparent index outside mesh");
                 }
-                MemorySegment.copy(MemorySegment.ofBuffer(data),0,MemorySegment.ofBuffer(direct),0,count * 4L);
+                MemorySegment.copy(MemorySegment.ofBuffer(data), 0, MemorySegment.ofBuffer(direct), 0, count * 4L);
             }
-            return new IndexSnapshot(direct, count,epoch);
+            return new IndexSnapshot(direct, count, epoch);
         } catch (RuntimeException | Error failure) {
-            DirectUploadPool.release(direct,epoch);
+            DirectUploadPool.release(direct, epoch);
             throw failure;
         }
     }

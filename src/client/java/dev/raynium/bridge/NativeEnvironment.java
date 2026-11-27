@@ -6,7 +6,8 @@ import org.slf4j.Logger;
 /** Owns the DLL and its singleton environment until all device sessions are closed. */
 public final class NativeEnvironment implements AutoCloseable {
     public enum Backend {
-        D3D12(1, "d3d12"), VULKAN(2, "vulkan");
+        D3D12(1, "d3d12"),
+        VULKAN(2, "vulkan");
 
         private final int nativeValue;
         private final String propertyValue;
@@ -16,32 +17,31 @@ public final class NativeEnvironment implements AutoCloseable {
             this.propertyValue = propertyValue;
         }
 
-        int nativeValue() { return nativeValue; }
-        public String propertyValue() { return propertyValue; }
+        int nativeValue() {
+            return nativeValue;
+        }
+        public String propertyValue() {
+            return propertyValue;
+        }
 
         public static Backend fromProperty(String value) {
             return switch (value) {
                 case "d3d12" -> D3D12;
                 case "vulkan" -> VULKAN;
-                default -> throw new IllegalArgumentException("Invalid raynium.rhi.backend='" + value
-                        + "'; expected d3d12 or vulkan");
+                default -> throw new IllegalArgumentException("Invalid raynium.rhi.backend='" + value + "'; expected d3d12 or vulkan");
             };
         }
     }
 
-
     private final Thread owner = Thread.currentThread();
+    private final Backend backend;
     private final NativeLibrary library;
     private final Logger logger;
     private NativeRuntime runtime;
     private boolean closed;
 
-    public NativeEnvironment(NativeLibraryLocator.Payload payload, Backend backend, Logger logger) {
-        this(payload, backend, Boolean.getBoolean("raynium.rhi.validation"), logger);
-    }
-
     public NativeEnvironment(NativeLibraryLocator.Payload payload, Backend backend, boolean validation, Logger logger) {
-        Objects.requireNonNull(backend, "backend");
+        this.backend = Objects.requireNonNull(backend, "backend");
         this.logger = Objects.requireNonNull(logger, "logger");
         library = new NativeLibrary(payload, logger);
         try {
@@ -54,17 +54,25 @@ public final class NativeEnvironment implements AutoCloseable {
         logger.info("Raynium native environment initialized: backend={} driver validation={}", backend.propertyValue(), validation);
     }
 
-    public NativeRuntime createRuntime() { return createRuntime(library.bindings()); }
+    public Backend backend() {
+        return backend;
+    }
+
+    public NativeRuntime createRuntime() {
+        return createRuntime(library.bindings());
+    }
 
     NativeRuntime createRuntime(NativeBindings bindings) {
         checkOpen();
-        if (runtime != null) throw new IllegalStateException("Native environment already has a runtime");
+        if (runtime != null)
+            throw new IllegalStateException("Native environment already has a runtime");
         runtime = new NativeRuntime(this, bindings, logger);
         return runtime;
     }
 
     void releasedRuntime(NativeRuntime value) {
-        if (runtime != value) throw new IllegalStateException("Runtime owner mismatch");
+        if (runtime != value)
+            throw new IllegalStateException("Runtime owner mismatch");
         runtime = null;
     }
 
@@ -75,13 +83,17 @@ public final class NativeEnvironment implements AutoCloseable {
 
     void checkOpen() {
         checkThread();
-        if (closed) throw new IllegalStateException("Native environment is closed");
+        if (closed)
+            throw new IllegalStateException("Native environment is closed");
     }
 
-    @Override public void close() {
+    @Override
+    public void close() {
         checkThread();
-        if (closed) return;
-        if (runtime != null) throw new IllegalStateException("Close the runtime before closing the native environment");
+        if (closed)
+            return;
+        if (runtime != null)
+            throw new IllegalStateException("Close the runtime before closing the native environment");
         library.bindings().destroyEnvironment();
         logger.info("Raynium native environment destroyed");
         library.close();

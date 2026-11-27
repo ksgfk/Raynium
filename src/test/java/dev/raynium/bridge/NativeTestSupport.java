@@ -1,6 +1,8 @@
 package dev.raynium.bridge;
 
+import dev.raynium.client.renderpearl.CommandTape;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
@@ -8,37 +10,50 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import org.slf4j.Logger;
-
 /** Owns raw C ABI handles so assertion failures cannot unload a DLL with live runtimes. */
 final class NativeTestSupport implements AutoCloseable {
+    static boolean validation() {
+        return Boolean.getBoolean("raynium.rhi.validation");
+    }
+
+    static NativeRenderer.SubmissionMode submissionMode() {
+        return NativeRenderer.SubmissionMode.fromProperty(System.getProperty("raynium.terrain.submission", "auto"));
+    }
+
     static MemorySegment handle(NativeRenderer renderer) throws ReflectiveOperationException {
-        return (MemorySegment)java.lang.invoke.MethodHandles.privateLookupIn(NativeRenderer.class,java.lang.invoke.MethodHandles.lookup())
-            .findVarHandle(NativeRenderer.class,"handle",MemorySegment.class).get(renderer);
+        return (MemorySegment)MethodHandles.privateLookupIn(NativeRenderer.class, MethodHandles.lookup())
+            .findVarHandle(NativeRenderer.class, "handle", MemorySegment.class)
+            .get(renderer);
     }
 
     static NativeShaderPack shaders() {
-        try(var input=NativeTestSupport.class.getResourceAsStream("/assets/raynium/shaderpacks/default.rnsp")) {
-            if(input==null) throw new IllegalStateException("Missing test shader pack");
+        try (var input = NativeTestSupport.class.getResourceAsStream("/assets/raynium/shaderpacks/default.rnsp")) {
+            if (input == null)
+                throw new IllegalStateException("Missing test shader pack");
             return NativeShaderPack.read(input);
-        } catch(IOException failure) { throw new java.io.UncheckedIOException(failure); }
+        } catch (IOException failure) {
+            throw new UncheckedIOException(failure);
+        }
     }
-    static final int[] SOLID_COLOR={64,128,191,0};
+    static final int[] SOLID_COLOR = {64, 128, 191, 0};
     static TerrainFixture solidFrame(long sequence) {
-        var frame=new TerrainFixture(); frame.outputSequence=sequence;
-        frame.fogColor=new float[]{.25f,.5f,.75f,1};
+        var frame = new TerrainFixture();
+        frame.outputSequence = sequence;
+        frame.fogColor = new float[] {.25f, .5f, .75f, 1};
 
         return frame;
     }
-    static int blit(NativeRenderer renderer,NativeSwapchain chain) {
-        try(var texture=renderer.createTexture(16,16,1,1,NativeTexture.Format.RGBA8,NativeTexture.ATTACHMENT|NativeTexture.READBACK);
-            var tape=new dev.raynium.client.renderpearl.CommandTape(renderer)) {
-            tape.clearColor(new dev.raynium.client.renderpearl.CommandTape.Region(texture,0,0,0,0,16,16),1,0,0,1);
-            tape.blitToSurface(texture,0,chain);
+    static int blit(NativeRenderer renderer, NativeSwapchain chain) {
+        try (var texture = renderer.createTexture(16, 16, 1, 1, NativeTexture.Format.RGBA8, NativeTexture.ATTACHMENT | NativeTexture.READBACK);
+             var tape = new CommandTape(renderer)) {
+            tape.clearColor(new CommandTape.Region(texture, 0, 0, 0, 0, 16, 16), 1, 0, 0, 1);
+            tape.blitToSurface(texture, 0, chain);
             tape.submit();
             return renderer.flush();
         }
@@ -64,17 +79,17 @@ final class NativeTestSupport implements AutoCloseable {
             new NativeBindings(symbols).inspect(payload.manifest());
             var linker = Linker.nativeLinker();
             initEnv = linker.downcallHandle(symbols.find("rn_init_env").orElseThrow(),
-                    FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
+                                            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
             destroyEnv = linker.downcallHandle(symbols.find("rn_destroy_env").orElseThrow(),
-                    FunctionDescriptor.of(ValueLayout.JAVA_INT));
+                                               FunctionDescriptor.of(ValueLayout.JAVA_INT));
             query = linker.downcallHandle(symbols.find("rn_query_abi").orElseThrow(),
-                    FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+                                          FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
             create = linker.downcallHandle(symbols.find("rn_create_runtime").orElseThrow(),
-                    FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+                                           FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             destroy = linker.downcallHandle(symbols.find("rn_destroy_runtime").orElseThrow(),
-                    FunctionDescriptor.of(ValueLayout.JAVA_INT,ValueLayout.ADDRESS));
+                                            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
             createRenderer = linker.downcallHandle(symbols.find("rn_create_renderer").orElseThrow(),
-                    FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+                                                   FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             envDesc = arena.allocate(12, 4);
             envDesc.set(ValueLayout.JAVA_INT, 0, 12);
             envDesc.set(ValueLayout.JAVA_INT, 4, 1);
@@ -101,47 +116,54 @@ final class NativeTestSupport implements AutoCloseable {
     }
 
     static Logger recordingLogger(List<String> events) {
-        return (Logger) Proxy.newProxyInstance(Logger.class.getClassLoader(), new Class<?>[]{Logger.class},
-                (proxy, method, values) -> {
-                    if (method.getReturnType() == boolean.class) return true;
-                    if (method.getName().equals("getName")) return "native-test";
-                    if (method.getName().equals("info")) events.add((String) values[0]);
-                    return null;
-                });
+        return (Logger)Proxy.newProxyInstance(Logger.class.getClassLoader(), new Class<?>[] {Logger.class},
+                                              (proxy, method, values) -> {
+                                                  if (method.getReturnType() == boolean.class)
+                                                      return true;
+                                                  if (method.getName().equals("getName"))
+                                                      return "native-test";
+                                                  if (method.getName().equals("info"))
+                                                      events.add((String)values[0]);
+                                                  return null;
+                                              });
     }
 
     int query(MemorySegment info, int capacity) throws Throwable {
-        return (int) query.invokeExact(info, capacity);
+        return (int)query.invokeExact(info, capacity);
     }
 
     int createRenderer(MemorySegment runtime, MemorySegment descriptor, MemorySegment out) throws Throwable {
-        return (int) createRenderer.invokeExact(runtime, descriptor, out);
+        return (int)createRenderer.invokeExact(runtime, descriptor, out);
     }
 
     int initEnv(MemorySegment descriptor) throws Throwable {
-        int status = (int) initEnv.invokeExact(descriptor);
-        if (status == 0) ownsEnvironment = true;
+        int status = (int)initEnv.invokeExact(descriptor);
+        if (status == 0)
+            ownsEnvironment = true;
         return status;
     }
 
     int destroyEnv() throws Throwable {
-        int status = (int) destroyEnv.invokeExact();
-        if (status == 0) ownsEnvironment = false;
+        int status = (int)destroyEnv.invokeExact();
+        if (status == 0)
+            ownsEnvironment = false;
         return status;
     }
 
     int create(MemorySegment descriptor, MemorySegment out) throws Throwable {
-        int status = (int) create.invokeExact(descriptor, out);
+        int status = (int)create.invokeExact(descriptor, out);
         if (status == 0 && !out.equals(MemorySegment.NULL)) {
             MemorySegment handle = out.get(ValueLayout.ADDRESS, 0);
-            if (!handle.equals(MemorySegment.NULL)) runtimes.add(handle);
+            if (!handle.equals(MemorySegment.NULL))
+                runtimes.add(handle);
         }
         return status;
     }
 
     void destroy(MemorySegment handle) {
         try {
-            if((int)destroy.invokeExact(handle)!=0) throw new IllegalStateException("Runtime destruction failed");
+            if ((int)destroy.invokeExact(handle) != 0)
+                throw new IllegalStateException("Runtime destruction failed");
             runtimes.remove(handle);
         } catch (RuntimeException | Error failure) {
             throw failure;
@@ -152,11 +174,13 @@ final class NativeTestSupport implements AutoCloseable {
 
     @Override
     public void close() {
-        while (!runtimes.isEmpty()) destroy(runtimes.getLast());
+        while (!runtimes.isEmpty())
+            destroy(runtimes.getLast());
         if (ownsEnvironment) {
             try {
                 int status = destroyEnv();
-                if (status != 0) throw new IllegalStateException("rn_destroy_env failed, status=" + status);
+                if (status != 0)
+                    throw new IllegalStateException("rn_destroy_env failed, status=" + status);
             } catch (RuntimeException | Error failure) {
                 throw failure;
             } catch (Throwable failure) {

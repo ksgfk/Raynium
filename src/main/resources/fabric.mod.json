@@ -6,9 +6,6 @@
   "description": "Client rendering replacement powered by RadRay. Native bridge integration; rendering runtime is under development.",
   "environment": "client",
   "accessWidener": "raynium.accesswidener",
-  "entrypoints": {
-    "client": ["dev.raynium.client.RayniumClient"]
-  },
   "mixins": [
     {
       "config": "raynium.client.mixins.json",

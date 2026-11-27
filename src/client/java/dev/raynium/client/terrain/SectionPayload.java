@@ -5,32 +5,42 @@ public final class SectionPayload {
     public final long epoch;
     public final MeshPayload[] layers;
     public final long vertexBytes;
-    public long uploadedEpoch,stagedFrame,lastActiveFrame,sectionKey,dirtyIndexFrame;
-    int instanceSlot=-1;
-    int capturedSlot=-1;
+    public long uploadedEpoch, stagedFrame, lastActiveFrame, sectionKey, dirtyIndexFrame;
+    int instanceSlot = -1;
+    int capturedSlot = -1;
     MeshPayload.IndexSnapshot uploadedIndices;
-    public SectionPayload(long epoch,MeshPayload... layers) {
-        this.epoch=epoch;
-        this.layers=new MeshPayload[3];
-        long bytes=0;
-        for(var layer:layers) if(layer!=null) {
-            if(layer.epoch!=epoch || this.layers[layer.mode]!=null) throw new IllegalArgumentException("Invalid section layers");
-            this.layers[layer.mode]=layer; bytes+=layer.vertexCount*28L;
-        }
-        vertexBytes=bytes;
+    public SectionPayload(long epoch, MeshPayload... layers) {
+        this.epoch = epoch;
+        this.layers = new MeshPayload[3];
+        long bytes = 0;
+        for (var layer : layers)
+            if (layer != null) {
+                if (layer.epoch != epoch || this.layers[layer.mode] != null)
+                    throw new IllegalArgumentException("Invalid section layers");
+                this.layers[layer.mode] = layer;
+                bytes += layer.vertexCount * 28L;
+            }
+        vertexBytes = bytes;
     }
-    long uploadBytes(MeshPayload.IndexSnapshot indices) { return vertexBytes+(indices==null?0:indices.byteSize()); }
+    long uploadBytes(MeshPayload.IndexSnapshot indices) {
+        return vertexBytes + (indices == null ? 0 : indices.byteSize());
+    }
     boolean hasVertices() {
-        if(vertexBytes<=0) return false;
-        for(var layer:layers) if(layer!=null && !layer.hasVertices()) return false;
+        if (vertexBytes <= 0)
+            return false;
+        for (var layer : layers)
+            if (layer != null && !layer.hasVertices())
+                return false;
         return true;
     }
     void releaseBuffers() {
-        for(var layer:layers) {
-            if(layer==null) continue;
+        for (var layer : layers) {
+            if (layer == null)
+                continue;
             layer.releaseVertices();
-            var idx=layer.indices;
-            if(idx!=null) idx.releaseBuffer();
+            var idx = layer.indices;
+            if (idx != null)
+                idx.releaseBuffer();
         }
     }
 }

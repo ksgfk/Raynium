@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "raynium-harness",
+  "version": "${version}",
+  "name": "Raynium Harness",
+  "description": "Development benchmark and visual validation harness for Raynium.",
+  "environment": "client",
+  "accessWidener": "raynium-harness.accesswidener",
+  "entrypoints": {
+    "client": ["dev.raynium.harness.HarnessClient"]
+  },
+  "mixins": [
+    {
+      "config": "raynium-harness.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "minecraft": "${minecraft_version}",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}

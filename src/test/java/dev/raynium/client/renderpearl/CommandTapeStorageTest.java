@@ -1,26 +1,30 @@
 package dev.raynium.client.renderpearl;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 import org.junit.jupiter.api.Test;
-import static org.junit.jupiter.api.Assertions.*;
 
 class CommandTapeStorageTest {
-    @Test void idleBudgetIncludesClearedReferenceArraysAndCombinedStreamBytes() {
-        try(var heap=new CommandTape.Storage(); var nativeBytes=new CommandTape.Storage()) {
+    @Test
+    void idleBudgetIncludesClearedReferenceArraysAndCombinedStreamBytes() {
+        try (var heap = new CommandTape.Storage(); var nativeBytes = new CommandTape.Storage()) {
             assertTrue(heap.fitsIdlePool());
             heap.modelReferences.ensureCapacity(8192);
             heap.reset();
             assertFalse(heap.fitsIdlePool());
-            nativeBytes.uploads.append(9L<<20);
-            nativeBytes.instanceUploads.append(8L<<20);
+            nativeBytes.uploads.append(9L << 20);
+            nativeBytes.instanceUploads.append(8L << 20);
             assertFalse(nativeBytes.fitsIdlePool());
         }
     }
-    @Test void independentStreamsDropOversizedArenasAfter120LowBatches() {
-        try(var storage=new CommandTape.Storage()) {
-            var transfer=storage.uploads.append(17L<<20);
-            var instances=storage.instanceUploads.append(56);
+    @Test
+    void independentStreamsDropOversizedArenasAfter120LowBatches() {
+        try (var storage = new CommandTape.Storage()) {
+            var transfer = storage.uploads.append(17L << 20);
+            var instances = storage.instanceUploads.append(56);
             storage.reset();
-            for(int i=0;i<119;i++) {
+            for (int i = 0; i < 119; i++) {
                 storage.uploads.append(32);
                 storage.reset();
             }
@@ -31,13 +35,14 @@ class CommandTapeStorageTest {
         }
     }
 
-    @Test void closeReleasesAllFiveOffHeapStreams() {
-        var storage=new CommandTape.Storage();
-        var commands=storage.commands.append(16);
-        var uploads=storage.uploads.append(16);
-        var instances=storage.instanceUploads.append(16);
-        var captures=storage.captureIds.append(8);
-        var queries=storage.queryWrites.append(16);
+    @Test
+    void closeReleasesAllFiveOffHeapStreams() {
+        var storage = new CommandTape.Storage();
+        var commands = storage.commands.append(16);
+        var uploads = storage.uploads.append(16);
+        var instances = storage.instanceUploads.append(16);
+        var captures = storage.captureIds.append(8);
+        var queries = storage.queryWrites.append(16);
         storage.close();
         assertFalse(commands.scope().isAlive());
         assertFalse(uploads.scope().isAlive());

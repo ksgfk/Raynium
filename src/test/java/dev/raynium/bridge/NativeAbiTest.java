@@ -1,5 +1,8 @@
 package dev.raynium.bridge;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.file.Path;
@@ -13,13 +16,11 @@ import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-
 @Tag("native")
 @Execution(ExecutionMode.SAME_THREAD)
 class NativeAbiTest {
-    @TempDir Path gameDirectory;
+    @TempDir
+    Path gameDirectory;
     private NativeTestSupport abi;
 
     @BeforeEach
@@ -29,7 +30,8 @@ class NativeAbiTest {
 
     @AfterEach
     void closeLibrary() {
-        if (abi != null) abi.close();
+        if (abi != null)
+            abi.close();
     }
 
     @Test
@@ -46,7 +48,8 @@ class NativeAbiTest {
         assertEquals(1, abi.initEnv(MemorySegment.NULL));
     }
 
-    @ParameterizedTest @ValueSource(ints = {0, 8, 16})
+    @ParameterizedTest
+    @ValueSource(ints = {0, 8, 16})
     void environmentRejectsIncorrectDescriptorSize(int size) throws Throwable {
         abi.envDesc.set(ValueLayout.JAVA_INT, 0, size);
         assertEquals(1, abi.initEnv(abi.envDesc));
@@ -94,7 +97,8 @@ class NativeAbiTest {
         abi.destroy(MemorySegment.NULL);
     }
 
-    @ParameterizedTest @ValueSource(ints = {4, 1})
+    @ParameterizedTest
+    @ValueSource(ints = {4, 1})
     void rejectsNonzeroReservedField(int flags) throws Throwable {
         abi.desc.set(ValueLayout.JAVA_INT, 4, flags);
         reject(abi.desc);
@@ -107,7 +111,7 @@ class NativeAbiTest {
 
     @Test
     void queryRejectsShortBufferWithoutWritingInfo() throws Throwable {
-        abi.info.fill((byte) 0x7f);
+        abi.info.fill((byte)0x7f);
         byte[] before = abi.info.toArray(ValueLayout.JAVA_BYTE);
         assertEquals(1, abi.query(abi.info, 239));
 

@@ -7,7 +7,13 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from validate_visual import compare, check_capture_log, link_region_storage
+from validate_visual import (
+    build_gradle_args,
+    build_validation_command,
+    check_capture_log,
+    compare,
+    link_region_storage,
+)
 
 
 class VisualInputTest(unittest.TestCase):
@@ -37,6 +43,42 @@ class VisualInputTest(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(RuntimeError):
                 check_capture_log(text)
         check_capture_log('WARNING-Shader-OutputNotConsumed\nMinecraft started')
+
+    def test_build_gradle_args_and_direct_validation_commands(self):
+        self.assertEqual(['harnessClasses', 'writeLaunchSpec'], build_gradle_args(['reference'], 'Debug'))
+        self.assertEqual(['harnessClasses', 'classes', 'clientClasses', 'nativeStageDebug', 'writeLaunchSpec'],
+                         build_gradle_args(['reference', 'd3d12', 'vulkan'], 'Debug'))
+        self.assertEqual(['harnessClasses', 'classes', 'clientClasses', 'nativeStageRelease', 'writeLaunchSpec'],
+                         build_gradle_args(['vulkan'], 'Release'))
+
+        spec = {
+            'schemaVersion': 1,
+            'javaExecutable': 'C:/jdk25/bin/java.exe',
+            'mainClass': 'net.fabricmc.loader.impl.launch.knot.KnotClient',
+            'commonJvmArgs': ['--enable-native-access=ALL-UNNAMED'],
+            'commonSystemProperties': {'fabric.development': 'true'},
+            'commonProgramArgs': ['--version', '26.3'],
+            'baseClasspath': ['C:/libs/mc.jar'],
+            'mods': {
+                'raynium': ['C:/repo/build/classes/java/client'],
+                'rayniumHarness': ['C:/repo/build/classes/java/harness'],
+            },
+            'nativeStageDirs': {'Debug': 'C:/stage/Debug', 'Release': 'C:/stage/Release'},
+        }
+        ref_cmd = build_validation_command(spec, Path('C:/out/ref/game'), Path('C:/out/ref/scenes.json'), 'reference', 'Debug',
+                                           tracy_images=True, in_place_world=True)
+        self.assertIn('--graphicsBackend', ref_cmd)
+        self.assertIn('VULKAN', ref_cmd)
+        self.assertIn('--tracy', ref_cmd)
+        self.assertIn('-DMC_DEBUG_ENABLED=true', ref_cmd)
+        self.assertIn('-DMC_DEBUG_DONT_SAVE_WORLD=true', ref_cmd)
+        self.assertFalse(any(a.startswith('-Draynium.native.dir=') for a in ref_cmd))
+        self.assertNotIn('build/classes/java/client', ref_cmd[ref_cmd.index('-cp') + 1])
+
+        native_cmd = build_validation_command(spec, Path('C:/out/d3d12/game'), Path('C:/out/d3d12/scenes.json'), 'd3d12', 'Debug')
+        self.assertIn('-Draynium.native.dir=C:/stage/Debug', native_cmd)
+        self.assertNotIn('--graphicsBackend', native_cmd)
+        self.assertIn('build/classes/java/client', native_cmd[native_cmd.index('-cp') + 1])
 
 
 @unittest.skipUnless(importlib.util.find_spec('numpy') and importlib.util.find_spec('PIL'), 'Image comparison requires NumPy and Pillow')

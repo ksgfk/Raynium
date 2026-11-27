@@ -1,13 +1,19 @@
 package dev.raynium.client.renderpearl;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
 import com.mojang.renderpearl.api.commands.GpuFence;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
-import static org.junit.jupiter.api.Assertions.*;
 
 class BatchSubmissionTest {
-    @Test void recordingAndFailedFencesNeverEnterNativeWait() {
+    @Test
+    void recordingAndFailedFencesNeverEnterNativeWait() {
         var batch = new BatchSubmission((seq, timeout) -> fail("Unsubmitted native wait"));
         try (var fence = batch.createFence()) {
             assertFalse(fence.awaitCompletion(0));
@@ -19,9 +25,14 @@ class BatchSubmissionTest {
         }
     }
 
-    @Test void olderFenceWaitsForOriginalSequenceEvenAfterNextSubmission() {
+    @Test
+    void olderFenceWaitsForOriginalSequenceEvenAfterNextSubmission() {
         var calls = new ArrayList<Long>(4);
-        BatchSubmission.Waiter wait = (seq, timeout) -> { calls.add(seq); calls.add(timeout); return true; };
+        BatchSubmission.Waiter wait = (seq, timeout) -> {
+            calls.add(seq);
+            calls.add(timeout);
+            return true;
+        };
         var first = new BatchSubmission(wait);
         var next = new BatchSubmission(wait);
         try (var fence = first.createFence(); var later = next.createFence()) {

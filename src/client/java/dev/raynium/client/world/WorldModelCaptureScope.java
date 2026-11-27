@@ -6,7 +6,14 @@ public final class WorldModelCaptureScope {
 
     private WorldModelCaptureScope() {}
 
-    public static void enter() { ++depth; }
-    public static void exit() { if (depth > 0) --depth; }
-    public static boolean isActive() { return depth > 0; }
+    public static void enter() {
+        ++depth;
+    }
+    public static void exit() {
+        if (depth > 0)
+            --depth;
+    }
+    public static boolean isActive() {
+        return depth > 0;
+    }
 }

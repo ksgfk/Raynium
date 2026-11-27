@@ -13,7 +13,7 @@
 `RenderSectionIndicesMixin` 将透明 uint16/uint32 索引直接归一为 uint32 并写入 `DirectUploadPool` 提供的 `DirectByteBuffer`，在对应原版上传回调确认采用后发布快照，同时把受影响的 `SectionPayload` 登记到脏索引队列。
 透明索引校验使用固定 `vertexCount`，上传后释放并归还顶点缓冲不影响后续排序更新。
 
-在非参考模式下，`SectionUploadMixin` 使用 `NoopTerrainStagingBuffer` 拦截 `SectionRenderDispatcher` 往原版 98 MiB `StagingBuffer` 的顶点与透明索引写入，`UberBufferDrainMixin` 跳过冗余的原版 UberBuffer GPU 排出，同时保留原版已编译状态机与透明排序流转。暂存表达到 4096 项后，若连续 120 次排空各至多处理 256 项，会在清理条目后收缩两张哈希表。
+`SectionUploadMixin` 使用 `NoopTerrainStagingBuffer` 拦截 `SectionRenderDispatcher` 往原版 98 MiB `StagingBuffer` 的顶点与透明索引写入，`UberBufferDrainMixin` 跳过冗余的原版 UberBuffer GPU 排出，同时保留原版已编译状态机与透明排序流转。暂存表达到 4096 项后，若连续 120 次排空各至多处理 256 项，会在清理条目后收缩两张哈希表。
 `LevelTerrainHookMixin` 在 `LevelRenderer.prepareChunkRenders` 与 `prepareChunkRendersIndirect` 入口完成 Raynium 视图准备后直接返回仅携带视图句柄的占位 `ChunkSectionsToRender`，避免原版二次加锁遍历可见区块并构造未消费的绘制列表。
 `CompiledSectionMeshMixin` 维护层就绪位掩码，`RenderSectionStateMixin` 在 `setSectionMesh` 与 `reset` 时将 `SectionPayload` 与就绪位掩码直接缓存到 `RenderSection` 并将变更区块加入并发脏队列；`LevelTerrainHookMixin`（`clearVisibleSections`）与 `SectionOcclusionGraphMixin`（`addSectionsInFrustum`）推进 `VISIBLE_LIST_VERSION`。
 
@@ -54,7 +54,7 @@ Native 按视图求逆 projection × view，变换 (0,0,1,0) 得到有效视点�
 单实例的三个轴向边界均落在区块内且相机分量绝对值至多 1.5 时，通过整数坐标差 ≤ −4 或 ≥ 20 直接选取该轴的朝向。其余情况按实际 AABB 及 0.001 容差计算轴向组；general 始终保留。多实例取可见组并集，再与显式请求掩码和有效元素位求交。
 计算得到零掩码正常跳过绘制；显式非法掩码失败。Native 寿命与批次规则见[Native runtime](native-runtime.md)。
 
-`TerrainResidency` 通过按 `slotId` 索引的平坦数组（`meshesBySlot`，上限 `kMaxMeshSlot`）和 64 字节对齐热数组（`_hotSlots`）实现 $O(1)$ 寻址。几何池均开启 `BufferUse::Resource`，实心与镂空层共用 `TerrainVertices`，透明层使用独立的 `TranslucentVertices`。两池页容量取 512 MiB 与设备单缓冲上限的较小值，向下取整为完整的 28 B 顶点。实心与镂空各层按页内首次可见项的遍历顺序发出批次。共享四边形使用 16 MiB 索引页，透明与线框使用 128 MiB 索引页。帧槽回收后可释放空闲页。
+`TerrainResidency` 通过按 `slotId` 索引的平坦数组（`MeshesBySlot`，上限 `kMaxMeshSlot`）和 64 字节对齐热数组（`_hotSlots`）实现 $O(1)$ 寻址。几何池均开启 `BufferUse::Resource`，实心与镂空层共用 `TerrainVertices`，透明层使用独立的 `TranslucentVertices`。两池页容量取 512 MiB 与设备单缓冲上限的较小值，向下取整为完整的 28 B 顶点。实心与镂空各层按页内首次可见项的遍历顺序发出批次。共享四边形使用 16 MiB 索引页，透明与线框使用 128 MiB 索引页。帧槽回收后可释放空闲页。
 
 每个视图按层缓存实例、可见列表、分页代表命令及索引绘制参数。Java 在重扫时分别比对可见项、区块坐标和完整实例（含淡入起点）并维护三组单调版本号：仅可见集变化或发生网格增删时更新 `visible_version`，仅区块坐标或实例池逻辑容量变化时更新 `origins_version`，任一实例坐标、淡入起点或实例池逻辑容量变化时更新 `instances_version`；epoch 重置时三者一并清零。Native 按视图、epoch 和版本复用可见列表及原点相关的面剔除结果。Solid 和 Cutout 在有效视点各轴 ±1 方块内记录可能跨越可见平面的区块及其有效面掩码。视点在盒内移动且触及候选平面时，只复查这些候选。相同视点和未触及平面的位移直接复用绘制参数。有效掩码翻转、离开盒子或几何版本变化会触发重建。线框对多面组使用按请求掩码生成的原序索引。经典透明以排序键为初始顺序，跨页时在八项窗口内仅将投影包围盒与所有被跨越项严格分离的单实例调到同页项旁。包围盒无效或穿过视点时维持原序。发生交换的绘制参数在下个视图重建。OIT 按顶点和索引页合批。
 

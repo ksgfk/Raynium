@@ -17,7 +17,16 @@ VkDeviceSize coherentAtomSize{};
 VkSemaphore batchGate{};
 std::atomic<bool> armGate{}, maskCounter{}, dedicatedBuffers{};
 
-enum Operation { None, Timeline, Image, Submit, Present, Acquire, MaskTimeline, CreateSwapchain, MapMemory, DedicatedBuffers };
+enum Operation { None,
+                 Timeline,
+                 Image,
+                 Submit,
+                 Present,
+                 Acquire,
+                 MaskTimeline,
+                 CreateSwapchain,
+                 MapMemory,
+                 DedicatedBuffers };
 std::mutex gateMutex;
 std::condition_variable gateChanged;
 std::atomic<int> pauseSite{};
@@ -44,7 +53,7 @@ bool take(Operation operation) {
     return true;
 }
 
-template<class Info, class Link>
+template <class Info, class Link>
 Link* findLink(const Info* info, VkStructureType type) {
     auto* next = static_cast<const VkBaseInStructure*>(info->pNext);
     for (; next; next = next->pNext) {
@@ -56,7 +65,7 @@ Link* findLink(const Info* info, VkStructureType type) {
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL createInstance(const VkInstanceCreateInfo* info,
-        const VkAllocationCallbacks* allocator, VkInstance* instance) {
+                                              const VkAllocationCallbacks* allocator, VkInstance* instance) {
     auto* link = findLink<VkInstanceCreateInfo, VkLayerInstanceCreateInfo>(info, VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO);
     if (!link) return VK_ERROR_INITIALIZATION_FAILED;
     instanceProc = link->u.pLayerInfo->pfnNextGetInstanceProcAddr;
@@ -69,7 +78,7 @@ VKAPI_ATTR VkResult VKAPI_CALL createInstance(const VkInstanceCreateInfo* info,
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL createDevice(VkPhysicalDevice physical, const VkDeviceCreateInfo* info,
-        const VkAllocationCallbacks* allocator, VkDevice* device) {
+                                            const VkAllocationCallbacks* allocator, VkDevice* device) {
     auto* link = findLink<VkDeviceCreateInfo, VkLayerDeviceCreateInfo>(info, VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO);
     if (!link) return VK_ERROR_INITIALIZATION_FAILED;
     auto next = link->u.pLayerInfo->pfnNextGetInstanceProcAddr;
@@ -80,30 +89,37 @@ VKAPI_ATTR VkResult VKAPI_CALL createDevice(VkPhysicalDevice physical, const VkD
     if (status == VK_SUCCESS) {
         currentDevice = *device;
         VkPhysicalDeviceProperties properties{};
-        auto getProperties=reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(next(currentInstance,"vkGetPhysicalDeviceProperties"));
-        getProperties(physical,&properties);
-        coherentAtomSize=properties.limits.nonCoherentAtomSize;
+        auto getProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(next(currentInstance, "vkGetPhysicalDeviceProperties"));
+        getProperties(physical, &properties);
+        coherentAtomSize = properties.limits.nonCoherentAtomSize;
     }
     return status;
 }
 
-template<class F> F downstream(const char* name) {
+template <class F>
+F downstream(const char* name) {
     return reinterpret_cast<F>(deviceProc(currentDevice, name));
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL counter(VkDevice device, VkSemaphore semaphore, uint64_t* value) {
     ++counterReads;
     if (take(Timeline)) return injected;
-    if(maskCounter.load()) { *value=0; return VK_SUCCESS; }
+    if (maskCounter.load()) {
+        *value = 0;
+        return VK_SUCCESS;
+    }
     return downstream<PFN_vkGetSemaphoreCounterValue>("vkGetSemaphoreCounterValue")(device, semaphore, value);
 }
 VKAPI_ATTR VkResult VKAPI_CALL mapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset,
-        VkDeviceSize size, VkMemoryMapFlags flags, void** output) {
-    if (auto error=mapError.load(); error!=VK_SUCCESS) { ++hits; return error; }
+                                         VkDeviceSize size, VkMemoryMapFlags flags, void** output) {
+    if (auto error = mapError.load(); error != VK_SUCCESS) {
+        ++hits;
+        return error;
+    }
     return downstream<PFN_vkMapMemory>("vkMapMemory")(device, memory, offset, size, flags, output);
 }
 VKAPI_ATTR void VKAPI_CALL bufferRequirements(VkDevice device, const VkBufferMemoryRequirementsInfo2* info,
-        VkMemoryRequirements2* requirements) {
+                                              VkMemoryRequirements2* requirements) {
     downstream<PFN_vkGetBufferMemoryRequirements2>("vkGetBufferMemoryRequirements2")(device, info, requirements);
     if (!dedicatedBuffers) return;
     // A VMA suballocation could otherwise reuse a block already mapped by the upload pool.
@@ -113,7 +129,7 @@ VKAPI_ATTR void VKAPI_CALL bufferRequirements(VkDevice device, const VkBufferMem
     }
 }
 VKAPI_ATTR VkResult VKAPI_CALL image(VkDevice device, const VkImageCreateInfo* info,
-        const VkAllocationCallbacks* allocator, VkImage* output) {
+                                     const VkAllocationCallbacks* allocator, VkImage* output) {
     if (take(Image)) return injected;
     return downstream<PFN_vkCreateImage>("vkCreateImage")(device, info, allocator, output);
 }
@@ -138,26 +154,26 @@ VKAPI_ATTR VkResult VKAPI_CALL present(VkQueue queue, const VkPresentInfoKHR* in
     ++presentations;
     // Complete the real presentation and its semaphore wait before substituting WSI status.
     auto status = downstream<PFN_vkQueuePresentKHR>("vkQueuePresentKHR")(queue, info);
-    if(pauseSite==Present && status==VK_SUCCESS)
+    if (pauseSite == Present && status == VK_SUCCESS)
         downstream<PFN_vkQueueWaitIdle>("vkQueueWaitIdle")(queue);
     checkpoint(Present);
     return status == VK_SUCCESS && take(Present) ? injected.load() : status;
 }
 VKAPI_ATTR VkResult VKAPI_CALL acquire(VkDevice device, VkSwapchainKHR chain, uint64_t timeout,
-        VkSemaphore semaphore, VkFence fence, uint32_t* index) {
+                                       VkSemaphore semaphore, VkFence fence, uint32_t* index) {
     ++acquisitions;
     checkpoint(Acquire);
     if (armed == Acquire && injected < 0 && take(Acquire)) return injected;
     auto status = downstream<PFN_vkAcquireNextImageKHR>("vkAcquireNextImageKHR")(device, chain, timeout, semaphore, fence, index);
     return status == VK_SUCCESS && take(Acquire) ? injected.load() : status;
 }
-VKAPI_ATTR VkResult VKAPI_CALL swapchain(VkDevice device,const VkSwapchainCreateInfoKHR* info,
-        const VkAllocationCallbacks* allocator,VkSwapchainKHR* result) {
-    if(auto error=createError.load(); error!=VK_SUCCESS) {
+VKAPI_ATTR VkResult VKAPI_CALL swapchain(VkDevice device, const VkSwapchainCreateInfoKHR* info,
+                                         const VkAllocationCallbacks* allocator, VkSwapchainKHR* result) {
+    if (auto error = createError.load(); error != VK_SUCCESS) {
         ++failedCreates;
         return error;
     }
-    return downstream<PFN_vkCreateSwapchainKHR>("vkCreateSwapchainKHR")(device,info,allocator,result);
+    return downstream<PFN_vkCreateSwapchainKHR>("vkCreateSwapchainKHR")(device, info, allocator, result);
 }
 VKAPI_ATTR VkResult VKAPI_CALL idle(VkDevice device) {
     ++idleCalls;
@@ -168,7 +184,10 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL getDeviceProc(VkDevice device, const ch
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL getInstanceProc(VkInstance instance, const char* name);
 
 PFN_vkVoidFunction intercepted(const char* name) {
-    struct Entry { const char* name; PFN_vkVoidFunction function; };
+    struct Entry {
+        const char* name;
+        PFN_vkVoidFunction function;
+    };
     const Entry entries[]{
         {"vkCreateInstance", reinterpret_cast<PFN_vkVoidFunction>(createInstance)},
         {"vkCreateDevice", reinterpret_cast<PFN_vkVoidFunction>(createDevice)},
@@ -183,9 +202,9 @@ PFN_vkVoidFunction intercepted(const char* name) {
         {"vkQueueSubmit", reinterpret_cast<PFN_vkVoidFunction>(submit)},
         {"vkQueuePresentKHR", reinterpret_cast<PFN_vkVoidFunction>(present)},
         {"vkAcquireNextImageKHR", reinterpret_cast<PFN_vkVoidFunction>(acquire)},
-        {"vkDeviceWaitIdle", reinterpret_cast<PFN_vkVoidFunction>(idle)}
-    };
-    for (const auto& entry : entries) if (std::strcmp(name, entry.name) == 0) return entry.function;
+        {"vkDeviceWaitIdle", reinterpret_cast<PFN_vkVoidFunction>(idle)}};
+    for (const auto& entry : entries)
+        if (std::strcmp(name, entry.name) == 0) return entry.function;
     return nullptr;
 }
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL getInstanceProc(VkInstance instance, const char* name) {
@@ -199,7 +218,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL getDeviceProc(VkDevice device, const ch
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL getPhysicalProc(VkInstance instance, const char* name) {
     return physicalProc ? physicalProc(instance, name) : nullptr;
 }
-}
+}  // namespace
 
 extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface* info) {
     if (info->loaderLayerInterfaceVersion < 2) return VK_ERROR_INITIALIZATION_FAILED;
@@ -212,26 +231,40 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion
 
 extern "C" __declspec(dllexport) int pauseWorker(int operation) {
     std::unique_lock lock(gateMutex);
-    if(operation<0)
-        return gateChanged.wait_for(lock,std::chrono::seconds(5),[] { return atGate; });
-    if(operation==None) {
-        pauseSite=None;
+    if (operation < 0)
+        return gateChanged.wait_for(lock, std::chrono::seconds(5), [] { return atGate; });
+    if (operation == None) {
+        pauseSite = None;
         gateChanged.notify_all();
         return !gateExpired;
     }
-    if(pauseSite || atGate) return 0;
-    pauseSite=operation;
-    gateExpired=false;
+    if (pauseSite || atGate) return 0;
+    pauseSite = operation;
+    gateExpired = false;
     return 1;
 }
 
 extern "C" __declspec(dllexport) void armSurfaceFault(int operation, int result) {
-    if(operation==DedicatedBuffers) { dedicatedBuffers=result!=0; return; }
+    if (operation == DedicatedBuffers) {
+        dedicatedBuffers = result != 0;
+        return;
+    }
     // VMA can retry a failed mapping with another memory type.
-    if(operation==MapMemory) { hits=0; mapError=static_cast<VkResult>(result); return; }
-    if(operation==None) mapError=VK_SUCCESS;
-    if(operation==MaskTimeline) { maskCounter=result!=0; return; }
-    if(operation==CreateSwapchain) { if(result) failedCreates=0; createError=static_cast<VkResult>(result); return; }
+    if (operation == MapMemory) {
+        hits = 0;
+        mapError = static_cast<VkResult>(result);
+        return;
+    }
+    if (operation == None) mapError = VK_SUCCESS;
+    if (operation == MaskTimeline) {
+        maskCounter = result != 0;
+        return;
+    }
+    if (operation == CreateSwapchain) {
+        if (result) failedCreates = 0;
+        createError = static_cast<VkResult>(result);
+        return;
+    }
     injected = static_cast<VkResult>(result);
     hits = acquisitions = presentations = idleCalls = 0;
     armed = static_cast<Operation>(operation);

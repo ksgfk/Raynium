@@ -1,0 +1,33 @@
+{
+  "required": true,
+  "package": "dev.raynium.harness.mixin",
+  "plugin": "dev.raynium.harness.mixin.HarnessMixinPlugin",
+  "compatibilityLevel": "JAVA_25",
+  "mixinextras": {
+    "minVersion": "0.5.5"
+  },
+  "client": [
+    "benchmark.BenchmarkMinecraftMixin",
+    "benchmark.BenchmarkReferenceTimerMixin",
+    "validation.VisualValidationBorderClockMixin",
+    "validation.VisualValidationClockMixin",
+    "validation.VisualValidationGatewayAccessor",
+    "validation.VisualValidationLightmapMixin",
+    "validation.VisualValidationMinecraftMixin",
+    "validation.VisualValidationMouseMixin",
+    "validation.VisualValidationPanoramaAccessor",
+    "validation.VisualValidationPartialTickMixin",
+    "validation.VisualValidationParticleSeedMixin",
+    "validation.VisualValidationParticlesMixin",
+    "validation.VisualValidationPictureInPictureMixin",
+    "validation.VisualValidationPipelineMixin",
+    "validation.VisualValidationPostMixin",
+    "validation.VisualValidationSpellAccessor",
+    "validation.VisualValidationSpriteMixin",
+    "validation.VisualValidationTitleAccessor",
+    "validation.VisualValidationUseItemAccessor"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

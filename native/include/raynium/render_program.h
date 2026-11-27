@@ -1,52 +1,58 @@
 #pragma once
-#include <algorithm>
+
+#include <cstdint>
+#include <optional>
+#include <span>
+#include <string_view>
+
+#include <radray/gpu/types.h>
+#include <radray/types.h>
+#include <raynium/frame_upload.h>
 #include <raynium/resource_uploads.h>
 #include <raynium/shader_pack.h>
-#include <raynium/frame_upload.h>
-
 
 namespace raynium {
 struct RasterPipelineState {
-    radray::vector<radray::gpu::VertexBufferLayout> vertices;
-    radray::vector<radray::gpu::VertexAttribute> attributes;
-    radray::gpu::PrimitiveState primitive=radray::gpu::PrimitiveState::Default();
-    std::optional<radray::gpu::DepthStencilState> depth;
-    radray::vector<radray::gpu::ColorTargetState> colors;
+    radray::vector<radray::gpu::VertexBufferLayout> Vertices;
+    radray::vector<radray::gpu::VertexAttribute> Attributes;
+    radray::gpu::PrimitiveState Primitive = radray::gpu::PrimitiveState::Default();
+    std::optional<radray::gpu::DepthStencilState> Depth;
+    radray::vector<radray::gpu::ColorTargetState> Colors;
 };
-struct RasterProgram {
-    radray::vector<radray::byte> externalBytes;
-    uint32_t pushBytes{};
-    radray::unique_ptr<ShaderProgram> program;
-    radray::unique_ptr<radray::gpu::Shader> vs,ps;
-    radray::array<radray::shared_ptr<radray::gpu::BindingGroupLayout>,2> groups;
-    radray::shared_ptr<radray::gpu::BindingGroupLayout> drawBasesLayout;
-    radray::unique_ptr<radray::gpu::PipelineLayout> layout;
-    radray::array<radray::vector<uint32_t>,2> required;
-    radray::vector<uint32_t> samplers;
-    radray::array<uint64_t,2> requiredMask{};
-    uint64_t samplerMask{};
-    bool hasHighBindings{};
 
-    bool RequiresBinding(uint32_t group,uint32_t slot) const noexcept {
-        if(slot<64u) return (requiredMask[group]&(uint64_t{1}<<slot))!=0;
-        if(!hasHighBindings) return false;
-        const auto& used=required[group];
-        return std::find(used.begin(),used.end(),slot)!=used.end();
-    }
-    bool HasSampler(uint32_t slot) const noexcept {
-        if(slot<64u) return (samplerMask&(uint64_t{1}<<slot))!=0;
-        if(!hasHighBindings) return false;
-        return std::find(samplers.begin(),samplers.end(),slot)!=samplers.end();
-    }
-};
-class RenderProgramLibrary {
+class RasterProgram final {
 public:
-    static bool Create(std::span<const radray::byte>,radray::unique_ptr<RenderProgramLibrary>&);
-    RasterProgram* GetProgram(radray::gpu::Device&,std::string_view,std::span<const radray::byte> external={});
+    radray::vector<radray::byte> ExternalBytes;
+    uint32_t PushBytes{};
+    radray::unique_ptr<ShaderProgram> Program;
+    radray::unique_ptr<radray::gpu::Shader> Vs;
+    radray::unique_ptr<radray::gpu::Shader> Ps;
+    radray::array<radray::shared_ptr<radray::gpu::BindingGroupLayout>, 2> Groups;
+    radray::shared_ptr<radray::gpu::BindingGroupLayout> DrawBasesLayout;
+    radray::unique_ptr<radray::gpu::PipelineLayout> Layout;
+    radray::array<radray::vector<uint32_t>, 2> Required;
+    radray::vector<uint32_t> Samplers;
+    radray::array<uint64_t, 2> RequiredMask{};
+    uint64_t SamplerMask{};
+    bool HasHighBindings{};
+
+    bool RequiresBinding(uint32_t group, uint32_t slot) const noexcept;
+    bool HasSampler(uint32_t slot) const noexcept;
+};
+
+class RenderProgramLibrary final {
+public:
+    static bool Create(std::span<const radray::byte> bytes, radray::unique_ptr<RenderProgramLibrary>& result);
+    RasterProgram* GetProgram(
+        radray::gpu::Device& device,
+        std::string_view name,
+        std::span<const radray::byte> external = {});
+
 private:
-    explicit RenderProgramLibrary(radray::vector<radray::byte> bytes):_bytes(std::move(bytes)) {}
+    explicit RenderProgramLibrary(radray::vector<radray::byte> bytes);
+
     radray::vector<radray::byte> _bytes;
     radray::vector<ShaderPackEntry> _entries;
-    radray::unordered_map<radray::string,radray::unique_ptr<RasterProgram>> _programs;
+    radray::unordered_map<radray::string, radray::unique_ptr<RasterProgram>> _programs;
 };
-}
+}  // namespace raynium

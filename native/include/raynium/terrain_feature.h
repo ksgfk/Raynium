@@ -1,59 +1,77 @@
 #pragma once
-#include <raynium/terrain_residency.h>
+
+#include <cstdint>
+#include <memory_resource>
+#include <span>
+
+#include <radray/gpu/types.h>
+#include <radray/runtime/mesh_draw_command.h>
+#include <radray/runtime/rdg.h>
+#include <radray/types.h>
 #include <raynium/frame_upload.h>
+#include <raynium/terrain_residency.h>
 
 namespace raynium {
-inline bool SubmitPreparedTerrainDirectDraws(radray::gpu::GraphicsCommandEncoder& encoder,
-    std::span<const radray::VisibleMeshDrawCommand> reps,const radray::PreparedMeshPassIndirectDraws& draws,
-    const radray::MeshPassSubmitArgs& bindings) noexcept {
-    static const radray::gpu::GpuDeviceCapabilities direct{};
-    return radray::SubmitMeshPassIndirectDraws(encoder,reps,draws,{},{},direct,bindings);
-}
+bool SubmitPreparedTerrainDirectDraws(
+    radray::gpu::GraphicsCommandEncoder& encoder,
+    std::span<const radray::VisibleMeshDrawCommand> reps,
+    const radray::PreparedMeshPassIndirectDraws& draws,
+    const radray::MeshPassSubmitArgs& bindings) noexcept;
 
-struct TerrainView {
-    explicit TerrainView(std::pmr::memory_resource& memory):uploads(&memory) {}
-    TerrainViewDrawData* draws{};
-    TerrainFrame frame;
-    std::pmr::vector<GeometryUpload> uploads;
-    radray::RDGBufferHandle constants,instances;
-    radray::array<radray::RDGBufferHandle,3> indirectByLayer;
-    const MeshPassResources* mesh{};
-    const radray::VertexBufferPool* vertexPool{};
-    const radray::VertexBufferPool* translucentVertexPool{};
-    const radray::IndexBufferPool* quadIndexPool{},*translucentIndexPool{};
-    const radray::gpu::GpuDeviceCapabilities* capabilities{};
-    bool useIndirect{};
-    uint32_t indirectLimit{};
-    uint32_t atlasWidth{},atlasHeight{};
-    radray::gpu::GpuBackend backend{};
-    radray::RDGBufferHandle Constants(radray::RDGBuilder&,uint32_t width,uint32_t height);
-    void Import(radray::RDGBuilder&,radray::gpu::GpuBackend);
+class TerrainView final {
+public:
+    explicit TerrainView(std::pmr::memory_resource& memory);
+
+    radray::RDGBufferHandle Constants(radray::RDGBuilder& graph, uint32_t width, uint32_t height);
+    void Import(radray::RDGBuilder& graph, radray::gpu::GpuBackend gpuBackend);
+
+    TerrainViewDrawData* Draws{};
+    TerrainFrame Frame;
+    std::pmr::vector<GeometryUpload> Uploads;
+    radray::RDGBufferHandle ConstantsBuffer;
+    radray::RDGBufferHandle Instances;
+    radray::array<radray::RDGBufferHandle, 3> IndirectByLayer;
+    const MeshPassResources* Mesh{};
+    const radray::VertexBufferPool* VertexPool{};
+    const radray::VertexBufferPool* TranslucentVertexPool{};
+    const radray::IndexBufferPool* QuadIndexPool{};
+    const radray::IndexBufferPool* TranslucentIndexPool{};
+    const radray::gpu::GpuDeviceCapabilities* Capabilities{};
+    bool UseIndirect{};
+    uint32_t IndirectLimit{};
+    uint32_t AtlasWidth{};
+    uint32_t AtlasHeight{};
+    radray::gpu::GpuBackend Backend{};
 };
-struct TerrainFeature {
-    TerrainView* view{};
-    uint32_t stage{};
-    radray::Rect scissor{};
-    radray::array<const rn_texture*,3> sources;
-    radray::array<uint32_t,3> mips{};
-    radray::array<radray::RDGTextureHandle,3> reads;
-    radray::RDGBufferHandle frameConstants;
+
+class TerrainFeature final {
+public:
     struct MaterialBinding {
-        const rn_texture* image;
-        rn_texture_sampling sampling{};
-        uint32_t flags{};
-        radray::RDGTextureHandle handle;
+        const rn_texture* Image{};
+        rn_texture_sampling Sampling{};
+        uint32_t Flags{};
+        radray::RDGTextureHandle Handle;
     };
-    radray::array<MaterialBinding,2> materials;
-    radray::RDGBufferSlice instanceSlice{};
-    radray::RDGBufferSlice indirectSlice{};
-    radray::gpu::ShaderParameterSet* constants{};
-    radray::gpu::ShaderParameterSet* material{};
-    radray::gpu::ShaderParameterSet* oit{};
-    bool active{};
-    bool Decode(std::span<const radray::byte>,std::span<TerrainView>,rn_renderer* owner,const radray::Rect&);
-    void Import(radray::RDGBuilder&,FrameTextureImports&);
-    void Declare(radray::RDGRasterPassBuilder&) const;
-    bool Prepare(radray::RDGPrepareContext&);
-    bool Record(radray::gpu::GraphicsCommandEncoder&) const;
+
+    bool Decode(std::span<const radray::byte> bytes, std::span<TerrainView> views, rn_renderer* owner, const radray::Rect& area);
+    void Import(radray::RDGBuilder& graph, FrameTextureImports& imports);
+    void Declare(radray::RDGRasterPassBuilder& pass) const;
+    bool Prepare(radray::RDGPrepareContext& ctx);
+    bool Record(radray::gpu::GraphicsCommandEncoder& enc) const;
+
+    TerrainView* View{};
+    uint32_t Stage{};
+    radray::Rect Scissor{};
+    radray::array<const rn_texture*, 3> Sources{};
+    radray::array<uint32_t, 3> Mips{};
+    radray::array<radray::RDGTextureHandle, 3> Reads;
+    radray::RDGBufferHandle FrameConstants;
+    radray::array<MaterialBinding, 2> Materials;
+    radray::RDGBufferSlice InstanceSlice{};
+    radray::RDGBufferSlice IndirectSlice{};
+    radray::gpu::ShaderParameterSet* Constants{};
+    radray::gpu::ShaderParameterSet* Material{};
+    radray::gpu::ShaderParameterSet* Oit{};
+    bool Active{};
 };
-}
+}  // namespace raynium

@@ -1,29 +1,30 @@
 #pragma once
-#include <radray/types.h>
+
+#include <cstdint>
+
 #include <radray/runtime/gpu_device.h>
-#include <raynium/bridge.h>
 #include <radray/runtime/rdg.h>
-#include <utility>
+#include <radray/types.h>
+#include <raynium/bridge.h>
 
 namespace raynium {
-void QueryDeviceInfo(radray::DeviceContext&,rn_device_info&);
 bool ValidSwapchainDesc(const rn_swapchain_desc& desc);
+
 class Swapchain final {
 public:
-    static bool Create(radray::DeviceContext&,const rn_swapchain_desc&,radray::unique_ptr<Swapchain>&);
-    bool Resize(const rn_swapchain_desc&);
-    bool IsBroken() const noexcept { return _broken; }
-    void MarkBroken() noexcept { _broken=true; }
+    static bool Create(radray::DeviceContext& runtime, const rn_swapchain_desc& desc, radray::unique_ptr<Swapchain>& out);
+    bool Resize(const rn_swapchain_desc& desc);
+    bool IsBroken() const noexcept;
+    void MarkBroken() noexcept;
     bool IsPresentable() const noexcept;
     bool Validate() const;
-    radray::gpu::SwapChain& Chain() const noexcept { return *_chain; }
+    radray::gpu::SwapChain& Chain() const noexcept;
+
 private:
-    Swapchain(radray::unique_ptr<radray::gpu::SwapChain> chain,uint64_t hwnd)
-        :_chain(std::move(chain)),_hwnd(hwnd) {}
+    Swapchain(radray::unique_ptr<radray::gpu::SwapChain> chain, uint64_t hwnd);
+
     radray::unique_ptr<radray::gpu::SwapChain> _chain;
     bool _broken{};
     uint64_t _hwnd{};
 };
-
-
-}
+}  // namespace raynium

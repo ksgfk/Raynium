@@ -22,8 +22,8 @@ final class NativeLibrary implements AutoCloseable {
             NativeManifest manifest = payload.manifest();
             logger.info("Raynium native loaded from {}: {}", payload.source(), payload.libraryPath());
             logger.info("Native ABI={} build={} RadRay={} dirty={} config={} CRT={} toolchain={}",
-                    abiVersion, manifest.buildId(), manifest.radrayCommit(), manifest.radrayDirty(),
-                    manifest.configuration(), manifest.crt(), manifest.toolchain());
+                        abiVersion, manifest.buildId(), manifest.radrayCommit(), manifest.radrayDirty(),
+                        manifest.configuration(), manifest.crt(), manifest.toolchain());
         } catch (RuntimeException | Error failure) {
             arena.close();
             throw failure;
@@ -33,14 +33,16 @@ final class NativeLibrary implements AutoCloseable {
     static String windowsLibraryPath(Path path) {
         String absolute = path.toAbsolutePath().normalize().toString();
         // The Path overload resolves toRealPath and strips the prefix before LoadLibrary.
-        if (absolute.startsWith("\\\\?\\")) return absolute;
+        if (absolute.startsWith("\\\\?\\"))
+            return absolute;
         return absolute.startsWith("\\\\")
-                ? "\\\\?\\UNC\\" + absolute.substring(2)
-                : "\\\\?\\" + absolute;
+            ? "\\\\?\\UNC\\" + absolute.substring(2)
+            : "\\\\?\\" + absolute;
     }
 
     NativeBindings bindings() {
-        if (closed) throw new IllegalStateException("Native library is closed");
+        if (closed)
+            throw new IllegalStateException("Native library is closed");
         return bindings;
     }
 

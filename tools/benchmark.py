@@ -17,6 +17,7 @@ import time
 from gpu_memory import GpuMemory
 
 ROOT = Path(__file__).resolve().parents[1]
+LAUNCH_SPEC_PATH = ROOT / 'build/native/launch-spec.json'
 DEFAULTS = {
     'outputDir': str(ROOT / 'build/benchmarks'), 'backend': 'd3d12',
     'warmupSeconds': 20, 'startupTimeoutSeconds': 180, 'shutdownTimeoutSeconds': 60,
@@ -33,6 +34,59 @@ def read_json(path):
 
 def write_json(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+
+def write_raynium_config(game_dir, *, backend, rhi_validation, terrain_submission='auto'):
+    config_path = Path(game_dir) / 'config/raynium.json'
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(config_path, {
+        'backend': backend,
+        'rhiValidation': bool(rhi_validation),
+        'terrainSubmission': terrain_submission,
+    })
+    return config_path
+
+
+def resolve_mod_classpath(spec, include_raynium):
+    harness_paths = list(spec['mods']['rayniumHarness'])
+    if include_raynium:
+        raynium_paths = list(spec['mods']['raynium'])
+        classpath = list(spec['baseClasspath']) + raynium_paths + harness_paths
+        groups = os.pathsep.join(raynium_paths) + (os.pathsep * 2) + os.pathsep.join(harness_paths)
+    else:
+        classpath = list(spec['baseClasspath']) + harness_paths
+        groups = os.pathsep.join(harness_paths)
+    return classpath, groups
+
+
+def write_classpath_argfile(path, classpath):
+    joined = os.pathsep.join(classpath).replace('\\', '\\\\').replace('"', '\\"')
+    Path(path).write_text(f'-cp\n"{joined}"\n', encoding='utf-8')
+
+
+def build_jvm_launch_command(spec, *, include_raynium, native_config=None, extra_jvm_args=(),
+                             extra_system_properties=None, extra_program_args=(), classpath_argfile=None):
+    if spec.get('schemaVersion') != 1:
+        raise RuntimeError(f"Unsupported launch-spec schemaVersion: {spec.get('schemaVersion')}")
+    classpath, groups = resolve_mod_classpath(spec, include_raynium)
+    system_properties = dict(spec.get('commonSystemProperties', {}))
+    system_properties['fabric.classPathGroups'] = groups
+    if include_raynium and native_config is not None:
+        system_properties['raynium.native.dir'] = spec['nativeStageDirs'][native_config]
+    if extra_system_properties:
+        system_properties.update(extra_system_properties)
+    command = [spec['javaExecutable'], *spec.get('commonJvmArgs', ()), *extra_jvm_args]
+    for key, value in system_properties.items():
+        command.append(f'-D{key}={value}')
+    if classpath_argfile is not None:
+        write_classpath_argfile(classpath_argfile, classpath)
+        command.append('@' + str(classpath_argfile))
+    else:
+        command.extend(['-cp', os.pathsep.join(classpath)])
+    command.append(spec['mainClass'])
+    command.extend(spec.get('commonProgramArgs', ()))
+    command.extend(extra_program_args)
+    return command
 
 
 def number(value, name, minimum, maximum):
@@ -72,7 +126,7 @@ def load_config(path, capture_override=None, *, profiler_override=None, renderer
             raise ValueError(f'{key} does not exist: {config[key]}')
     if config['backend'] not in ('d3d12', 'vulkan'):
         raise ValueError('backend must be d3d12 or vulkan')
-    if config['terrainSubmission'] not in ('auto','direct','indirect'):
+    if config['terrainSubmission'] not in ('auto', 'direct', 'indirect'):
         raise ValueError('terrainSubmission must be auto, direct or indirect')
     if config['renderer'] not in ('raynium', 'vanilla'):
         raise ValueError('renderer must be raynium or vanilla')
@@ -157,11 +211,41 @@ def gradle_command(*arguments):
             '--no-configuration-cache', '--no-daemon', *arguments]
 
 
-def gradle_properties(config):
-    return ['-PnativeConfig=Release', '-PnativeProfiler=' + str(config.get('profilerEnabled', False)).lower(), '-PrhiValidation=false',
-            '-PcaptureTracyImages=false', '-PrhiBackend=' + config['backend'],
-            '-PterrainSubmission=' + config['terrainSubmission'],
-            '-PnativePython=' + sys.executable]
+def build_gradle_args(config):
+    args = ['harnessClasses']
+    if config.get('renderer', 'raynium') == 'raynium':
+        args.extend(['classes', 'clientClasses', 'nativeStageRelease'])
+    args.append('writeLaunchSpec')
+    if config.get('profilerEnabled', False):
+        args.append('-Praynium.build.profiler=true')
+    return args
+
+
+def build_benchmark_command(spec, config, session, run, *, classpath_argfile=None):
+    is_raynium = config['renderer'] == 'raynium'
+    extra_jvm_args = ['-da']
+    if config.get('jfrEnabled', False):
+        extra_jvm_args.append(
+            '-XX:StartFlightRecording=name=Raynium,settings=profile,disk=true,dumponexit=true,maxsize=1g,filename='
+            + str(session / 'session.jfr')
+        )
+    extra_system_properties = {
+        'org.lwjgl.util.NoChecks': 'true',
+        'org.lwjgl.util.NoFunctionChecks': 'true',
+        'raynium.benchmark.config': str(session / 'benchmark.json'),
+    }
+    extra_program_args = ['--gameDir', str(run), '--username', 'RayniumTest', '--quickPlaySingleplayer', 'benchmark']
+    if not is_raynium:
+        extra_program_args.extend(['--graphicsBackend', 'VULKAN'])
+    return build_jvm_launch_command(
+        spec,
+        include_raynium=is_raynium,
+        native_config='Release' if is_raynium else None,
+        extra_jvm_args=extra_jvm_args,
+        extra_system_properties=extra_system_properties,
+        extra_program_args=extra_program_args,
+        classpath_argfile=classpath_argfile,
+    )
 
 
 def terminate_tree(process):
@@ -245,6 +329,8 @@ def prepare_run(config, session):
     })
     (run / 'options.txt').write_text(''.join(f'{key}:{value}\n' for key, value in options.items()), encoding='utf-8')
     shutil.copyfile(run / 'options.txt', session / 'options.txt')
+    if config.get('renderer', 'raynium') == 'raynium':
+        write_raynium_config(run, backend=config['backend'], rhi_validation=False, terrain_submission=config['terrainSubmission'])
     write_json(session / 'benchmark.json', config)
     return run
 
@@ -271,7 +357,7 @@ def check_payload(session, profiler):
 
 def check_result(session, game_code, capture_code, jfr_enabled, profiler=True, renderer='raynium', backend='d3d12'):
     if game_code != 0 or capture_code != 0:
-        raise RuntimeError(f'Process failed: game/Gradle={game_code}, Tracy={capture_code}')
+        raise RuntimeError(f'Process failed: game={game_code}, Tracy={capture_code}')
     client = read_json(session / 'client-result.json')
     if client.get('status') != 'completed' or client.get('routeNativeFrames', 0) <= 0:
         raise RuntimeError('Client did not complete native benchmark: ' + client.get('message', 'missing completion'))
@@ -283,7 +369,7 @@ def check_result(session, game_code, capture_code, jfr_enabled, profiler=True, r
         raise RuntimeError('Native shutdown failed; inspect game log')
     for marker in ('Serialization errors:', 'Failed to decode value'):
         if marker in game_log:
-            raise RuntimeError('Benchmark scene has invalid Minecraft input: '+marker)
+            raise RuntimeError('Benchmark scene has invalid Minecraft input: ' + marker)
     native_log = (session / 'game.log').read_text(encoding='utf-8', errors='replace') if (session / 'game.log').exists() else ''
     expected = 'Vulkan' if renderer == 'vanilla' else 'Raynium'
     if f'Using graphics backend {expected},' not in game_log:
@@ -333,15 +419,15 @@ def run_benchmark(config):
     try:
         print('Opening source world and preparing isolated options...', flush=True)
         run = prepare_run(config, session)
-        properties = gradle_properties(config)
-        print('Building Release native payload and Java client (build.log)...', flush=True)
+        print('Building Release native payload, Java classes and launch spec (build.log)...', flush=True)
         with (session / 'build.log').open('wb') as log:
-            build = subprocess.Popen(gradle_command(*(['nativeStage'] if config['renderer'] == 'raynium' else []), 'classes', 'clientClasses', *properties),
+            build = subprocess.Popen(gradle_command(*build_gradle_args(config)),
                                      cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, **process_options())
             if build.wait(timeout=1800) != 0:
                 raise RuntimeError('Build failed; see build.log (dependencies must be prepared explicitly)')
         if config['renderer'] == 'raynium':
             check_payload(session, profiler)
+        spec = read_json(LAUNCH_SPEC_PATH)
         environment = os.environ.copy()
         if profiler:
             with socket.socket() as reservation:
@@ -353,11 +439,7 @@ def run_benchmark(config):
             environment.pop(name, None)
         environment['VK_LOADER_LAYERS_DISABLE'] = '~all~'
         summary['vulkanLayerFilter'] = environment['VK_LOADER_LAYERS_DISABLE']
-        command = gradle_command('runClientNative' if config['renderer'] == 'raynium' else 'runClientReference', '-x', 'nativeStage', *properties,
-                                 '-PgameUsername=RayniumTest',
-                                 '-PbenchmarkRunDir=' + str(run), '-PbenchmarkConfig=' + str(session / 'benchmark.json'))
-        if config['jfrEnabled']:
-            command.append('-PjfrFile=' + str(session / 'session.jfr'))
+        command = build_benchmark_command(spec, config, session, run, classpath_argfile=session / 'classpath.args')
         write_json(session / 'commands.json', {'game': command, 'capture': [config['tracyCapture'], '-a', '127.0.0.1',
                                                                         '-p', str(port), '-o', 'session.tracy'] if profiler else None})
         print(f'Starting {config["renderer"]}; profiler={profiler}...', flush=True)
@@ -366,7 +448,7 @@ def run_benchmark(config):
             if profiler:
                 capture = subprocess.Popen([config['tracyCapture'], '-a', '127.0.0.1', '-p', str(port), '-o', 'session.tracy'],
                                            cwd=session, stdout=capture_log, stderr=subprocess.STDOUT, **process_options())
-            game = subprocess.Popen(command, cwd=ROOT, env=environment, stdout=game_log,
+            game = subprocess.Popen(command, cwd=run, env=environment, stdout=game_log,
                                     stderr=subprocess.STDOUT, **process_options())
             deadline = time.monotonic() + config['startupTimeoutSeconds'] + config['warmupSeconds'] + config['route'][-1]['seconds'] + config['shutdownTimeoutSeconds']
             connected = not profiler

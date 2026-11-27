@@ -1,9 +1,5 @@
 accessWidener v2 official
-accessible class net/minecraft/client/renderer/texture/SpriteContents$AnimatedTexture
-accessible class net/minecraft/client/renderer/texture/SpriteContents$FrameInfo
-accessible field net/minecraft/client/renderer/texture/SpriteContents$AnimatedTexture frames Ljava/util/List;
 accessible class com/mojang/blaze3d/vertex/UberGpuBuffer$StagedAllocationEntry
-
 accessible field com/mojang/renderpearl/frontend/FrontendGpuSurface hasImageAcquired Z
 accessible field com/mojang/renderpearl/frontend/FrontendGpuSurface hasBlittedTexture Z
 accessible field com/mojang/renderpearl/frontend/FrontendRenderPass backend Lcom/mojang/renderpearl/backend/api/RenderPassBackend;

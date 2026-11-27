@@ -1,11 +1,13 @@
 package dev.raynium.bridge;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import static org.junit.jupiter.api.Assertions.*;
 
 class NativeManifestTest {
     private JsonObject manifest(String configuration) {
@@ -21,7 +23,7 @@ class NativeManifestTest {
         object.addProperty("radrayDirty", false);
         object.addProperty("toolchain", "MSVC-test");
         JsonArray files = new JsonArray(1);
-        for (String name : new String[]{"rayniumruntime.dll"}) {
+        for (String name : new String[] {"rayniumruntime.dll"}) {
             JsonObject entry = new JsonObject();
             entry.addProperty("path", name);
             entry.addProperty("size", 1);
@@ -36,14 +38,16 @@ class NativeManifestTest {
         return NativeManifest.parse(object.toString().getBytes(StandardCharsets.UTF_8));
     }
 
-    @ParameterizedTest @ValueSource(strings = {"Debug", "Release"})
+    @ParameterizedTest
+    @ValueSource(strings = {"Debug", "Release"})
     void acceptsMatchingCrtAndCompletePayload(String configuration) {
         var parsed = parse(manifest(configuration));
         assertEquals("rayniumruntime.dll", parsed.library().path());
         assertEquals(configuration.equals("Debug") ? "MTd" : "MT", parsed.crt());
     }
 
-    @ParameterizedTest @ValueSource(strings = {"schema", "old-abi", "MD", "MDd", "MTd", "debug-mt", "missing", "extra", "path", "hash"})
+    @ParameterizedTest
+    @ValueSource(strings = {"schema", "old-abi", "MD", "MDd", "MTd", "debug-mt", "missing", "extra", "path", "hash"})
     void rejectsIncompatibleOrUnsafePayload(String mutation) {
         var object = manifest("Release");
         var files = object.getAsJsonArray("files");

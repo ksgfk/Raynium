@@ -37,7 +37,8 @@ public final class NativeLibraryLocator {
         Path sourceDirectory;
         String source;
         if (development != null) {
-            if (development.isBlank()) throw new IOException("raynium.native.dir is empty");
+            if (development.isBlank())
+                throw new IOException("raynium.native.dir is empty");
             sourceDirectory = Path.of(development).toAbsolutePath().normalize();
             source = "development directory " + sourceDirectory;
             if (!Files.isRegularFile(sourceDirectory.resolve("native-manifest.json"))) {
@@ -54,7 +55,8 @@ public final class NativeLibraryLocator {
             }
         } else {
             Optional<Path> embedded = mod.findPath("natives/windows-x86_64/native-manifest.json");
-            if (embedded.isEmpty()) return Optional.empty();
+            if (embedded.isEmpty())
+                return Optional.empty();
             sourceDirectory = embedded.get().getParent();
             source = "Raynium mod JAR";
         }
@@ -100,9 +102,7 @@ public final class NativeLibraryLocator {
 
     private void verifyCache(Path directory, NativeManifest manifest, String content) throws IOException {
         Path file = directory.resolve(manifest.library().path());
-        if (Files.isSymbolicLink(directory) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)
-                || Files.size(file) != manifest.library().size() || !sha256(file).equals(manifest.library().sha256())
-                || !sha256(directory.resolve("native-manifest.json")).equals(content)) {
+        if (Files.isSymbolicLink(directory) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) || Files.size(file) != manifest.library().size() || !sha256(file).equals(manifest.library().sha256()) || !sha256(directory.resolve("native-manifest.json")).equals(content)) {
             throw new IOException("Native cache is incomplete or changed: " + directory + "; remove it only after all clients have stopped");
         }
     }
@@ -115,20 +115,24 @@ public final class NativeLibraryLocator {
             int read;
             while ((read = input.read(buffer)) != -1) {
                 count += read;
-                if (count > entry.size()) throw new IOException("Native DLL is larger than its manifest: " + source);
+                if (count > entry.size())
+                    throw new IOException("Native DLL is larger than its manifest: " + source);
                 output.write(buffer, 0, read);
             }
-            if (count != entry.size()) throw new IOException("Native DLL size mismatch: " + source);
+            if (count != entry.size())
+                throw new IOException("Native DLL size mismatch: " + source);
         }
     }
 
     private byte[] readSmallFile(Path path) throws IOException {
         long size = Files.size(path);
-        if (size > 1024 * 1024) throw new IOException("Native metadata exceeds 1 MiB: " + path);
-        byte[] bytes = new byte[(int) size];
+        if (size > 1024 * 1024)
+            throw new IOException("Native metadata exceeds 1 MiB: " + path);
+        byte[] bytes = new byte[(int)size];
         try (var input = new DataInputStream(Files.newInputStream(path))) {
             input.readFully(bytes);
-            if (input.read() != -1) throw new IOException("Native metadata changed while reading: " + path);
+            if (input.read() != -1)
+                throw new IOException("Native metadata changed while reading: " + path);
         }
         return bytes;
     }
@@ -138,7 +142,8 @@ public final class NativeLibraryLocator {
         try (InputStream input = Files.newInputStream(path)) {
             byte[] buffer = new byte[64 * 1024];
             int read;
-            while ((read = input.read(buffer)) != -1) checksum.update(buffer, 0, read);
+            while ((read = input.read(buffer)) != -1)
+                checksum.update(buffer, 0, read);
         }
         return HexFormat.of().formatHex(checksum.digest());
     }

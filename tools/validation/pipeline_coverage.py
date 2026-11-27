@@ -12,11 +12,11 @@ from shader_pack import verify_shader_pack
 JAVA = 'src/client/java/dev/raynium/client/'
 IMMEDIATE_JAVA = [JAVA+'renderpearl/RayniumRenderPassBackend.java', JAVA+'renderpearl/RayniumPrograms.java']
 IMMEDIATE_NATIVE = ['native/src/immediate_pass.cpp', 'native/src/immediate_draw.cpp']
-TERRAIN_JAVA = [JAVA+'mixin/TerrainAnchorMixin.java', JAVA+'terrain/RetainedTerrain.java']
+TERRAIN_JAVA = [JAVA+'mixin/terrain/TerrainAnchorMixin.java', JAVA+'terrain/RetainedTerrain.java']
 TERRAIN_NATIVE = ['native/src/terrain_feature.cpp', 'native/src/terrain_residency.cpp', 'native/src/terrain_draw.cpp']
 MODEL_JAVA = [JAVA+'world/RetainedModelManager.java', JAVA+'world/ModelFastTrack.java']
 PARTICLE_JAVA = [JAVA+'world/ParticleFastTrack.java']
-WORLD_NATIVE = ['native/src/model_mesh_registry.cpp', 'native/src/world_features.cpp']
+WORLD_NATIVE = ['native/src/static_geometry_registry.cpp', 'native/src/world_features.cpp']
 TERRAIN_PROGRAMS = ['terrain','terrain_cutout','terrain_translucent','terrain_oit_bounds','terrain_oit_transmittance','terrain_oit_accumulate']
 
 

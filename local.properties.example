@@ -1,0 +1,18 @@
+# Machine-local environment overrides for Gradle and helper scripts.
+# Copy this file to local.properties (git-ignored) and adjust values as needed.
+
+# Optional HTTP(S) proxy URL used by Gradle and tools/fetch_radray.py.
+# Leave unset or blank to connect directly.
+# proxy=http://127.0.0.1:10808
+
+# Python executable used by Gradle native/shader tasks.
+python=python
+
+# Parallel job count for CMake/Ninja native builds.
+parallel=8
+
+# Optional local RadRay checkout directory override.
+# radraySourceDir=
+
+# Default game directory for interactive loom runClient* tasks.
+gameRunDir=run
