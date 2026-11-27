@@ -9,7 +9,7 @@ final class TerrainFixture extends NativeRenderer.Frame {
     record Mesh(long id,byte[] vertices,int vertexCount,int layer) {}
     record Index(long meshId,int[] values) {}
     record Visible(long mesh,int mask,int sortKey,int first,int count) {}
-    record Instance(int x,int y,int z,float visibility) {}
+    record Instance(int x,int y,int z,int fadeStartMs) {}
     List<Mesh> meshes=List.of();
     List<Index> indices=List.of();
     List<Visible> visible=List.of();
@@ -33,7 +33,7 @@ final class TerrainFixture extends NativeRenderer.Frame {
                 for(var index:indices) buffer.indexDirect(index.meshId,scratch.allocateFrom(ValueLayout.JAVA_INT,index.values),index.values.length,scratch);
             }
             for(var item:visible) buffer.visible(item.mesh,item.mask,item.sortKey,item.first,item.count);
-            for(var item:instances) buffer.instance(item.x,item.y,item.z,item.visibility);
+            for(var item:instances) buffer.instance(item.x,item.y,item.z,item.fadeStartMs);
             for(long id:removedMeshes) buffer.removeMesh(id);
             return buffer.finish(this);
         } finally { for(var payload:payloads) payload.releaseVertices(); }

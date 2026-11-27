@@ -18,7 +18,7 @@ class TerrainResidencyTest {
     private static SectionPayload mesh(int bytes) { return new SectionPayload(1,new MeshPayload(1,ByteBuffer.allocate(Math.max(112,bytes/112*112)))); }
     private static TerrainCapture.Buffer capture() { var c=new TerrainCapture.Buffer(); c.anisotropy=1; c.epoch=1; return c; }
     private static void put(TerrainCapture.Buffer c,int slot,SectionPayload p,int x,int distance,int mask) {
-        c.put(slot,p,x,0,0,1,mask,TerrainCapture.distanceKey(distance)); c.finish(slot+1);
+        c.put(slot,p,x,0,0,0,mask,TerrainCapture.distanceKey(distance)); c.finish(slot+1);
     }
     private static MemorySegment descriptor(NativeFrameBuffer frame) { return frame.finish(new NativeRenderer.Frame()); }
     private static int count(NativeFrameBuffer frame,int array) { return descriptor(frame).get(JAVA_INT,64+array*4L); }
@@ -327,7 +327,7 @@ class TerrainResidencyTest {
             assertFalse(first.hasData());
             var next=water.indices=water.copyIndices(values,4);
             TerrainCapture.recordDirtyIndices(section);
-            c.fastReused=true;
+            c.fastReused=true; c.fadeNowMs=12400; c.fadeDurationMs=750;
             residency.prepare(c,frame,16,17,true);
             residency.stageCommit().submitted().run();
             assertSame(next,c.indices[0]);
@@ -375,7 +375,7 @@ class TerrainResidencyTest {
             var water=new MeshPayload(1,ByteBuffer.allocate(112),2);
             var idx1=indices(water,0,1,2,2,3,0); water.indices=idx1;
             var section=new SectionPayload(1,solid,water);
-            var c=capture(); put(c,0,section,0,1,0x010001); c.visibility[0]=0.5f;
+            var c=capture(); put(c,0,section,0,1,0x010001); c.fadeStart[0]=12345;
             // Frame 1: full prepare + commit establishes cached visible & instances.
             residency.prepare(c,frame,16,17,true);
             assertEquals(0,residency.reuseFlags());
@@ -387,7 +387,7 @@ class TerrainResidencyTest {
             residency.commit();
 
             // Frame 2: steady reuse sets both REUSE_VISIBLE and REUSE_INSTANCES with 0 visible/instance writes.
-            c.fastReused=true; c.instancesChanged=false;
+            c.fastReused=true;
             residency.prepare(c,frame,16,17,true);
             assertEquals(NativeRenderer.REUSE_VISIBLE|NativeRenderer.REUSE_INSTANCES,residency.reuseFlags());
             assertEquals(0,count(frame,0)); assertEquals(0,count(frame,1));
@@ -398,9 +398,8 @@ class TerrainResidencyTest {
             assertEquals(2,residency.effectiveVisibleCount());
             residency.commit();
 
-            // Frame 2b: no-op fading update (same visibility bits) still reuses both visible & instances.
-            c.fastReused=true; c.instancesChanged=true; c.visibility[0]=0.5f;
-            c.updatedFadingSlots.clear(); c.updatedFadingSlots.add(0);
+            // Clock and duration are view constants, including disabling the fade mid-flight.
+            c.fadeNowMs=12720; c.fadeDurationMs=0;
             residency.prepare(c,frame,16,17,true);
             assertEquals(NativeRenderer.REUSE_VISIBLE|NativeRenderer.REUSE_INSTANCES,residency.reuseFlags());
             assertEquals(0,count(frame,3)); assertEquals(0,count(frame,4));
@@ -409,23 +408,22 @@ class TerrainResidencyTest {
             assertEquals(instances,descriptor(frame).get(JAVA_LONG,304));
             residency.commit();
 
-            // Frame 3: fading slot update sets REUSE_VISIBLE only and advances instancesVersion.
-            c.fastReused=true; c.instancesChanged=true; c.visibility[0]=0.85f;
-            c.updatedFadingSlots.clear(); c.updatedFadingSlots.add(0);
+            // A new upload timestamp on a dirty section changes only its instance slot.
+            c.fastReused=false; c.fadeStart[0]=0x8000_0234;
             residency.prepare(c,frame,16,17,true);
-            assertEquals(NativeRenderer.REUSE_VISIBLE,residency.reuseFlags());
-            assertEquals(0,count(frame,3)); assertEquals(1,count(frame,4));
+            assertEquals(0,residency.reuseFlags());
+            assertEquals(2,count(frame,3)); assertEquals(1,count(frame,4));
             long fadedInstances=descriptor(frame).get(JAVA_LONG,304);
             assertEquals(visible,descriptor(frame).get(JAVA_LONG,288));
             assertEquals(origins,descriptor(frame).get(JAVA_LONG,296));
             assertTrue(fadedInstances>instances);
-            assertEquals(0.85f,frame.instanceSegment().get(JAVA_FLOAT,12));
+            assertEquals(0x8000_0234,frame.instanceSegment().get(JAVA_INT,12));
             residency.commit();
 
             // Frame 4: dirty translucent resort updates ONLY index buffer while keeping REUSE_VISIBLE | REUSE_INSTANCES.
             var idx2=indices(water,3,2,1,1,0,3); water.indices=idx2;
             TerrainCapture.recordDirtyIndices(section);
-            c.fastReused=true; c.instancesChanged=false;
+            c.fastReused=true;
             residency.prepare(c,frame,16,17,true);
             assertEquals(NativeRenderer.REUSE_VISIBLE|NativeRenderer.REUSE_INSTANCES,residency.reuseFlags());
             assertEquals(1,count(frame,0)); assertEquals(0,count(frame,1));
@@ -469,10 +467,17 @@ class TerrainResidencyTest {
             assertEquals(0,count(frame,4));
             assertEquals(b.instanceSlot,frame.visibleSegment().get(JAVA_INT,16));
             residency.commit();
-            c.fastReused=true; c.instancesChanged=true; c.updatedFadingSlots.add(0); c.visibility[0]=0.25f;
+            c.fastReused=false; c.fadeStart[0]=12345;
             residency.prepare(c,frame,16,17,true);
             assertEquals(1,count(frame,4));
             assertEquals(b.instanceSlot,descriptor(frame).get(ADDRESS,312).reinterpret(4).get(JAVA_INT,0));
+            long updated=descriptor(frame).get(JAVA_LONG,304);
+            residency.commit();
+            c.finish(1);
+            residency.prepare(c,frame,16,17,true);
+            assertEquals(0,count(frame,4));
+            assertEquals(updated,descriptor(frame).get(JAVA_LONG,304));
+            assertEquals(updated,descriptor(frame).get(JAVA_LONG,328));
         }
     }
 
@@ -488,7 +493,7 @@ class TerrainResidencyTest {
             assertTrue(v1>0 && o1>0 && i1>0);
             residency.commit();
 
-            // Non-canReuse full rescan with identical visible set, origins and visibility keeps all three versions.
+            // Non-canReuse full rescan with identical visible set, origins and fade starts keeps all three versions.
             c.fastReused=false;
             residency.prepare(c,frame,16,17,false);
             assertEquals(0,residency.reuseFlags());
@@ -497,8 +502,8 @@ class TerrainResidencyTest {
             assertEquals(i1,descriptor(frame).get(JAVA_LONG,304));
             residency.commit();
 
-            // Changing only visibility advances instancesVersion without disturbing visibleVersion or originsVersion.
-            c.visibility[0]=0.5f;
+            // Changing only the fade start advances instancesVersion without disturbing visibleVersion or originsVersion.
+            c.fadeStart[0]=12345;
             residency.prepare(c,frame,16,17,false);
             long i2=descriptor(frame).get(JAVA_LONG,304);
             assertEquals(v1,descriptor(frame).get(JAVA_LONG,288));
@@ -516,13 +521,15 @@ class TerrainResidencyTest {
             assertTrue(i3>i2);
             residency.commit();
 
-            // Dropping one visible item advances all three versions.
+            // Hiding a resident slot changes only the visible list.
             c.finish(1);
             residency.prepare(c,frame,16,17,false);
             long v2=descriptor(frame).get(JAVA_LONG,288);
             long o3=descriptor(frame).get(JAVA_LONG,296);
             long i4=descriptor(frame).get(JAVA_LONG,304);
-            assertTrue(v2>v1 && o3>o2 && i4>i3);
+            assertTrue(v2>v1);
+            assertEquals(o2,o3);
+            assertEquals(i3,i4);
             residency.commit();
 
             // Reset clears versions so next epoch assigns fresh versions even on empty capture.

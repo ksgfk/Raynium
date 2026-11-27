@@ -331,7 +331,7 @@ void WithTerrainViews(Test test) {
     meshLayout.maximum[0]=meshLayout.maximum[1]=meshLayout.maximum[2]=1.0f;
     rn_mesh_update meshUpdate{1,quadVertices.data(),4,RN_MATERIAL_OPAQUE,&meshLayout};
     rn_visible_item visibleItem{1,UINT32_MAX,0,0,1};
-    rn_instance initialInstance{{0,0,0},1.0f};
+    rn_instance initialInstance{{0,0,0},0u};
 
     auto makeView=[&](uint64_t seq,uint64_t visVer,uint64_t origVer,uint64_t instVer,const rn_instance* instPtr,bool withMesh) {
         rn_terrain_view_desc view{};
@@ -376,11 +376,11 @@ TEST(TerrainResidencyCache, NonReuseRescanWithMatchingVersionsHitsCacheAndPromot
         EXPECT_FALSE(frame.persistentIndirect[0]);
 
         // Frame 2: non-reuse rescan with identical versions hits MatchesVisible/MatchesOrigins/MatchesInstances and skips copying instances.
-        rn_instance sentinelInstance{{999,999,999},0.25f};
+        rn_instance sentinelInstance{{999,999,999},123u};
         ASSERT_TRUE(runFrame(makeView(2,10,10,10,&sentinelInstance,false),frame));
         ASSERT_EQ(residency.View(0).instances.size(),1u);
         EXPECT_EQ(residency.View(0).instances[0].origin[0],0);
-        EXPECT_FLOAT_EQ(residency.View(0).instances[0].visibility,1.0f);
+        EXPECT_EQ(residency.View(0).instances[0].fade_start_ms,0u);
         EXPECT_EQ(residency.View(0).instanceBuffer.stableFrames,1u);
         EXPECT_EQ(residency.View(0).argumentBuffers[0].stableFrames,1u);
 
@@ -392,16 +392,20 @@ TEST(TerrainResidencyCache, NonReuseRescanWithMatchingVersionsHitsCacheAndPromot
         EXPECT_TRUE(frame.uploadIndirect[0]);
 
         // Frame 4: steady reuse avoids uploading both buffers.
-        ASSERT_TRUE(runFrame(makeView(4,10,10,10,&sentinelInstance,false),frame));
+        auto steady=makeView(4,10,10,10,&sentinelInstance,false);
+        steady.fade_now_ms=0x80000177u; steady.fade_duration_ms=750u;
+        ASSERT_TRUE(runFrame(steady,frame));
+        EXPECT_EQ(frame.parameters.fade_now_ms,steady.fade_now_ms);
+        EXPECT_EQ(frame.parameters.fade_duration_ms,750u);
         EXPECT_TRUE(frame.persistentInstances);
         EXPECT_FALSE(frame.uploadInstances);
         EXPECT_TRUE(frame.persistentIndirect[0]);
         EXPECT_FALSE(frame.uploadIndirect[0]);
 
-        // Frame 5: visibility-only change bumps instances_version -> updates instances while keeping indirect arguments promoted.
-        rn_instance fadedInstance{{0,0,0},0.5f};
+        // Frame 5: fade start change bumps instances_version -> updates instances while keeping indirect arguments promoted.
+        rn_instance fadedInstance{{0,0,0},0x80000234u};
         ASSERT_TRUE(runFrame(makeView(5,10,10,20,&fadedInstance,false),frame));
-        EXPECT_FLOAT_EQ(residency.View(0).instances[0].visibility,0.5f);
+        EXPECT_EQ(residency.View(0).instances[0].fade_start_ms,0x80000234u);
         EXPECT_FALSE(frame.persistentInstances);
         EXPECT_TRUE(frame.persistentIndirect[0]);
         EXPECT_FALSE(frame.uploadIndirect[0]);
@@ -442,20 +446,20 @@ TEST(TerrainResidencyCache, SparseInstancesFollowFirstVisiblePageInEachLayer) {
         view.visible=nullptr; view.visible_count=0;
         view.flags|=RN_FRAME_REUSE_VISIBLE;
         view.instance_base_version=1; view.instances_version=2;
-        view.instance_count=1; instances[0].visibility=0.25f;
+        view.instance_count=1; instances[0].fade_start_ms=123u;
         ASSERT_TRUE(runFrame(view,frame));
         EXPECT_EQ(buffer.Get(),frame.persistentInstances.Get());
-        EXPECT_FLOAT_EQ(residency.View(0).instances[7].visibility,0.25f);
-        EXPECT_FLOAT_EQ(residency.View(0).instances[3].visibility,1.f);
+        EXPECT_EQ(residency.View(0).instances[7].fade_start_ms,123u);
+        EXPECT_EQ(residency.View(0).instances[3].fade_start_ms,0u);
         EXPECT_FALSE(runFrame(view,frame)); // The previous base was consumed.
         view.instance_base_version=2; view.instance_capacity=512;
         ASSERT_TRUE(runFrame(view,frame));
         EXPECT_NE(buffer.Get(),frame.persistentInstances.Get());
-        EXPECT_FLOAT_EQ(residency.View(0).instances[3].visibility,1.f);
+        EXPECT_EQ(residency.View(0).instances[3].fade_start_ms,0u);
     });
 }
 
-TEST(TerrainResidencyCache, ScatteredFadesAndNewTailShareOnePackedUpload) {
+TEST(TerrainResidencyCache, ScatteredUpdatesAndNewTailShareOnePackedUpload) {
     WithTerrainViews([](TerrainResidency&,auto makeView,auto runFrame,rn_instance initial) {
         constexpr uint32_t count=2900;
         constexpr uint32_t capacity=10*count;
@@ -964,7 +968,7 @@ TEST(TerrainHotSlotFastPath, CrossingMaskAndContiguousArgumentsMatchReference) {
     view.camera_block[0] = 0; view.camera_block[1] = 64; view.camera_block[2] = 0;
     view.camera_fraction[0] = 0.2f; view.camera_fraction[1] = 0.2f; view.camera_fraction[2] = 0.5f;
     // Distant chunk at X = 160, Y = 64 (same Y slab -> moving Y across 64.5 must change the cached mask).
-    const rn_instance inst{{160, 64, 0}, 1.0f};
+    const rn_instance inst{{160, 64, 0}, 0u};
     const radray::array<int32_t, 3> camBlock{view.camera_block[0], view.camera_block[1], view.camera_block[2]};
     const radray::array<double, 3> fracEye{view.camera_fraction[0], view.camera_fraction[1], view.camera_fraction[2]};
     TerrainEyeCrossingCache crossing{camBlock,fracEye,{},true};
@@ -974,7 +978,7 @@ TEST(TerrainHotSlotFastPath, CrossingMaskAndContiguousArgumentsMatchReference) {
     const uint32_t refMask = TerrainVisibleMask(layout, {{}, true}, view, {&inst, 1});
     EXPECT_EQ(hotMask, refMask);
 
-    const rn_instance distant{{160, 256, -144}, 1.0f};
+    const rn_instance distant{{160, 256, -144}, 0u};
     TerrainEyeCrossingCache empty{camBlock, fracEye, {}, true};
     empty.Capture(item, hot, {&distant, 1});
     EXPECT_TRUE(empty.crossingItems.empty());
@@ -990,14 +994,14 @@ TEST(TerrainHotSlotFastPath, CrossingMaskAndContiguousArgumentsMatchReference) {
     for(double x : {-200.0,-2.01,-2.0,0.5,16.0,18.0,18.01,200.0}) {
         const radray::array<double,3> eye{x,0.5,0.5};
         TerrainEyeCrossingCache reference{camBlock,eye,{},true},optimized{camBlock,eye,{},true};
-        const rn_instance local{{0,64,0},1};
+        const rn_instance local{{0,64,0},0u};
         EXPECT_EQ(reference.Capture(item,hot,{&local,1}),optimized.Capture(item,bounded,{&local,1}));
         EXPECT_EQ(reference.crossingItems.size(),optimized.crossingItems.size());
     }
 
     for(int diff:{INT32_MIN,-5,-4,-3,-2,0,17,18,19,20,21,INT32_MAX}) {
         const radray::array<int32_t,3> block{diff,diff,diff};
-        const rn_instance local{{0,0,0},1};
+        const rn_instance local{{0,0,0},0u};
         for(double f:{-1.51,-1.5,0.0,1.5,1.51}) {
             const radray::array<double,3> eye{f,f,f};
             TerrainEyeCrossingCache reference{block,eye,{},true},optimized{block,eye,{},true};

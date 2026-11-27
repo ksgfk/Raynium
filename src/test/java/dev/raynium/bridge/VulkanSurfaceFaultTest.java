@@ -252,7 +252,7 @@ class VulkanSurfaceFaultTest {
                     var frame = NativeTestSupport.solidFrame(2);
                     frame.terrainAlbedoTexture = atlas.handle();
                     frame.terrainLightTexture = light.handle();
-                    frame.instances = List.of(new TerrainFixture.Instance(0, 0, 0, 1));
+                    frame.instances = List.of(new TerrainFixture.Instance(0, 0, 0, 0));
                     frame.visible = List.of(new TerrainFixture.Visible(9, -1, 0, 0, 1));
                     frame.meshes = List.of(new TerrainFixture.Mesh(9, NativeRenderPearlTest.terrainQuad(128), 8, 0));
                     var view = second.addView(pooled, frame.marshal(external), atlas, light);
@@ -752,7 +752,7 @@ class VulkanSurfaceFaultTest {
                     var frame = NativeTestSupport.solidFrame(pass + 1);
                     frame.terrainAlbedoTexture = atlas.handle();
                     frame.terrainLightTexture = light.handle();
-                    frame.instances = List.of(new TerrainFixture.Instance(0, 0, 0, 1));
+                    frame.instances = List.of(new TerrainFixture.Instance(0, 0, 0, 0));
                     frame.visible = List.of(new TerrainFixture.Visible(9, -1, 0, 0, 1));
                     if (pass == 0) frame.meshes = List.of(new TerrainFixture.Mesh(9, NativeRenderPearlTest.terrainQuad(128), 8, 0));
                     var storage = batch.acquireViewStorage();

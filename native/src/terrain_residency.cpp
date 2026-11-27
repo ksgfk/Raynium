@@ -449,12 +449,22 @@ void GeometryUpload::Import(radray::RDGBuilder& graph) {
         struct Copies { radray::RDGBufferHandle src,dst; std::span<const BufferRange> ranges; };
         graph.AddCopyPass("Raynium terrain instance copies",Copies{src,dst,copyRanges},
             +[](const Copies& copies,radray::RDGCopyPassContext& ctx) noexcept {
-                const auto from=ctx.ResolveBuffer(copies.src),to=ctx.ResolveBuffer(copies.dst);
-                auto srcOffset=from.Offset;
-                for(const auto& range:copies.ranges) {
-                    ctx.GetCommandBuffer().CopyBufferToBuffer(to.Buffer.Get(),to.Offset+range.Offset,from.Buffer.Get(),srcOffset,range.Size);
-                    srcOffset+=range.Size;
+                radray::RDGBufferSlice from,to;
+                {
+                    RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.InstanceCopies.ResolveBuffers");
+                    from=ctx.ResolveBuffer(copies.src);
+                    to=ctx.ResolveBuffer(copies.dst);
                 }
+                auto srcOffset=from.Offset;
+                {
+                    RADRAY_PROFILE_SCOPE_N("Raynium.Terrain.InstanceCopies.RecordRanges");
+                    for(const auto& range:copies.ranges) {
+                        ctx.GetCommandBuffer().CopyBufferToBuffer(to.Buffer.Get(),to.Offset+range.Offset,from.Buffer.Get(),srcOffset,range.Size);
+                        srcOffset+=range.Size;
+                    }
+                }
+                RADRAY_PROFILE_PLOT("Raynium.Terrain.InstanceCopies.RangeCount",double(copies.ranges.size()));
+                RADRAY_PROFILE_PLOT("Raynium.Terrain.InstanceCopies.Bytes",double(srcOffset-from.Offset));
                 return true;
             }).ReadBuffer(src).WriteBuffer(dst);
     }

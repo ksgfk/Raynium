@@ -34,4 +34,23 @@ public final class TerrainTestPass {
             tape.endRaster();
         }
     }
+    public static void recordOit(CommandTape tape,CommandTape.TerrainView view,NativeTexture depth,NativeTexture atlas,NativeTexture light,
+                                 NativeTexture bounds,NativeTexture first,NativeTexture second,NativeTexture accumulation) {
+        try(var z=new RayniumTextureView(depth,0,1); var block=new RayniumTextureView(atlas,0,1); var lighting=new RayniumTextureView(light,0,1);
+            var b=new RayniumTextureView(bounds,0,1); var c0=new RayniumTextureView(first,0,1); var c1=new RayniumTextureView(second,0,1);
+            var acc=new RayniumTextureView(accumulation,0,1);
+            var sampler=new RayniumSampler(AddressMode.CLAMP_TO_EDGE,AddressMode.CLAMP_TO_EDGE,FilterMode.NEAREST,FilterMode.NEAREST,1,OptionalDouble.empty())) {
+            var atlasBinding=new TextureViewAndSampler(block,sampler);
+            var lightBinding=new TextureViewAndSampler(lighting,sampler);
+            var targets=new GpuTextureView[][]{{b},{c0,c1},{acc}};
+            var sources=new GpuTextureView[][]{{},{b},{b,c0,c1}};
+            for(int i=0;i<3;i++) {
+                var pass=RenderPassDescriptor.builder(()->"terrain fade OIT").withDepthAttachment(z,OptionalDouble.of(0));
+                for(var target:targets[i]) pass.withColorAttachment(target,Optional.of(new Vector4f()));
+                tape.beginRaster(pass.build());
+                tape.terrain(view,3+i,0,0,depth.getWidth(0),depth.getHeight(0),atlasBinding,lightBinding,sources[i]);
+                tape.endRaster();
+            }
+        }
+    }
 }

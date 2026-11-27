@@ -36,7 +36,7 @@ class NativeWireframeTest {
         f.flags=NativeRenderer.WIREFRAME;
         f.view=new Matrix4f().translation(0,0,.5f).rotateY(-(float)Math.PI/4).scale(.6f).get(new float[16]);
         f.terrainAlbedoTexture=atlas; f.terrainLightTexture=light;
-        f.instances=List.of(new TerrainFixture.Instance(0,0,0,1));
+        f.instances=List.of(new TerrainFixture.Instance(0,0,0,0));
         f.visible=List.of(new TerrainFixture.Visible(mesh,mask,0,0,1));
         return f;
     }
@@ -205,7 +205,7 @@ class NativeWireframeTest {
                     vertices.copyFrom(java.lang.foreign.MemorySegment.ofBuffer(payload.directVertices()));
                     storage.meshDirect(1L,vertices,payload.vertexCount,0,source,payload.groupQuadCounts,payload.layoutFlags,
                         payload.minBounds,payload.maxBounds,wf);
-                    storage.instance(0,0,0,1f);
+                    storage.instance(0,0,0,0);
                     storage.visible(1L,-1,0,0,1);
                     var view=tape.addView(storage,storage.finish(f2),atlas,light);
                     dev.raynium.client.renderpearl.TerrainTestPass.record(tape,view,color,depth,atlas,light);
@@ -235,14 +235,14 @@ class NativeWireframeTest {
                         storage.begin(3,0,0,0,0);
                         storage.terrain(atlas.handle(),light.handle(),1);
                         storage.instancePool(64,step==0?0:sequence-1,3);
-                        storage.updateInstance(43,2000,0,0,1);
+                        storage.updateInstance(43,2000,0,0,0);
                         if(step==2) {
                             // Slot 7 stays off-screen when the upload spans slots 5 through 9.
-                            storage.updateInstance(9,0,0,0,1);
-                            storage.updateInstance(5,0,0,0,1);
+                            storage.updateInstance(9,0,0,0,0);
+                            storage.updateInstance(5,0,0,0,0);
                         } else {
-                            storage.updateInstance(7,step==1?1000:0,0,0,1);
-                            storage.updateInstance(0,3000,0,0,1);
+                            storage.updateInstance(7,step==1?1000:0,0,0,0);
+                            storage.updateInstance(0,3000,0,0,0);
                         }
                         storage.versions(4,sequence,sequence);
                         if(step==0) storage.visible(1,-1,0,7,1);

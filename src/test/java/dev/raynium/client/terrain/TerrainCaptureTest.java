@@ -23,11 +23,11 @@ class TerrainCaptureTest {
         var buffer=(TerrainCapture.Buffer)field.get(null);
         for(int i=0;i<128;i++) {
             var payload=mesh();
-            buffer.put(i,payload,i,0,0,1,1,0);
+            buffer.put(i,payload,i,0,0,0,1,0);
             TerrainCapture.recordDirtyIndices(payload);
         }
         buffer.finish(128);
-        assertTrue(TerrainCapture.refreshDirty(TerrainCapture.epoch(),0));
+        assertTrue(TerrainCapture.refreshDirty(TerrainCapture.epoch()));
         assertEquals(128,buffer.uploadCandidates.size());
     }
     @Test void largeCandidateSetDeduplicatesAfterGrowthAndGenerationWrap() {
@@ -42,7 +42,7 @@ class TerrainCaptureTest {
     }
     @Test void shrinkingAndGrowingCaptureReleasesDiscardedPayloads() {
         var buffer=new TerrainCapture.Buffer(); var a=mesh(); var b=mesh();
-        buffer.put(0,a,0,0,0,1,1,0); buffer.put(1024,b,0,0,0,1,1,0); buffer.finish(1025);
+        buffer.put(0,a,0,0,0,0,1,0); buffer.put(1024,b,0,0,0,0,1,0); buffer.finish(1025);
         assertTrue(buffer.payloads.length>=1025);
         buffer.finish(1);
         assertSame(a,buffer.payloads[0]);
@@ -52,9 +52,9 @@ class TerrainCaptureTest {
     @Test void sortedIndexUpdatesOnlyMarkTheCurrentOccupantOfACapturedSlot() {
         var buffer=new TerrainCapture.Buffer();
         var old=mesh(); var current=mesh();
-        buffer.put(0,old,0,0,0,1,1,0);
+        buffer.put(0,old,0,0,0,0,1,0);
         buffer.finish(1);
-        buffer.put(0,current,0,0,0,1,1,0);
+        buffer.put(0,current,0,0,0,0,1,0);
         buffer.refreshIndexCandidate(old);
         assertTrue(buffer.uploadCandidates.isEmpty());
         buffer.refreshIndexCandidate(current);
@@ -70,7 +70,7 @@ class TerrainCaptureTest {
         var buffer=(TerrainCapture.Buffer)field.get(null);
         for(int operation=0;operation<3;operation++) {
             TerrainCapture.activate(true); var payload=mesh();
-            buffer.put(0,payload,0,0,0,1,1,0); buffer.finish(1); snapshotFlag.setBoolean(null,true);
+            buffer.put(0,payload,0,0,0,0,1,0); buffer.finish(1); snapshotFlag.setBoolean(null,true);
             capturedFlag.setBoolean(null,false);
             TerrainCapture.removed(payload);
             if(operation==0) TerrainCapture.beginFrame();
@@ -84,7 +84,7 @@ class TerrainCaptureTest {
         // Consecutive active frame keeps warm snapshot buffer across one beginFrame(), then clears if no capture runs.
         TerrainCapture.activate(true);
         var activePayload=mesh();
-        buffer.put(0,activePayload,0,0,0,1,1,0); buffer.finish(1);
+        buffer.put(0,activePayload,0,0,0,0,1,0); buffer.finish(1);
         snapshotFlag.setBoolean(null,true); capturedFlag.setBoolean(null,true);
         TerrainCapture.beginFrame();
         assertNull(TerrainCapture.snapshot());
@@ -125,5 +125,15 @@ class TerrainCaptureTest {
                 uploader.checkValidFor(staging);
             }
         }
+    }
+    @Test void relativeMillisecondsPreserveUnsignedPrecisionAndReserveZero() {
+        assertEquals(0,TerrainCapture.encodeFadeStartMs(0));
+        assertEquals(1,TerrainCapture.encodeRelativeMillis(-1));
+        assertEquals(1,TerrainCapture.encodeRelativeMillis(0));
+        assertEquals(16_777_218,TerrainCapture.encodeRelativeMillis(16_777_217));
+        assertEquals(0x8000_0000,TerrainCapture.encodeRelativeMillis(0x7fff_ffffL));
+        assertEquals(0xffff_fffe,TerrainCapture.encodeRelativeMillis(0xffff_fffdL));
+        assertEquals(0,TerrainCapture.encodeRelativeMillis(0xffff_fffeL));
+        assertEquals(0,TerrainCapture.encodeRelativeMillis(0x1_0000_0000L));
     }
 }

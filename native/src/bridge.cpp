@@ -69,7 +69,7 @@ static_assert(offsetof(rn_mesh_update,vertex_count)==16 && offsetof(rn_mesh_upda
 static_assert(sizeof(rn_visible_item)==24);
 static_assert(offsetof(rn_visible_item,mesh)==0 && offsetof(rn_visible_item,element_mask)==8);
 static_assert(offsetof(rn_visible_item,sort_key)==12 && offsetof(rn_visible_item,first_instance)==16 && offsetof(rn_visible_item,instance_count)==20);
-static_assert(sizeof(rn_terrain_view_desc)==336 && sizeof(rn_texture_sampling)==16);
+static_assert(sizeof(rn_terrain_view_desc)==344 && sizeof(rn_texture_sampling)==16);
 static_assert(offsetof(rn_terrain_view_desc,projection)==104);
 static_assert(offsetof(rn_terrain_view_desc,indices)==24);
 static_assert(offsetof(rn_terrain_view_desc,index_count)==64);
@@ -79,8 +79,9 @@ static_assert(offsetof(rn_terrain_view_desc,visible_version)==288);
 static_assert(offsetof(rn_terrain_view_desc,origins_version)==296);
 static_assert(offsetof(rn_terrain_view_desc,instances_version)==304);
 static_assert(offsetof(rn_terrain_view_desc,instance_slots)==312 && offsetof(rn_terrain_view_desc,instance_capacity)==320 &&
-              offsetof(rn_terrain_view_desc,instance_base_version)==328);
-static_assert(sizeof(rn_instance)==16);
+              offsetof(rn_terrain_view_desc,instance_base_version)==328 &&
+              offsetof(rn_terrain_view_desc,fade_now_ms)==336 && offsetof(rn_terrain_view_desc,fade_duration_ms)==340);
+static_assert(sizeof(rn_instance)==16 && offsetof(rn_instance,fade_start_ms)==12);
 static_assert(!std::is_default_constructible_v<raynium::Renderer>);
 
 struct rn_runtime {

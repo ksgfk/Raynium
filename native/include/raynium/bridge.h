@@ -7,7 +7,7 @@
 #else
 #define RAYNIUM_API __declspec(dllimport)
 #endif
-#define RN_ABI_VERSION 26u
+#define RN_ABI_VERSION 27u
 
 enum rn_submit_flags : uint32_t { RN_SUBMIT_FLAG_DEVICE_LOST = 1u, RN_SUBMIT_FLAG_TERMINAL_ERROR = 2u };
 struct rn_wait_result {
@@ -142,7 +142,7 @@ struct rn_terrain_mesh_layout {
 };
 struct rn_index_update { uint64_t mesh_id; const uint32_t* indices; uint32_t count, reserved; };
 struct rn_mesh_update { uint64_t id; const void* vertices; uint32_t vertex_count; rn_material_mode layer; const rn_terrain_mesh_layout* layout; };
-struct rn_instance { int32_t origin[3]; float visibility; };
+struct rn_instance { int32_t origin[3]; uint32_t fade_start_ms; };
 // UINT32_MAX requests all groups; explicit masks intersect native conservative face culling.
 struct rn_visible_item { uint64_t mesh; uint32_t element_mask, sort_key, first_instance, instance_count; };
 struct rn_texture_sampling { uint32_t base_mip, mip_count; float max_lod; uint32_t max_anisotropy; };
@@ -165,6 +165,7 @@ struct rn_terrain_view_desc {
     const uint32_t* instance_slots;
     uint32_t instance_capacity, instance_reserved;
     uint64_t instance_base_version;
+    uint32_t fade_now_ms,fade_duration_ms;
 };
 
 extern "C" {

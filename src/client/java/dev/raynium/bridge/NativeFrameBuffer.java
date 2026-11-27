@@ -51,7 +51,7 @@ public final class NativeFrameBuffer implements AutoCloseable {
     private long uploadCursor;
     private boolean closed;
 
-    public static final int BYTE_SIZE=336;
+    public static final int BYTE_SIZE=344;
     public static final int MESH_UPDATE_STRIDE=32;
     public static final int MESH_LAYOUT_STRIDE=72;
     public static final int LAYOUT_FLAG_FINITE_BOUNDS=1;
@@ -183,13 +183,13 @@ public final class NativeFrameBuffer implements AutoCloseable {
         descriptor.set(JAVA_INT,320,capacity);
         descriptor.set(JAVA_LONG,328,baseVersion);
     }
-    public void updateInstance(int slot,int x,int y,int z,float visibility) {
-        int index=instance(x,y,z,visibility);
+    public void updateInstance(int slot,int x,int y,int z,int fadeStartMs) {
+        int index=instance(x,y,z,fadeStartMs);
         instanceSlots.segment.setAtIndex(JAVA_INT,index,slot);
     }
-    public int instance(int x,int y,int z,float visibility) {
+    public int instance(int x,int y,int z,int fadeStartMs) {
         int index=counts[4]++; var s=arrays[4].segment; long o=index*16L;
-        s.set(JAVA_INT,o,x); s.set(JAVA_INT,o+4,y); s.set(JAVA_INT,o+8,z); s.set(JAVA_FLOAT,o+12,visibility);
+        s.set(JAVA_INT,o,x); s.set(JAVA_INT,o+4,y); s.set(JAVA_INT,o+8,z); s.set(JAVA_INT,o+12,fadeStartMs);
         return index;
     }
     private void removed(int array,long id) { arrays[array].segment.set(JAVA_LONG,counts[array]++*8L,id); }
@@ -218,6 +218,7 @@ public final class NativeFrameBuffer implements AutoCloseable {
             s.set(ADDRESS,24+i*8L,counts[i]==0?MemorySegment.NULL:arrays[i].segment);
             s.set(JAVA_INT,64+i*4L,counts[i]);
         }
+        s.set(JAVA_INT,336,frame.fadeNowMs); s.set(JAVA_INT,340,frame.fadeDurationMs);
         floats(s,104,frame.projection,16); floats(s,168,frame.view,16);
         for(int i=0;i<3;i++) s.set(JAVA_INT,232+i*4L,frame.cameraBlock[i]);
         floats(s,244,frame.cameraFraction,3); floats(s,256,frame.fogColor,4); floats(s,272,frame.fogDistances,4);

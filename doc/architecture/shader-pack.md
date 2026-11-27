@@ -24,6 +24,8 @@ target=0 为 DXIL，1 为 SPIR-V。同一程序/target 不得重复；artifact �
 CRC32 使用标准 IEEE 多项式，覆盖整份 artifact。包头版本独立于 RadRay artifact schema。
 
 Native 在创建 renderer 时一次校验整个目录与 CRC32，再按程序/后端选择条目，调用上游 decoder 校验 schema、target、预期 artifact identity 和锁定 toolchain identity。
+专用地形程序的 Frame 常量占 224 B，复用 256 B 的常量切片。偏移 208 的 `uint4 TerrainFade` 保存当前毫秒、时长、以位表示的浮点时长倒数和零填充。SOLID、CUTOUT、普通透明与 OIT 累积阶段从实例的无符号 `TEXCOORD3` 读取淡入起点。OIT 深度范围与透射率阶段只使用原有的 alpha 输入。
+
 普通资源构建和 JAR 分发检查包结构、CRC32、artifact envelope 与必需程序双后端条目是否存在；完整 metadata 安全性由 native decoder 检查。
 
 ## 加载与所有权

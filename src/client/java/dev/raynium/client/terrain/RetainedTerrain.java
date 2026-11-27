@@ -39,6 +39,7 @@ public final class RetainedTerrain {
             residency.prepare(snapshot,storage,atlas.handle(),light.handle(),allowReuse);
             var f=frameScratch;
             f.epoch=renderEpoch; f.outputSequence=NativeRenderer.nextFrameId();
+            f.fadeNowMs=snapshot.fadeNowMs; f.fadeDurationMs=snapshot.fadeDurationMs;
             f.flags=(snapshot.rgss?NativeRenderer.RGSS:0)|(snapshot.improvedTransparency?NativeRenderer.IMPROVED_TRANSPARENCY:0)|
                 (state.levelRenderState.renderWireframeTerrain?NativeRenderer.WIREFRAME:0)|residency.reuseFlags();
             f.projection=snapshot.projection; f.view=snapshot.view; f.cameraBlock=snapshot.block; f.cameraFraction=snapshot.fraction;

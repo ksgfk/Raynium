@@ -27,10 +27,13 @@ class NativeFrameBufferTest {
             frame.indices=List.of(new TerrainFixture.Index(1,new int[]{0,1,2,2,3,0}));
             frame.meshes=List.of(new TerrainFixture.Mesh(1,new byte[112],4,0));
             frame.visible=List.of(new TerrainFixture.Visible(1,1,7,0,1));
-            frame.instances=List.of(new TerrainFixture.Instance(1,2,3,.5f));
+            frame.instances=List.of(new TerrainFixture.Instance(1,2,3,0x8000_0123));
+            frame.fadeNowMs=0x8000_0456; frame.fadeDurationMs=750;
             frame.removedMeshes=new long[]{2};
             var descriptor=frame.marshal(buffer);
-            assertEquals(336,descriptor.byteSize()); assertEquals(336,descriptor.get(JAVA_INT,0));
+            assertEquals(344,descriptor.byteSize()); assertEquals(344,descriptor.get(JAVA_INT,0));
+            assertEquals(0x8000_0456,descriptor.get(JAVA_INT,336)); assertEquals(750,descriptor.get(JAVA_INT,340));
+            assertEquals(0x8000_0123,buffer.instanceSegment().get(JAVA_INT,12));
             for(int i=0;i<5;i++) {
                 assertNotEquals(MemorySegment.NULL,descriptor.get(ADDRESS,24+i*8L));
                 assertEquals(1,descriptor.get(JAVA_INT,64+i*4L));
@@ -101,7 +104,7 @@ class NativeFrameBufferTest {
     @Test void directWriterKeepsMasksAndMultipleInstanceRanges() {
         try(var buffer=new NativeFrameBuffer()) {
             buffer.begin(2,0,0,0,0);
-            buffer.instance(3,4,5,.75f); buffer.instance(6,7,8,1);
+            buffer.instance(3,4,5,750); buffer.instance(6,7,8,0);
             buffer.visible(9,0x80000001,123,0,2);
             var descriptor=buffer.finish(new TerrainFixture());
             var visible=descriptor.get(ADDRESS,48).reinterpret(24);

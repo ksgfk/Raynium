@@ -33,13 +33,12 @@ final class TerrainResidency {
     private int[] instScratch=new int[4096*4];
     private int[] visScratch=new int[4096*6];
     private final BitSet populatedInstances=new BitSet();
-    private int[] sectionToInstance=new int[4096];
     private TerrainCapture.Buffer capture;
     private long epoch,frameId;
     private int residentCount;
     private int nextMeshSlot=1,nextInstanceSlot;
     private long visibleVersion,originsVersion,instancesVersion;
-    private int lastVisCount,lastInstCount;
+    private int lastVisCount,lastInstanceCapacity;
     private int lastReuseFlags;
     private boolean hasDeferredUploads;
     private boolean lastFrameCommitted;
@@ -55,7 +54,7 @@ final class TerrainResidency {
         dirtyIndicesScratch.clear();
         capture=null; this.epoch=epoch; residentCount=0; nextMeshSlot=1; nextInstanceSlot=0;
         visibleVersion=0; originsVersion=0; instancesVersion=0;
-        lastVisCount=0; lastInstCount=0; lastReuseFlags=0;
+        lastVisCount=0; lastInstanceCapacity=0; lastReuseFlags=0;
         hasDeferredUploads=false; lastFrameCommitted=false; uncommittedPrepare=false;
     }
     private static void clearSlots(SectionPayload section) {
@@ -86,11 +85,6 @@ final class TerrainResidency {
             int cap=visScratch.length;
             while(cap<neededVis) cap=Math.multiplyExact(cap,2);
             visScratch=new int[cap];
-        }
-        if(sectionToInstance.length<sectionCount) {
-            int cap=sectionToInstance.length;
-            while(cap<sectionCount) cap=Math.multiplyExact(cap,2);
-            sectionToInstance=new int[cap];
         }
     }
     private static <T> void swapPop(ObjectArrayList<T> list,int index) {
@@ -145,26 +139,11 @@ final class TerrainResidency {
                     uploadBytes+=idx.byteSize();
                 }
             }
-            int maxUpdates=capture.instancesChanged?capture.updatedFadingSlots.size():0;
-            frame.begin(maxUpdates,0,0,indexUploads.size(),0);
-            frame.instancePool(nextInstanceSlot,baseVersion,maxUpdates);
+            frame.begin(0,0,0,indexUploads.size(),0);
+            frame.instancePool(nextInstanceSlot,baseVersion,0);
             frame.terrain(albedo,lightmap,capture.anisotropy);
             emitIndexUploads(frame);
-            boolean changed=false;
-            for(int i=0;i<maxUpdates;i++) {
-                int section=capture.updatedFadingSlots.getInt(i);
-                int slot=sectionToInstance[section];
-                if(slot<0) continue;
-                int offset=slot*4;
-                float fade=capture.visibility[section];
-                int bits=Float.floatToRawIntBits(fade);
-                if(instScratch[offset+3]==bits) continue;
-                instScratch[offset+3]=bits;
-                frame.updateInstance(slot,instScratch[offset],instScratch[offset+1],instScratch[offset+2],fade);
-                changed=true;
-            }
-            if(changed) instancesVersion=frameId;
-            lastReuseFlags=NativeRenderer.REUSE_VISIBLE|(changed?0:NativeRenderer.REUSE_INSTANCES);
+            lastReuseFlags=NativeRenderer.REUSE_VISIBLE|NativeRenderer.REUSE_INSTANCES;
             frame.versions(visibleVersion,originsVersion,instancesVersion);
             return;
         }
@@ -176,7 +155,7 @@ final class TerrainResidency {
         final var originX=capture.originX;
         final var originY=capture.originY;
         final var originZ=capture.originZ;
-        final var visibility=capture.visibility;
+        final var fadeStart=capture.fadeStart;
         final var elementMask=capture.elementMask;
         final var distKey=capture.distKey;
         long total=0;
@@ -245,23 +224,21 @@ final class TerrainResidency {
                 frame.meshPooled(Integer.toUnsignedLong(layer.slotId),layer);
             }
         }
-        int[] previousInstances=instScratch;
         int[] previousVisible=visScratch;
         ensureScratchCapacity(count);
-        boolean originsChanged=previousInstances!=instScratch || originsVersion==0;
-        boolean instancesChanged=previousInstances!=instScratch || instancesVersion==0;
+        boolean originsChanged=originsVersion==0;
+        boolean instancesChanged=instancesVersion==0;
         boolean visibleChanged=previousVisible!=visScratch || visibleVersion==0 || !staged.isEmpty();
         final int[] instArr=instScratch;
         final int[] visArr=visScratch;
-        final int[] secToInst=sectionToInstance;
-        int visCount=0,instCount=0;
+        int visCount=0;
         int visOff=0;
         for(int i=0;i<count;i++) {
             var p=payloads[i]; int mask=elementMask[i];
             if(p.uploadedEpoch!=epoch && p.stagedFrame!=frameId) {
                 long key=SectionPos.asLong(originX[i]>>4,originY[i]>>4,originZ[i]>>4);
                 p=residentBySection.get(key);
-                if(p==null || p.uploadedEpoch!=epoch) { secToInst[i]=-1; continue; }
+                if(p==null || p.uploadedEpoch!=epoch) continue;
                 mask=0;
                 var layers=p.layers;
                 if(layers[0]!=null) mask|=1;
@@ -269,26 +246,24 @@ final class TerrainResidency {
                 if(layers[2]!=null) mask|=1<<16;
             }
             p.lastActiveFrame=frameId;
-            if(mask==0) { secToInst[i]=-1; continue; }
+            if(mask==0) continue;
             var layers=p.layers;
             int instance=p.instanceSlot;
             int instOff=instance*4;
-            ++instCount;
-            secToInst[i]=instance;
             int ox=originX[i], oy=originY[i], oz=originZ[i];
-            int visBits=Float.floatToRawIntBits(visibility[i]);
+            int startMs=fadeStart[i];
             boolean originDiff=instArr[instOff]!=ox || instArr[instOff+1]!=oy || instArr[instOff+2]!=oz;
             originsChanged|=originDiff;
-            boolean instanceDiff=originDiff || instArr[instOff+3]!=visBits;
+            boolean instanceDiff=originDiff || instArr[instOff+3]!=startMs;
             instancesChanged|=instanceDiff;
             if(instanceDiff || !populatedInstances.get(instance)) {
-                frame.updateInstance(instance,ox,oy,oz,visibility[i]);
+                frame.updateInstance(instance,ox,oy,oz,startMs);
                 populatedInstances.set(instance);
             }
             instArr[instOff]=ox;
             instArr[instOff+1]=oy;
             instArr[instOff+2]=oz;
-            instArr[instOff+3]=visBits;
+            instArr[instOff+3]=startMs;
             var l0=layers[0];
             if(l0!=null && (mask&127)!=0) {
                 int slotId=l0.slotId;
@@ -348,11 +323,11 @@ final class TerrainResidency {
         if(visCount>0) MemorySegment.copy(visArr,0,frame.visibleSegment(),JAVA_INT,0,visOff);
         frame.setVisibleCount(visCount);
         if(visibleChanged || lastVisCount!=visCount || !evicting.isEmpty()) visibleVersion=frameId;
-        if(originsChanged || lastInstCount!=instCount) originsVersion=frameId;
-        if(instancesChanged || lastInstCount!=instCount) instancesVersion=frameId;
+        if(originsChanged || lastInstanceCapacity!=nextInstanceSlot) originsVersion=frameId;
+        if(instancesChanged || lastInstanceCapacity!=nextInstanceSlot) instancesVersion=frameId;
         frame.versions(visibleVersion,originsVersion,instancesVersion);
         lastVisCount=visCount;
-        lastInstCount=instCount;
+        lastInstanceCapacity=nextInstanceSlot;
     }
     record ViewTransition(Runnable submitted,Runnable rollback) {}
     void commit() { stageCommit().submitted().run(); }

@@ -14,7 +14,7 @@ struct Vertex {
 #endif
     int3 origin : TEXCOORD2;
 #ifndef ALPHA_ONLY
-    float visibility : TEXCOORD3;
+    uint fadeStart : TEXCOORD3;
 #endif
 };
 struct Pixel {
@@ -25,6 +25,13 @@ struct Pixel {
     float3 fog : TEXCOORD1;
 #endif
 };
+#ifndef ALPHA_ONLY
+float terrainVisibility(uint fadeStart) {
+    if (fadeStart == 0u || TerrainFade.x == 0u || TerrainFade.y == 0u) return 1.0;
+    uint elapsed = TerrainFade.x > fadeStart ? TerrainFade.x - fadeStart : 0u;
+    return elapsed >= TerrainFade.y ? 1.0 : saturate(float(elapsed) * asfloat(TerrainFade.z));
+}
+#endif
 Pixel terrainVertex(Vertex input) {
     Pixel output;
     float3 position = input.position + (input.origin - CameraBlock.xyz) - CameraFraction.xyz;
@@ -36,7 +43,7 @@ Pixel terrainVertex(Vertex input) {
     float2 lightUV = clamp(input.light / 256.0 + 0.5 / 16.0, 0.5 / 16.0, 15.5 / 16.0);
     output.color = input.color * Lightmap.SampleLevel(LightSampler, lightUV, 0);
     output.fog = float3(length(position), max(length(position.xz), abs(position.y)),
-        lerp(1, input.visibility, saturate((length(position) - 16) / 16)));
+        lerp(1, terrainVisibility(input.fadeStart), saturate((length(position) - 16) / 16)));
 #endif
     output.uv = input.uv;
     return output;

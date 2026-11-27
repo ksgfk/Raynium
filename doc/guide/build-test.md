@@ -139,7 +139,7 @@ Debug 默认启用 RadRay RHI 检查。`rhiValidation=true`（JVM 属性 `rayniu
 D3D12 在此创建 factory 并启用调试层，早于窗口创建；createDevice 复用环境创建 runtime。
 也可通过独立 `nativeTest -PrhiValidation=true` 验证。
 启动日志中的 `Raynium native manifest=` 与 `Raynium native library loaded:` 记录内容缓存和 ABI/build ID、RadRay 身份、dirty、配置、CRT 与工具链。
-Debug CRT 为 MTd，Release 为 MT；静态分配器随 bridge 加载与卸载。当前要求 ABI 26，导出清单见 `tools/native.py`。
+Debug CRT 为 MTd，Release 为 MT；静态分配器随 bridge 加载与卸载。当前要求 ABI 27，导出清单见 `tools/native.py`。
 `Raynium runtime created` 表示设备与队列完成。GUI 和世界的实际显示须通过窗口观察；F2 使用原版文件写入保存 native 主颜色目标，全景入口通过独立尺寸离屏帧输出，纹理导出使用按子资源请求读回。
 
 ## 自动跑图与性能采样
@@ -200,6 +200,8 @@ ABI 参数检查及资源寿命保护始终执行。benchmark 将每个测量批
 `Raynium.Frame.AcquireNext` 标出取得交换链图像的调用，`Raynium.Frame.Present` 覆盖提交呈现与结果检查。测量批次的统计工作记为 `Raynium.Benchmark.BatchMetrics`，可通过首末标记定位正式路线。
 `Raynium.Frame.QueueSubmit` 覆盖队列提交。槽回收时由 `RadRay.RDG.GpuNanoseconds` 发布单批 GPU 时间。`Raynium.Frontend.Freeze` 包含主线程冻结输入与入队，其中 `Raynium.Frontend.QueueCapacity` 记录等待队列腾位的区间。
 `Raynium.Terrain.Prepare` 覆盖驻留更新、可见解析及参数构建；`Raynium.Terrain.Sort`、`BuildArguments` 分别记录排序和参数构建，`Raynium.Terrain.Record` 记录几何 pass 的内联录制；没有逐 draw profiling scope。上传字节的复制与生成计入 `RadRay.RDG.FillUploads`。
+每次执行 `Raynium terrain instance copies` 时，`Raynium.Terrain.InstanceCopies.ResolveBuffers` 记录源与目标缓冲的解析耗时，`Raynium.Terrain.InstanceCopies.RecordRanges` 记录整批 `CopyBufferToBuffer` 循环的 CPU 耗时。
+同一父区间结束前，`Raynium.Terrain.InstanceCopies.RangeCount` 和 `Raynium.Terrain.InstanceCopies.Bytes` 各采样一次，分别给出合并后的拷贝段数和实际拷贝总字节数（含合并带入的间隙）。可按段数分组、对照字节数比较两端的录制耗时。采样单位是执行的多段拷贝 pass，走单段上传或跳过上传的帧没有该项样本。
 锁定 RadRay 的 `CompiledRDG::Record` 按 Upload execution group 记录一个 `RDG UploadBatch` GPU 计时区，逐上传节点保留 CPU zone。D3D12 的光栅 GPU 区间覆盖整个原生 render pass，合并组使用首个 RDG 光栅 pass 名。该上传 GPU 区间包含组内拷贝和重叠写屏障，不包含组入口屏障；完整 native GPU 耗时仍读取上述帧外围 timestamp，不能用上传子区间之和替代。实现来源为 RadRay `modules/runtime/src/rdg.cpp`。
 `Raynium.Visible.Solid/Cutout/Translucent` 记录各层输入项；`Raynium.Terrain.<层>.SelectedGroups/Records/Batches` 记录各层选中面组、参数记录及批次。
 `Raynium.Terrain.BuiltRecords/BuiltBatches/ArgumentBytes` 统计本帧生效参数总量，`Raynium.Terrain.UploadedArgumentBytes` 仅统计本帧实际上传的间接参数字节（稳态缓存命中时为 0），`OitParameterBuilds` 在有 OIT 透明输入时为 1。
@@ -258,6 +260,7 @@ Raynium 自身无需动态 VC++ CRT 或额外 mimalloc DLL；系统与显卡驱�
 | `NativeWorldFeaturesTest` | 双后端检查用户网格注册、同页实例绘制、粒子与阴影四边形、传输与实例流的独立偏移，以及共享实例切片的像素结果。 |
 | `NativeTextureTest`、`NativeCaptureTest`、`NativeSwapchainTest` | 子资源、捕获格式及缓冲容量、尺寸变更与窗口状态。 |
 | `NativeWireframeTest` | direct/indirect 实际像素、面掩码、双槽退役及跨页几何。 |
+| `NativeTerrainFadeTest` | 在 D3D12 和 Vulkan 上读回三层地形颜色及 OIT 各阶段附件，比较淡入中点、完成、关闭、近处豁免与时钟边界的像素。 |
 | `vulkanSurfaceTest` | 真实 Vulkan 设备上的 WSI 恢复、设备丢失后的表面释放与交换链销毁、两批在途时的紧邻字节与查询槽发布。门控测试在 AcquireNext 暂停时核对冷资源创建、已提交批次的 Fence 等待及后续绘制的像素。 |
 
 `test` 排除 `native` 标签，随标准 `check/build` 运行，不加载 DLL、不构建 native；FFM 缓冲测试使用 JVM native access。`nativeTest` 是标准 Gradle `Test` 任务，只包含 `native` 标签；它复用 `testClasses`，依赖 `nativeStage`，在构建/stage 完成后启动测试 JVM。依赖仍须显式准备，执行需要 Windows x64 和 D3D12/Vulkan 驱动；缺少设备或 DLL 时明确失败，不跳过。

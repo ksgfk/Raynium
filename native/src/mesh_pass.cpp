@@ -16,7 +16,7 @@ radray::unique_ptr<GraphicsPipelineState> CreateTerrainPipeline(Device& device,c
     const VertexAttribute attributes[]{
         {0,0,"POSITION",0,VertexFormat::FLOAT32X3,0},{0,12,"COLOR",0,VertexFormat::UNORM8X4,1},
         {0,16,"TEXCOORD",0,VertexFormat::FLOAT32X2,2},{0,24,"TEXCOORD",1,VertexFormat::UINT16X2,3},
-        {1,0,"TEXCOORD",2,VertexFormat::SINT32X3,4},{1,12,"TEXCOORD",3,VertexFormat::FLOAT32,5}};
+        {1,0,"TEXCOORD",2,VertexFormat::SINT32X3,4},{1,12,"TEXCOORD",3,VertexFormat::UINT32,5}};
     const VertexAttribute alphaAttributes[]{attributes[0],attributes[1],attributes[2],
         {1,0,"TEXCOORD",2,VertexFormat::SINT32X3,3}};
     const bool alpha=i==OitBounds || i==OitTransmittance;

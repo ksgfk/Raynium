@@ -6,4 +6,5 @@
     float4 FogColor;
     float4 FogDistances;
     float4 AtlasSizeAndInverse;
+    uint4 TerrainFade;
 };

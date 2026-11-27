@@ -3,6 +3,7 @@
 #include <radray/inline_vector.h>
 #include <radray/profiler.h>
 #include <algorithm>
+#include <bit>
 #include <cstring>
 
 namespace raynium {
@@ -15,7 +16,8 @@ radray::RDGBufferHandle TerrainView::Constants(radray::RDGBuilder& graph,uint32_
     struct Source { const rn_terrain_view_desc* parameters; GpuBackend backend; uint32_t width,height; };
     constants=graph.CreateDynamicBuffer({.MaxSize=256,.Usage=BufferUse::CBuffer},radray::RDGUploadSource::Generated(256,Source{&frame.parameters,backend,width,height},
         +[](const Source& source,radray::RDGUploadWriteContext& ctx) noexcept {
-            struct Constants { float projection[16],view[16]; int32_t block[4]; float fraction[4],fog[4],distances[4],atlas[4]; } data{};
+            struct Constants { float projection[16],view[16]; int32_t block[4]; float fraction[4],fog[4],distances[4],atlas[4]; uint32_t fade[4]; } data{};
+            static_assert(sizeof(Constants)==224 && offsetof(Constants,fade)==208);
             const auto& p=*source.parameters;
             std::copy_n(p.projection,16,data.projection); std::copy_n(p.view,16,data.view);
             std::copy_n(p.camera_block,3,data.block); data.block[3]=(p.flags&RN_FRAME_RGSS)!=0;
@@ -24,6 +26,8 @@ radray::RDGBufferHandle TerrainView::Constants(radray::RDGBuilder& graph,uint32_
             std::copy_n(p.fog_color,4,data.fog); std::copy_n(p.fog_distances,4,data.distances);
             data.atlas[0]=float(source.width); data.atlas[1]=float(source.height);
             data.atlas[2]=1.f/data.atlas[0]; data.atlas[3]=1.f/data.atlas[1];
+            data.fade[0]=p.fade_now_ms; data.fade[1]=p.fade_duration_ms;
+            data.fade[2]=std::bit_cast<uint32_t>(p.fade_duration_ms?1.f/float(p.fade_duration_ms):0.f);
             std::memset(ctx.Bytes.data(),0,ctx.Bytes.size()); std::memcpy(ctx.Bytes.data(),&data,sizeof(data)); return true;
         }));
     return constants;

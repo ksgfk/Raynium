@@ -38,7 +38,7 @@ public final class NativeRenderer implements AutoCloseable {
     }
     public static class Frame {
         public long epoch=1, outputSequence;
-        public int flags;
+        public int flags,fadeNowMs,fadeDurationMs;
         public float[] projection=identity(),view=identity(),cameraFraction=new float[3],fogColor=new float[4],fogDistances={1000,2000,1000,2000};
         public int[] cameraBlock=new int[3];
         private static float[] identity() { return new float[]{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1}; }

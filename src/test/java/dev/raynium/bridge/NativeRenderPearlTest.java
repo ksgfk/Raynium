@@ -137,7 +137,7 @@ class NativeRenderPearlTest {
                 var f=NativeTestSupport.solidFrame(i+1);
                 f.terrainAlbedoTexture=atlas.handle(); f.terrainLightTexture=light.handle();
                 f.meshes=List.of(new TerrainFixture.Mesh(i+1,terrainQuad((i+1)*32),8,0));
-                f.instances=List.of(new TerrainFixture.Instance(0,0,0,1));
+                f.instances=List.of(new TerrainFixture.Instance(0,0,0,0));
                 f.visible=List.of(new TerrainFixture.Visible(i+1,-1,0,0,1));
                 var storage=storageByView[i]=batch.acquireViewStorage();
                 views[i]=batch.addView(storage,f.marshal(storage),atlas,light);

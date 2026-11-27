@@ -4,7 +4,7 @@
 
 # 互操作与加载
 
-Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 26，共有 29 个导出入口，提供窗口交换链输出、常驻模型网格注册及按请求的异步像素读回。
+Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 27，共有 29 个导出入口，提供窗口交换链输出、常驻模型网格注册及按请求的异步像素读回。
 设备、帧槽与完成序号见 [Native runtime](native-runtime.md)，操作入口见[构建与测试](../guide/build-test.md)。
 
 ## 当前 C ABI
@@ -17,7 +17,8 @@ Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 2
 | 结构 | Windows x64 大小 | 内容 |
 | --- | ---: | --- |
 | `rn_abi_info` / `rn_device_info` | 240 / 600 B | 构建身份与真实设备的限制、特性和时间戳标定。末尾偏移 592 的 64 位字段 `host_coherent_atom_size` 给出主机缓存同步的原子大小。Java 对超出有符号范围的无符号容量做饱和转换。 |
-| `rn_terrain_view_desc` | 336 B | epoch、网格变更、可见项、实例、可见集/实例原点/完整实例三组版本号、相机、变换、雾以及实例槽号数组、逻辑容量和增量基准版本；支持 `RN_FRAME_REUSE_VISIBLE`/`RN_FRAME_REUSE_INSTANCES` 视图复用标志。批次中可以有多个视图。 |
+| `rn_terrain_view_desc` | 344 B | epoch、网格变更、可见项、实例、可见集/实例原点/完整实例三组版本号、相机、变换、雾以及实例槽号数组、逻辑容量、增量基准版本，以及偏移 336、340 的无符号当前时间与淡入时长（毫秒）；支持 `RN_FRAME_REUSE_VISIBLE`/`RN_FRAME_REUSE_INSTANCES` 视图复用标志。批次中可以有多个视图。 |
+| `rn_instance` | 16 B | 三个有符号区块原点坐标，偏移 12 的 `uint32_t fade_start_ms` 保存进程相对毫秒编码。零表示全可见。 |
 | `rn_mesh_update` / `rn_terrain_mesh_layout` | 32 / 72 B | 网格更新句柄、顶点指针与必填的预分析布局头，包含每组 quad 计数、包围盒及多面组 3 位线框组号。 |
 | `rn_batch_desc` | 128 B | 命令、传输字节、实例字节、脏映射区间、视图数组、surface、测量开关，以及按命令顺序登记的截图编号与时间戳写入。描述符、视图头、脏区间和两组登记项在返回前复制。默认复制负载。设置 `RN_BATCH_BORROW_POOLED` 时，调用方须保持命令、上传数据及视图引用的数组和字节地址有效、内容不变，直至 `consumed_sequence` 达到该批序号。 |
 | `rn_submit_result` | 56 B | 偏移 0 为本批入队序号，偏移 8 为完整进度快照。 |
@@ -52,7 +53,7 @@ Native 运行库、工具和测试直接使用锁定 RadRay 的 `radray/types.h`
 
 stage 使用 `dumpbin /exports` 核对构建脚本列出的 ABI 入口，再用 `/dependents` 拒绝动态 CRT 和未分类的私有 DLL，收集上游许可证，并先验证完整快照再发布 `current.json`。
 schema 1 manifest 包含平台、ABI/布局、构建配置、CRT、工具链、build ID、RadRay commit/dirty、DLL/许可证大小与 SHA-256、系统依赖分类。
-ABI 26 的身份 flags 中 bit 1（static CRT）和 bit 2（mimalloc）均为 1。loader 只接受 Debug/MTd 或 Release/MT 的单 DLL 清单，拒绝错配和 MD 的 schema 2 payload。
+ABI 27 的身份 flags 中 bit 1（static CRT）和 bit 2（mimalloc）均为 1。loader 只接受 Debug/MTd 或 Release/MT 的单 DLL 清单，拒绝错配和 MD 的 schema 2 payload。
 build ID 来自 native/RadRay（含 `modules/runtime/`）源码及配置/工具链指纹；DLL SHA-256 标识实际二进制，manifest SHA-256 标识内容快照，三者用途不同。
 哈希用于一致性检查，不等于来源认证。
 
@@ -79,7 +80,7 @@ loader 的选择顺序为：显式开发目录 `-Draynium.native.dir=...`，否�
 2. 将实际 payload 发布到游戏目录下 `.raynium/natives/windows-x86_64/<content-hash>/`。
 3. 检查已有完整副本，或写入独立 staging 目录，校验后再发布；多进程使用文件锁协调解包。
 4. 客户端初始化入口检查游戏 JVM native access 权限，将规范化的绝对路径转换为 Windows 扩展路径（含 UNC），使用 `SymbolLookup.libraryLookup(String, Arena)` 加载 bridge；保留长路径前缀，避免 Path 重解析后触发 Windows 路径长度限制。
-5. 先调用版本入口核对 ABI 26，再用 `rn_query_abi` 检查布局与构建身份。
+5. 先调用版本入口核对 ABI 27，再用 `rn_query_abi` 检查布局与构建身份。
 6. 游戏后端执行 loadLibrary 时创建环境。createDevice 创建 runtime 与 renderer，createSurface 将交换链关联到 SDL 窗口。
 
 所有内容路径落在 loader 自己的根目录内，只接受固定 DLL 文件名并验证大小和哈希。已有损坏缓存直接报错，不覆盖、不删除；暂未实现旧缓存自动清理。
