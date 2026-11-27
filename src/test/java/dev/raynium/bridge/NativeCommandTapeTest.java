@@ -30,7 +30,7 @@ class NativeCommandTapeTest {
                 var second=renderer.enqueueFrame(empty,empty,empty,null,java.util.List.of(),false,null,empty,empty)) {
                 assertEquals(1,first.sequence()); assertEquals(2,second.sequence());
                 var before=first.snapshot();
-                var events=new ArrayList<String>();
+                var events=new ArrayList<String>(6);
                 var callbacks=new NativeRenderer.BatchCallbacks();
                 callbacks.submitted.add(()->events.add("first submitted"));
                 callbacks.completed.add(()->{
@@ -152,7 +152,7 @@ class NativeCommandTapeTest {
         try(var env=new NativeEnvironment(NativeTestSupport.locate(directory),backend,NativeTestSupport.recordingLogger(new ArrayList<>()));
             var runtime=env.createRuntime(); var renderer=runtime.createRenderer(NativeTestSupport.shaders());
             var tape=new CommandTape(renderer)) {
-            var calls=new ArrayList<Integer>();
+            var calls=new ArrayList<Integer>(2);
             var error=new AssertionError("completion");
             tape.onCompleted(()->{calls.add(1); renderer.pollCompleted(); throw error;});
             tape.onCompleted(()->calls.add(2));
@@ -377,7 +377,7 @@ class NativeCommandTapeTest {
             crossing.data().putInt(0,99);
             pre.copyBuffer(device,0,host,0,16);
             pre.copyBuffer(upload,0,device,8,8);
-            var callbacks=new ArrayList<Integer>();
+            var callbacks=new ArrayList<Integer>(2);
             pre.onCompleted(()->{
                 callbacks.add(1);
                 renderer.pollCompleted();

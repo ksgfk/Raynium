@@ -555,7 +555,7 @@ class VulkanSurfaceFaultTest {
                     assertEquals(fault == TailFault.READBACK_MAP ? previous : seq,snapshot.submitted());
                     assertEquals(fault == TailFault.READBACK_MAP ? 2 : 3,snapshot.flags());
                     assertEquals(0,callbacks.get());
-                    var measured = new ArrayList<Long>();
+                    var measured = new ArrayList<Long>(1);
                     renderer.drainTelemetry(record->measured.add(record.get(ValueLayout.JAVA_LONG,0)));
                     assertEquals(List.of(previous),measured);
                     if (fault == TailFault.READBACK_MAP) {

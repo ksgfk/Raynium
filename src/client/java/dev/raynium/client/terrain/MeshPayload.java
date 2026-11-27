@@ -12,19 +12,20 @@ import java.util.concurrent.atomic.AtomicInteger;
  * worker thread into a pooled DirectByteBuffer so the render thread uploads via zero-copy pointers.
  */
 public final class MeshPayload {
-    private static final ThreadLocal<byte[]> GROUP_SCRATCH = ThreadLocal.withInitial(() -> new byte[4096]);
-
     /** Render-thread dense slot ID (1..maxSlot) assigned by TerrainResidency while staged/resident; 0 when unassigned. */
     public int slotId;
     public final long epoch;
     private final PinnedBytes vertices;
     public final int vertexCount;
     public final int mode;
-    public final int[] groupQuadCounts = new int[7];
-    public final float[] minBounds = new float[3];
-    public final float[] maxBounds = new float[3];
+    public static final class UploadLayout {
+        public final int[] groupQuadCounts = new int[7];
+        public final float[] minBounds = new float[3], maxBounds = new float[3];
+        public byte[] originalQuadGroups;
+    }
+    private volatile UploadLayout uploadLayout;
+    public UploadLayout uploadLayout() { return uploadLayout; }
     public final int layoutFlags;
-    public byte[] originalQuadGroups;
     public volatile IndexSnapshot indices;
 
     /** The thread dropping the last pin after release owns the sole return to the pool. */
@@ -33,7 +34,9 @@ public final class MeshPayload {
         private final AtomicInteger state=new AtomicInteger();
         private volatile ByteBuffer buffer;
         private MemorySegment bytes;
-        PinnedBytes(ByteBuffer buffer,int size) {
+        private final long epoch;
+        PinnedBytes(ByteBuffer buffer,int size,long epoch) {
+            this.epoch=epoch;
             this.buffer=buffer;
             bytes=MemorySegment.ofBuffer(buffer).asSlice(0,size).asReadOnly();
         }
@@ -60,7 +63,7 @@ public final class MeshPayload {
             var retired=buffer;
             buffer=null;
             bytes=null;
-            DirectUploadPool.release(retired);
+            DirectUploadPool.release(retired,epoch);
             return true;
         }
         ByteBuffer readable(int size) {
@@ -72,9 +75,9 @@ public final class MeshPayload {
     public static final class IndexSnapshot {
         public final int count;
         private final PinnedBytes indices;
-        IndexSnapshot(ByteBuffer directBuffer,int count) {
+        IndexSnapshot(ByteBuffer directBuffer,int count,long epoch) {
             this.count=count;
-            indices=new PinnedBytes(directBuffer,count*4);
+            indices=new PinnedBytes(directBuffer,count*4,epoch);
         }
         boolean hasData() { return indices.buffer!=null; }
         public int byteSize() { return count*4; }
@@ -103,6 +106,11 @@ public final class MeshPayload {
             return;
         }
 
+        var layout = new UploadLayout();
+        this.uploadLayout = layout;
+        var groupQuadCounts = layout.groupQuadCounts;
+        var minBounds = layout.minBounds;
+        var maxBounds = layout.maxBounds;
         boolean finite = true;
         float minX = Float.POSITIVE_INFINITY, minY = Float.POSITIVE_INFINITY, minZ = Float.POSITIVE_INFINITY;
         float maxX = Float.NEGATIVE_INFINITY, maxY = Float.NEGATIVE_INFINITY, maxZ = Float.NEGATIVE_INFINITY;
@@ -129,9 +137,9 @@ public final class MeshPayload {
                 }
             }
             groupQuadCounts[6] = quadCount;
-            ByteBuffer direct = DirectUploadPool.acquire(byteSize);
+            ByteBuffer direct = DirectUploadPool.acquire(byteSize,epoch);
             MemorySegment.copy(MemorySegment.ofBuffer(data), 0L, MemorySegment.ofBuffer(direct), 0L, byteSize);
-            this.vertices = new PinnedBytes(direct,byteSize);
+            this.vertices = new PinnedBytes(direct,byteSize,epoch);
             if (finite) {
                 minBounds[0] = minX; minBounds[1] = minY; minBounds[2] = minZ;
                 maxBounds[0] = maxX; maxBounds[1] = maxY; maxBounds[2] = maxZ;
@@ -142,13 +150,7 @@ public final class MeshPayload {
             return;
         }
 
-        byte[] groups = GROUP_SCRATCH.get();
-        if (groups.length < quadCount) {
-            int cap = Math.max(4096, groups.length);
-            while (cap < quadCount) cap = Math.multiplyExact(cap, 2);
-            groups = new byte[cap];
-            GROUP_SCRATCH.set(groups);
-        }
+        byte[] groups = new byte[quadCount];
 
         for (int q = 0; q < quadCount; q++) {
             int base = q * 112;
@@ -181,7 +183,7 @@ public final class MeshPayload {
             if (groupQuadCounts[g] != 0) nonEmptyGroups++;
         }
 
-        ByteBuffer direct = DirectUploadPool.acquire(byteSize);
+        ByteBuffer direct = DirectUploadPool.acquire(byteSize,epoch);
         MemorySegment srcSeg = MemorySegment.ofBuffer(data);
         MemorySegment dstSeg = MemorySegment.ofBuffer(direct);
         if (nonEmptyGroups <= 1) {
@@ -205,16 +207,16 @@ public final class MeshPayload {
                 packed[b] |= (byte) (g << shift);
                 if (shift > 5) packed[b + 1] |= (byte) (g >>> (8 - shift));
             }
-            this.originalQuadGroups = packed;
+            layout.originalQuadGroups = packed;
         }
-        this.vertices = new PinnedBytes(direct,byteSize);
+        this.vertices = new PinnedBytes(direct,byteSize,epoch);
         int flags = 0;
         if (finite) {
             minBounds[0] = minX; minBounds[1] = minY; minBounds[2] = minZ;
             maxBounds[0] = maxX; maxBounds[1] = maxY; maxBounds[2] = maxZ;
             flags |= NativeFrameBuffer.LAYOUT_FLAG_FINITE_BOUNDS;
         }
-        if (this.originalQuadGroups != null) {
+        if (layout.originalQuadGroups != null) {
             flags |= NativeFrameBuffer.LAYOUT_FLAG_WIREFRAME_GROUPS;
         }
         this.layoutFlags = flags;
@@ -263,9 +265,9 @@ public final class MeshPayload {
         if(vertices==null) throw new IllegalStateException("Empty terrain mesh");
         return vertices.pin();
     }
-    public void unpin() { if(vertices.unpin()) originalQuadGroups=null; }
+    public void unpin() { if(vertices.unpin()) uploadLayout=null; }
     public void releaseVertices() {
-        if(vertices!=null && vertices.release()) originalQuadGroups=null;
+        if(vertices!=null && vertices.release()) uploadLayout=null;
     }
 
     public IndexSnapshot copyIndices(ByteBuffer source, int stride) {
@@ -273,7 +275,7 @@ public final class MeshPayload {
         int count = vertexCount / 4 * 6;
         if ((stride != 2 && stride != 4) || data.remaining() != count * stride)
             throw new IllegalArgumentException("Invalid transparent indices");
-        ByteBuffer direct = DirectUploadPool.acquire(count * 4);
+        ByteBuffer direct = DirectUploadPool.acquire(count * 4,epoch);
         try {
             if (stride == 2) {
                 for (int i = 0; i < count; i++) {
@@ -288,9 +290,9 @@ public final class MeshPayload {
                 }
                 MemorySegment.copy(MemorySegment.ofBuffer(data),0,MemorySegment.ofBuffer(direct),0,count * 4L);
             }
-            return new IndexSnapshot(direct, count);
+            return new IndexSnapshot(direct, count,epoch);
         } catch (RuntimeException | Error failure) {
-            DirectUploadPool.release(direct);
+            DirectUploadPool.release(direct,epoch);
             throw failure;
         }
     }

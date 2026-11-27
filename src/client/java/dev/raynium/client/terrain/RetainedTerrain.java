@@ -9,10 +9,15 @@ import net.minecraft.client.renderer.texture.TextureAtlas;
 public final class RetainedTerrain {
     public static final class ViewAccess { private ViewAccess() {} }
     private static final ViewAccess ACCESS=new ViewAccess();
-    private final TerrainResidency residency=new TerrainResidency();
-    private final NativeRenderer.Frame frameScratch=new NativeRenderer.Frame();
+    private TerrainResidency residency;
     private long captureEpoch;
     private long renderEpoch;
+
+    public void retire() {
+        if(residency!=null) residency.reset(0);
+        residency=null;
+        captureEpoch=renderEpoch=0;
+    }
 
     public CommandTape.TerrainView capture(LevelRenderer level,NativeRenderer renderer,CommandTape batch) {
         var event=batch.measureTerrain();
@@ -25,6 +30,8 @@ public final class RetainedTerrain {
         var snapshot=TerrainCapture.snapshot();
         if(snapshot==null) throw new IllegalStateException("Terrain preparation requires a current projection");
         if(captureEpoch!=snapshot.epoch) {
+            retire();
+            residency=new TerrainResidency();
             captureEpoch=snapshot.epoch;
             renderEpoch=renderer.nextEpoch();
             residency.reset(renderEpoch);
@@ -37,13 +44,11 @@ public final class RetainedTerrain {
             TerrainCapture.drainRemoved(residency.pendingRemovals);
             boolean allowReuse=batch.viewCount()==0;
             residency.prepare(snapshot,storage,atlas.handle(),light.handle(),allowReuse);
-            var f=frameScratch;
+            var f=snapshot.frame;
             f.epoch=renderEpoch; f.outputSequence=NativeRenderer.nextFrameId();
             f.fadeNowMs=snapshot.fadeNowMs; f.fadeDurationMs=snapshot.fadeDurationMs;
             f.flags=(snapshot.rgss?NativeRenderer.RGSS:0)|(snapshot.improvedTransparency?NativeRenderer.IMPROVED_TRANSPARENCY:0)|
                 (state.levelRenderState.renderWireframeTerrain?NativeRenderer.WIREFRAME:0)|residency.reuseFlags();
-            f.projection=snapshot.projection; f.view=snapshot.view; f.cameraBlock=snapshot.block; f.cameraFraction=snapshot.fraction;
-            f.fogColor=snapshot.fog; f.fogDistances=snapshot.distances;
             view=batch.addPooledView(storage,f,atlas,light);
         } catch(RuntimeException | Error failure) { storage.close(); throw failure; }
         var transition=residency.stageCommit();

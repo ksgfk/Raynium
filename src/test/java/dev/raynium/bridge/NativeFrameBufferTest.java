@@ -7,6 +7,17 @@ import static java.lang.foreign.ValueLayout.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 class NativeFrameBufferTest {
+    @Test void visibleLayersAndInstanceUpdatesReserveIndependentCapacities() {
+        try(var frame=new NativeFrameBuffer()) {
+            frame.begin(12000,4000,0,0,0,0);
+            assertTrue(frame.visibleSegment().byteSize()>=12000L*24);
+            assertTrue(frame.instanceSegment().byteSize()>=4000L*16);
+            assertTrue(frame.instanceSegment().byteSize()<12000L*16);
+            for(int i=0;i<5000;++i) frame.retainBorrowed(this);
+            frame.clearBorrowed();
+            assertFalse(frame.fitsIdlePool(16L<<20,4096));
+        }
+    }
     @Test void oversizedStorageShrinksOnlyAfterConsecutiveLowFrames() {
         try(var storage=new NativeFrameBuffer.Storage()) {
             storage.reserve(17L<<20);

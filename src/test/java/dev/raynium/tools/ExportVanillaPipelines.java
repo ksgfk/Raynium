@@ -11,7 +11,7 @@ public final class ExportVanillaPipelines {
     public static void main(String[] arguments) throws Exception {
         if(arguments.length!=1) throw new IllegalArgumentException("Expected output path");
         var entries=VanillaPipelineCatalog.create().entries().stream().map(entry-> {
-            var value=new LinkedHashMap<String,Object>();
+            var value=LinkedHashMap.<String,Object>newLinkedHashMap(5);
             value.put("id",entry.id()); value.put("names",entry.names());
             value.put("location",entry.pipeline().getLocation().toString());
             value.put("optional",entry.optional()); value.put("identity",entry.identity());

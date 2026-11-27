@@ -9,16 +9,44 @@ import static org.junit.jupiter.api.Assertions.*;
 class TerrainCaptureTest {
     @AfterEach void cleanup() { TerrainCapture.activate(false); }
     private static SectionPayload mesh() { return new SectionPayload(TerrainCapture.epoch(),new MeshPayload(TerrainCapture.epoch(),ByteBuffer.allocate(112))); }
+    @Test void retiringWorldIgnoresLateWorkersAndReleasesLayoutAfterLastPin() {
+        TerrainCapture.activate(true);
+        var old=mesh();
+        var layer=old.layers[0];
+        var first=layer.pin();
+        var second=layer.pin();
+        TerrainCapture.invalidate();
+        var fresh=mesh();
+        fresh.layers[0].releaseVertices();
+        long idle=DirectUploadPool.pooledBytes();
+        assertTrue(idle>0);
+        layer.releaseVertices();
+        layer.unpin();
+        assertNotNull(layer.uploadLayout());
+        assertEquals(first.get(java.lang.foreign.ValueLayout.JAVA_BYTE,0),second.get(java.lang.foreign.ValueLayout.JAVA_BYTE,0));
+        layer.unpin();
+        assertNull(layer.uploadLayout());
+        assertEquals(4,layer.vertexCount);
+        var late=new MeshPayload(old.epoch,ByteBuffer.allocate(112));
+        late.releaseVertices();
+        TerrainCapture.removed(old);
+        TerrainCapture.recordDirtyIndices(old);
+        var events=new ArrayList<SectionPayload>();
+        TerrainCapture.drainRemoved(events);
+        TerrainCapture.drainDirtyIndices(events);
+        assertTrue(events.isEmpty());
+        assertEquals(idle,DirectUploadPool.pooledBytes());
+    }
     @Test void largeSectionReusesEightMiBBucket() {
         DirectUploadPool.clearForTests();
-        var buffer=DirectUploadPool.acquire((4<<20)+1);
+        var buffer=DirectUploadPool.acquire((4<<20)+1,TerrainCapture.epoch());
         assertEquals(8<<20,buffer.capacity());
-        DirectUploadPool.release(buffer);
-        assertSame(buffer,DirectUploadPool.acquire(8<<20));
+        DirectUploadPool.release(buffer,TerrainCapture.epoch());
+        assertSame(buffer,DirectUploadPool.acquire(8<<20,TerrainCapture.epoch()));
     }
     @Test void refreshesMoreThan64DirtySlotsWithoutFullCapture() throws Exception {
         TerrainCapture.activate(true);
-        var field=TerrainCapture.class.getDeclaredField("BUFFER");
+        var field=TerrainCapture.class.getDeclaredField("buffer");
         field.setAccessible(true);
         var buffer=(TerrainCapture.Buffer)field.get(null);
         for(int i=0;i<128;i++) {
@@ -64,11 +92,12 @@ class TerrainCaptureTest {
         assertFalse(buffer.contains(current));
     }
     @Test void frameResetInvalidationAndDeactivationReleaseSnapshotAndReferences() throws Exception {
-        var field=TerrainCapture.class.getDeclaredField("BUFFER"); field.setAccessible(true);
+        var field=TerrainCapture.class.getDeclaredField("buffer"); field.setAccessible(true);
         var snapshotFlag=TerrainCapture.class.getDeclaredField("hasSnapshot"); snapshotFlag.setAccessible(true);
         var capturedFlag=TerrainCapture.class.getDeclaredField("capturedSinceBeginFrame"); capturedFlag.setAccessible(true);
         var buffer=(TerrainCapture.Buffer)field.get(null);
         for(int operation=0;operation<3;operation++) {
+            buffer=(TerrainCapture.Buffer)field.get(null);
             TerrainCapture.activate(true); var payload=mesh();
             buffer.put(0,payload,0,0,0,0,1,0); buffer.finish(1); snapshotFlag.setBoolean(null,true);
             capturedFlag.setBoolean(null,false);
@@ -77,12 +106,13 @@ class TerrainCaptureTest {
             else if(operation==1) TerrainCapture.invalidate();
             else TerrainCapture.activate(false);
             assertNull(TerrainCapture.snapshot()); assertEquals(0,buffer.count); assertNull(buffer.payloads[0]);
-            var removed=new ArrayList<SectionPayload>(); TerrainCapture.drainRemoved(removed);
+            var removed=new ArrayList<SectionPayload>(operation==0?1:0); TerrainCapture.drainRemoved(removed);
             if(operation==0) assertEquals(java.util.List.of(payload),removed);
             else assertTrue(removed.isEmpty());
         }
         // Consecutive active frame keeps warm snapshot buffer across one beginFrame(), then clears if no capture runs.
         TerrainCapture.activate(true);
+        buffer=(TerrainCapture.Buffer)field.get(null);
         var activePayload=mesh();
         buffer.put(0,activePayload,0,0,0,0,1,0); buffer.finish(1);
         snapshotFlag.setBoolean(null,true); capturedFlag.setBoolean(null,true);
@@ -97,7 +127,7 @@ class TerrainCaptureTest {
         TerrainCapture.activate(true);
         var payload=mesh();
         TerrainCapture.recordDirtyIndices(payload);
-        var drained=new ArrayList<SectionPayload>();
+        var drained=new ArrayList<SectionPayload>(1);
         TerrainCapture.drainDirtyIndices(drained);
         assertEquals(java.util.List.of(payload),drained);
         TerrainCapture.recordDirtyIndices(payload);

@@ -9,19 +9,30 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.security.*;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
+import com.google.common.util.concurrent.UncheckedExecutionException;
+import com.google.common.util.concurrent.ExecutionError;
+import java.util.concurrent.ExecutionException;
+import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /** CPU-side shader artifacts. Only the render thread creates the corresponding native pipeline. */
 final class ShaderProgramCache {
     record Artifact(RayniumPrograms.Program program,byte[] pack) {}
     private final Path directory;
-    private final ConcurrentHashMap<String,Artifact> compiled=new ConcurrentHashMap<>();
+    private final Cache<String,Artifact> compiled=CacheBuilder.newBuilder().maximumWeight(16L<<20)
+            .weigher((String key,Artifact artifact)->Math.max(256,artifact.pack.length)).build();
 
     ShaderProgramCache(Path gameDirectory) { directory=gameDirectory.resolve(".raynium/shader-cache/v2"); }
 
     Artifact resolve(String key,String vertex,String fragment,RenderPipeline pipeline) {
-        return compiled.computeIfAbsent(key,k->loadOrCompile(k,vertex,fragment,pipeline));
+        try { return compiled.get(key,()->loadOrCompile(key,vertex,fragment,pipeline)); }
+        catch(ExecutionException | UncheckedExecutionException | ExecutionError failure) {
+            if(failure.getCause() instanceof RuntimeException cause) throw cause;
+            if(failure.getCause() instanceof Error cause) throw cause;
+            throw new IllegalStateException("Could not prepare shader "+key,failure.getCause());
+        }
     }
 
     private Artifact loadOrCompile(String key,String vertex,String fragment,RenderPipeline pipeline) {
@@ -73,12 +84,21 @@ final class ShaderProgramCache {
             var binary=zip.getEntry("program.rnsp");
             if(zip.size()!=2 || metadata==null || binary==null || metadata.getSize()<1 || metadata.getSize()>1<<20 ||
                     binary.getSize()<24 || binary.getSize()>64L<<20) throw new IOException("Invalid program archive");
-            var json=JsonParser.parseString(new String(zip.getInputStream(metadata).readAllBytes(),StandardCharsets.UTF_8)).getAsJsonObject();
-            byte[] bytes=zip.getInputStream(binary).readAllBytes();
+            var json=JsonParser.parseString(new String(readEntry(zip,metadata),StandardCharsets.UTF_8)).getAsJsonObject();
+            byte[] bytes=readEntry(zip,binary);
             if(!key.equals(json.get("key").getAsString()) || !key.substring(0,58).equals(json.get("program").getAsString()) ||
                 !HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)).equals(json.get("packHash").getAsString()))
                 throw new IOException("Shader cache identity mismatch");
             return new Artifact(new Gson().fromJson(json,RayniumPrograms.Program.class),bytes);
         } catch(NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
     }
+    private static byte[] readEntry(ZipFile zip,ZipEntry entry) throws IOException {
+        byte[] bytes=new byte[Math.toIntExact(entry.getSize())];
+        try(var input=new DataInputStream(zip.getInputStream(entry))) {
+            input.readFully(bytes);
+            if(input.read()!=-1) throw new IOException("Incorrect program entry size: "+entry.getName());
+        }
+        return bytes;
+    }
+
 }

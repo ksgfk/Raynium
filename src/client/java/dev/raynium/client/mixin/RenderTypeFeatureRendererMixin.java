@@ -41,5 +41,6 @@ abstract class RenderTypeFeatureRendererMixin<Submit extends SubmitNode> impleme
         for (int i = 0; i < this.groups.size(); ++i) {
             ((ModelFastTrack.GroupAccess) (Object) this.groups.get(i)).raynium$recycleExtension();
         }
+        ModelFastTrack.finishGrouping();
     }
 }

@@ -52,7 +52,7 @@ public final class NativeRenderer implements AutoCloseable {
     private long observedPresented;
     private int surfaceGeneration,recovery;
     private java.util.function.IntConsumer updateRecovery;
-    private final ArrayDeque<InFlightBatch> inFlightBatches=new ArrayDeque<>(),freeBatches=new ArrayDeque<>();
+    private final ArrayDeque<InFlightBatch> inFlightBatches=new ArrayDeque<>();
     private final ArrayDeque<PendingSubmit> freeSubmits=new ArrayDeque<>();
     private long consumedSequence,submittedSequence;
     private boolean dispatching;
@@ -61,7 +61,6 @@ public final class NativeRenderer implements AutoCloseable {
         long sequence;
         Runnable release,fail;
         List<Runnable> submitted,completed,recyclers;
-        BatchCallbacks pooled=new BatchCallbacks();
     }
     public static final class BatchCallbacks {
         public final ArrayList<Runnable> submitted=new ArrayList<>(),completed=new ArrayList<>(),recyclers=new ArrayList<>();
@@ -241,19 +240,15 @@ public final class NativeRenderer implements AutoCloseable {
     }
     /** Transfers these lists to the in-flight batch and returns empty lists for the next recording. */
     public BatchCallbacks trackBatch(long sequence,BatchCallbacks callbacks,Runnable release,Runnable fail) {
-        var batch=enqueueBatch(sequence,callbacks.submitted,callbacks.completed,callbacks.recyclers,release,fail);
-        var empty=batch.pooled;
-        batch.pooled=callbacks;
-        return empty;
+        enqueueBatch(sequence,callbacks.submitted,callbacks.completed,callbacks.recyclers,release,fail);
+        return new BatchCallbacks();
     }
-    private InFlightBatch enqueueBatch(long sequence,List<Runnable> submitted,List<Runnable> completed,List<Runnable> recyclers,Runnable release,Runnable fail) {
-        var batch=freeBatches.pollFirst();
-        if(batch==null) batch=new InFlightBatch();
+    private void enqueueBatch(long sequence,List<Runnable> submitted,List<Runnable> completed,List<Runnable> recyclers,Runnable release,Runnable fail) {
+        var batch=new InFlightBatch();
         batch.sequence=sequence;
         batch.release=release; batch.fail=fail;
         batch.submitted=submitted; batch.completed=completed; batch.recyclers=recyclers;
         inFlightBatches.addLast(batch);
-        return batch;
     }
     private static Throwable collectFailure(Throwable first,Throwable next) {
         if(first==null) return next;
@@ -317,10 +312,6 @@ public final class NativeRenderer implements AutoCloseable {
                     if(ready.sequence<=completedSequence) failure=runAll(ready.completed,failure);
                     else failure=run(ready.fail,failure);
                     failure=runAll(ready.recyclers,failure);
-                    ready.pooled.clear();
-                    ready.submitted=ready.completed=ready.recyclers=null;
-                    ready.fail=null;
-                    freeBatches.addFirst(ready);
                 }
             }
         } finally { dispatching=false; }
@@ -482,7 +473,7 @@ public final class NativeRenderer implements AutoCloseable {
             for(var buffer:buffers) buffer.endRenderer();
             buffers.clear(); writableBuffers.clear();
             viewRecords.close(); dirtyRanges.close(); scratch.close();
-            freeBatches.clear(); freeSubmits.clear();
+            freeSubmits.clear();
             owner.releasedRenderer(this);
         }
     }

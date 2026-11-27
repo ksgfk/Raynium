@@ -6,7 +6,7 @@ import dev.raynium.bridge.NativeTexture;
 import dev.raynium.bridge.NativeBuffer;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import dev.raynium.bridge.NativeSwapchain;
-import java.util.ArrayList;
+import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import static java.lang.foreign.ValueLayout.*;
@@ -39,6 +39,12 @@ public final class CommandTape implements AutoCloseable {
             record.set(JAVA_INT,offset+28,height);
         }
     }
+    static final int MAX_IDLE_ITEMS=2;
+    private static final long MAX_IDLE_BYTES=16L<<20;
+    private static final int MAX_IDLE_REFERENCES=4096;
+
+    private static int capacity(ObjectArrayList<?> list) { return list.elements().length; }
+
     static final class Storage implements AutoCloseable {
         static final long INITIAL_COMMANDS=16*1024;
         static final long INITIAL_UPLOADS=64*1024;
@@ -47,14 +53,14 @@ public final class CommandTape implements AutoCloseable {
         final Stream instanceUploads;
         final Stream captureIds=new Stream(64),queryWrites=new Stream(128);
 
-        final ArrayList<NativeTexture> references=new ArrayList<>();
-        final ArrayList<NativeBuffer> bufferReferences=new ArrayList<>();
-        final ArrayList<RayniumQueryPool> queryReferences=new ArrayList<>();
-        final ArrayList<RayniumPipeline> pipelines=new ArrayList<>();
-        final ArrayList<net.minecraft.client.model.geom.ModelPart> modelReferences=new ArrayList<>();
-        final ArrayList<MemorySegment> views=new ArrayList<>();
-        final ArrayList<dev.raynium.bridge.NativeFrameBuffer> viewStorage=new ArrayList<>(),acquiredViews=new ArrayList<>();
-        final ArrayList<Runnable> rollbacks=new ArrayList<>();
+        final ObjectArrayList<NativeTexture> references=new ObjectArrayList<>();
+        final ObjectArrayList<NativeBuffer> bufferReferences=new ObjectArrayList<>();
+        final ObjectArrayList<RayniumQueryPool> queryReferences=new ObjectArrayList<>();
+        final ObjectArrayList<RayniumPipeline> pipelines=new ObjectArrayList<>();
+        final ObjectArrayList<net.minecraft.client.model.geom.ModelPart> modelReferences=new ObjectArrayList<>();
+        final ObjectArrayList<MemorySegment> views=new ObjectArrayList<>();
+        final ObjectArrayList<dev.raynium.bridge.NativeFrameBuffer> viewStorage=new ObjectArrayList<>(),acquiredViews=new ObjectArrayList<>();
+        final ObjectArrayList<Runnable> rollbacks=new ObjectArrayList<>();
         NativeRenderer.BatchCallbacks callbacks=new NativeRenderer.BatchCallbacks();
 
         Storage() {
@@ -64,6 +70,13 @@ public final class CommandTape implements AutoCloseable {
             this.commands=new Stream(initialCommands);
             this.uploads=new Stream(initialUploads);
             this.instanceUploads=new Stream(initialUploads);
+        }
+        boolean fitsIdlePool() {
+            long bytes=commands.storage.byteSize()+uploads.storage.byteSize()+instanceUploads.storage.byteSize()
+                    +captureIds.storage.byteSize()+queryWrites.storage.byteSize();
+            long slots=(long)capacity(references)+capacity(bufferReferences)+capacity(queryReferences)+capacity(pipelines)
+                    +capacity(modelReferences)+capacity(views)+capacity(viewStorage)+capacity(acquiredViews)+capacity(rollbacks);
+            return bytes<=MAX_IDLE_BYTES && slots+callbacks.submitted.size()+callbacks.completed.size()+callbacks.recyclers.size()<=MAX_IDLE_REFERENCES;
         }
         void reset() {
             commands.reset();
@@ -138,10 +151,15 @@ public final class CommandTape implements AutoCloseable {
     private Storage storage;
     private boolean externalView;
     public void onDiscard(Runnable rollback) { checkRecording(); storage.rollbacks.add(rollback); }
+    void reserveRecyclers(int additional) {
+        checkRecording();
+        var recyclers=storage.callbacks.recyclers;
+        recyclers.ensureCapacity(Math.addExact(recyclers.size(),additional));
+    }
     void recycleAfterBatch(Runnable recycle) { checkRecording(); storage.callbacks.recyclers.add(recycle); }
     public void onSubmitted(Runnable callback) { checkRecording(); storage.callbacks.submitted.add(callback); }
     static final class ViewPool implements AutoCloseable {
-        final java.util.ArrayDeque<dev.raynium.bridge.NativeFrameBuffer> terrain=new java.util.ArrayDeque<>(), external=new java.util.ArrayDeque<>();
+        final java.util.ArrayDeque<dev.raynium.bridge.NativeFrameBuffer> terrain=new java.util.ArrayDeque<>(MAX_IDLE_ITEMS), external=new java.util.ArrayDeque<>(MAX_IDLE_ITEMS);
         @Override public void close() {
             terrain.forEach(dev.raynium.bridge.NativeFrameBuffer::close);
             external.forEach(dev.raynium.bridge.NativeFrameBuffer::close);
@@ -150,6 +168,14 @@ public final class CommandTape implements AutoCloseable {
     }
     private final ViewPool freeViews;
     public void retainModel(net.minecraft.client.model.geom.ModelPart part) { checkRecording(); storage.modelReferences.add(part); }
+    public void retainModels(net.minecraft.client.model.geom.ModelPart[] owners,int[] ownerIndices,int count) {
+        checkRecording();
+        var models=storage.modelReferences;
+        int required=Math.addExact(models.size(),count);
+        int current=capacity(models);
+        if(required>current) models.ensureCapacity(Math.max(required,current+(current>>>1)));
+        for(int i=0;i<count;i++) models.add(owners[ownerIndices[i]]);
+    }
     private boolean finalized,rasterOpen;
     private dev.raynium.bridge.TerrainFrameEvent terrainEvent;
 
@@ -398,16 +424,15 @@ public final class CommandTape implements AutoCloseable {
     }
     void terrain(TerrainView view,int stage,int scissorX,int scissorY,int scissorW,int scissorH,
                  com.mojang.renderpearl.util.TextureViewAndSampler atlas,com.mojang.renderpearl.util.TextureViewAndSampler light,
-                 com.mojang.renderpearl.api.textures.GpuTextureView[] inputs) {
+                 com.mojang.renderpearl.api.textures.GpuTextureView bounds,
+                 com.mojang.renderpearl.api.textures.GpuTextureView transmittance0,com.mojang.renderpearl.api.textures.GpuTextureView transmittance1) {
         checkRecording();
         if(!rasterOpen || view.batch()!=this || view.id()<0 || view.id()>=storage.views.size()) throw new IllegalStateException("Terrain view belongs to another batch");
-        for(var input:inputs) {
-            if(input==null || input.isClosed()) throw new IllegalArgumentException("Invalid terrain stage input");
-            ((NativeTexture)input.texture()).checkRecordingOwner(renderer);
-        }
-        if(inputs.length!=(stage==4?1:stage==5?3:0)) throw new IllegalArgumentException("Invalid terrain stage inputs");
-        var material=java.util.List.of(atlas,light);
-        for(var pair:material) {
+        checkTerrainInput(bounds,stage==4 || stage==5);
+        checkTerrainInput(transmittance0,stage==5);
+        checkTerrainInput(transmittance1,stage==5);
+        for(int i=0;i<2;++i) {
+            var pair=i==0?atlas:light;
             if(pair.view().isClosed() || pair.sampler().isClosed() || !(pair.view().texture() instanceof NativeTexture image))
                 throw new IllegalArgumentException("Invalid terrain material");
             validateTexture(image);
@@ -422,8 +447,8 @@ public final class CommandTape implements AutoCloseable {
         record.set(JAVA_INT,20,scissorY);
         record.set(JAVA_INT,24,scissorW);
         record.set(JAVA_INT,28,scissorH);
-        for(int i=0;i<material.size();++i) {
-            var pair=material.get(i);
+        for(int i=0;i<2;++i) {
+            var pair=i==0?atlas:light;
             var image=(NativeTexture)pair.view().texture();
             long at=72+32L*i;
             record.set(JAVA_LONG,at,image.handle());
@@ -435,14 +460,19 @@ public final class CommandTape implements AutoCloseable {
             record.set(JAVA_INT,at+28,pair.sampler().getMaxAnisotropy());
             retain(image);
         }
-        for(int i=0;i<inputs.length;++i) {
-            var image=(NativeTexture)inputs[i].texture();
-            record.set(JAVA_LONG,32+i*8L,image.handle()); record.set(JAVA_INT,56+i*4L,inputs[i].baseMipLevel());
-            retain(image);
-        }
-        for(int i=inputs.length;i<3;++i) {
-            record.set(JAVA_LONG,32+i*8L,0); record.set(JAVA_INT,56+i*4L,0);
-        }
+        writeTerrainInput(record,0,bounds);
+        writeTerrainInput(record,1,transmittance0);
+        writeTerrainInput(record,2,transmittance1);
+    }
+    private void checkTerrainInput(com.mojang.renderpearl.api.textures.GpuTextureView input,boolean required) {
+        if((input!=null)!=required || (input!=null && input.isClosed())) throw new IllegalArgumentException("Invalid terrain stage input");
+        if(input!=null) ((NativeTexture)input.texture()).checkRecordingOwner(renderer);
+    }
+    private void writeTerrainInput(MemorySegment record,int index,com.mojang.renderpearl.api.textures.GpuTextureView input) {
+        var image=input==null?null:(NativeTexture)input.texture();
+        record.set(JAVA_LONG,32+index*8L,image==null?0:image.handle());
+        record.set(JAVA_INT,56+index*4L,input==null?0:input.baseMipLevel());
+        if(image!=null) retain(image);
     }
     public long reserveInstanceUpload(long bytes,int alignment) {
         checkRecording();
@@ -668,7 +698,7 @@ public final class CommandTape implements AutoCloseable {
             for(int i=0;i<owned.callbacks.recyclers.size();++i) owned.callbacks.recyclers.get(i).run();
         } finally {
             storage=null;
-            if(freeStorage==null) owned.close();
+            if(freeStorage==null || freeStorage.size()>=MAX_IDLE_ITEMS || !owned.fitsIdlePool()) owned.close();
             else {
                 owned.reset();
                 freeStorage.addFirst(owned);
@@ -679,8 +709,9 @@ public final class CommandTape implements AutoCloseable {
         for(int i=0;i<storage.viewStorage.size();++i) {
             var view=storage.viewStorage.get(i);
             view.clearBorrowed();
-            if(freeViews==null) view.close();
-            else (view.isTerrainStorage()?freeViews.terrain:freeViews.external).addLast(view);
+            var pool=freeViews==null?null:(view.isTerrainStorage()?freeViews.terrain:freeViews.external);
+            if(pool==null || pool.size()>=MAX_IDLE_ITEMS || !view.fitsIdlePool(MAX_IDLE_BYTES,MAX_IDLE_REFERENCES)) view.close();
+            else pool.addLast(view);
         }
         for(int i=0;i<storage.acquiredViews.size();++i) storage.acquiredViews.get(i).close();
         storage.acquiredViews.clear();

@@ -36,5 +36,7 @@ abstract class LevelTerrainHookMixin {
     private void raynium$clearVisible(CallbackInfo ci) { TerrainCapture.bumpVisibleListVersion(); }
 
     @Inject(method={"invalidateCompiledGeometry","resetLevelRenderData"},at=@At("HEAD"))
-    private void raynium$invalidate(CallbackInfo ci) { TerrainCapture.invalidate(); }
+    private void raynium$invalidate(CallbackInfo ci) {
+        if(TerrainCapture.active()) ((RayniumGpuDevice)RenderSystem.getDevice()).retireTerrain();
+    }
 }

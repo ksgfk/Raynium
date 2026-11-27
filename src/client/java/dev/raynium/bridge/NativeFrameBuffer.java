@@ -4,7 +4,6 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import dev.raynium.client.terrain.MeshPayload;
 import it.unimi.dsi.fastutil.objects.ObjectArrayList;
-import java.util.ArrayList;
 import java.util.Arrays;
 import static java.lang.foreign.ValueLayout.*;
 
@@ -43,7 +42,7 @@ public final class NativeFrameBuffer implements AutoCloseable {
     private final Storage layouts=new Storage();
     private final Storage upload=new Storage();
     private final int[] counts=new int[5];
-    private final ArrayList<Object> borrowed=new ArrayList<>();
+    private final ObjectArrayList<Object> borrowed=new ObjectArrayList<>();
     private Arena externalCopies;
     private final ObjectArrayList<MeshPayload> pinnedMeshes=new ObjectArrayList<>();
     private final ObjectArrayList<MeshPayload.IndexSnapshot> pinnedIndices=new ObjectArrayList<>();
@@ -63,17 +62,34 @@ public final class NativeFrameBuffer implements AutoCloseable {
         pooledTerrain=access!=null;
         for(int i=0;i<arrays.length;i++) arrays[i]=new Storage();
     }
+    private static int capacity(ObjectArrayList<?> list) { return list.elements().length; }
+    private static void reservePins(ObjectArrayList<?> pins,int count) {
+        int current=capacity(pins);
+        if(count>current) pins.ensureCapacity(Math.max(count,current+(current>>>1)));
+    }
+    public boolean fitsIdlePool(long maxBytes,int maxReferences) {
+        long bytes=descriptor.byteSize()+instanceSlots.segment.byteSize()+layouts.segment.byteSize()+upload.segment.byteSize();
+        for(var array:arrays) bytes+=array.segment.byteSize();
+        return bytes<=maxBytes && (long)capacity(borrowed)+capacity(pinnedMeshes)+capacity(pinnedIndices)<=maxReferences;
+    }
     public boolean isTerrainStorage() { return pooledTerrain; }
     public boolean isClosed() { return closed; }
 
     public void begin(int visibleCapacity,int removedCapacity,int meshCapacity,int indexCapacity,long uploadBytes) {
+        begin(visibleCapacity,visibleCapacity,removedCapacity,meshCapacity,indexCapacity,uploadBytes);
+    }
+    public void begin(int visibleCapacity,int instanceCapacity,int removedCapacity,int meshCapacity,int indexCapacity,long uploadBytes) {
         if(closed) throw new IllegalStateException("Frame buffer is closed");
         clearBorrowed();
+        if(pooledTerrain) {
+            reservePins(pinnedMeshes,meshCapacity);
+            reservePins(pinnedIndices,indexCapacity);
+        }
         arrays[0].reserve(24L*indexCapacity);
         arrays[1].reserve((long)MESH_UPDATE_STRIDE*meshCapacity);
         arrays[2].reserve(8L*Math.max(256,removedCapacity));
         arrays[3].reserve(24L*Math.max(1024,visibleCapacity));
-        arrays[4].reserve(16L*Math.max(1024,visibleCapacity));
+        arrays[4].reserve(16L*Math.max(1024,instanceCapacity));
         layouts.reserve((long)MESH_LAYOUT_STRIDE*meshCapacity);
         upload.reserve(uploadBytes);
         useInstancePool=false;
@@ -127,8 +143,9 @@ public final class NativeFrameBuffer implements AutoCloseable {
     public void meshPooled(long id,dev.raynium.client.terrain.MeshPayload mesh) {
         var bytes=mesh.pin();
         pinnedMeshes.add(mesh);
-        meshRecord(id,bytes,mesh.vertexCount,mesh.mode,mesh.groupQuadCounts,mesh.layoutFlags,
-                mesh.minBounds,mesh.maxBounds,mesh.originalQuadGroups);
+        var layout=mesh.uploadLayout();
+        meshRecord(id,bytes,mesh.vertexCount,mesh.mode,layout.groupQuadCounts,mesh.layoutFlags,
+                layout.minBounds,layout.maxBounds,layout.originalQuadGroups);
     }
     public void indexDirect(long id,MemorySegment nativeIndices,int count,Object owner) {
         long bytes=count*4L;

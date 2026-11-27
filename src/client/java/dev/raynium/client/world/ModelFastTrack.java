@@ -39,11 +39,10 @@ public final class ModelFastTrack {
         List<PreparedRenderType> raynium$drawRenderTypes();
     }
 
-    private static final int MAX_POOLED_GROUPS = 64;
+    private static final int MAX_CACHED_INSTANCES_PER_BUCKET = 256;
     private static final int MAX_POOLED_BUCKETS = 256;
-    private static final ArrayDeque<GroupExtension> GROUP_POOL = new ArrayDeque<>(32);
     private static final ArrayDeque<FastBucket> BUCKET_POOL = new ArrayDeque<>(64);
-    private static final MeshRunTable RUN_TABLE = new MeshRunTable();
+    private static GroupingScratch grouping = new GroupingScratch();
 
     private static @Nullable ModelSink activeSink;
 
@@ -53,18 +52,18 @@ public final class ModelFastTrack {
     public static void endCapture() { activeSink = null; }
 
     public static GroupExtension acquireGroupExtension(boolean canReorder, int existingFallbackCount) {
-        GroupExtension ext = GROUP_POOL.pollFirst();
-        if (ext == null) {
-            ext = new GroupExtension();
-        }
-        ext.init(canReorder, existingFallbackCount);
-        return ext;
+        return new GroupExtension(canReorder, existingFallbackCount);
     }
 
-    static void recycleGroupExtension(GroupExtension ext) {
-        if (GROUP_POOL.size() < MAX_POOLED_GROUPS) {
-            GROUP_POOL.addFirst(ext);
-        }
+    public static void finishGrouping() {
+        if(grouping.instanceRun.length>4096 && grouping.peakInstances<=256) {
+            if(++grouping.quietExecutions>=120) grouping=new GroupingScratch();
+        } else grouping.quietExecutions=0;
+        grouping.peakInstances=0;
+    }
+    static void clearCachedGeometry() {
+        grouping = new GroupingScratch();
+        BUCKET_POOL.clear();
     }
 
     static FastBucket acquireFastBucket(PreparedRenderType renderType, boolean canReorder) {
@@ -77,8 +76,8 @@ public final class ModelFastTrack {
     }
 
     static void recycleFastBucket(FastBucket bucket) {
-        bucket.reset();
-        if (BUCKET_POOL.size() < MAX_POOLED_BUCKETS) {
+        if (bucket.meshIds.length <= MAX_CACHED_INSTANCES_PER_BUCKET && BUCKET_POOL.size() < MAX_POOLED_BUCKETS) {
+            bucket.reset();
             BUCKET_POOL.addFirst(bucket);
         }
     }
@@ -101,13 +100,14 @@ public final class ModelFastTrack {
         }
 
         int getOrInsert(int key, int newRun) {
-            if ((size + 1) * 2 > keys.length) {
-                grow();
-            }
             int slot = mix(key) & mask;
             while (stamps[slot] == stamp) {
                 if (keys[slot] == key) return values[slot];
                 slot = (slot + 1) & mask;
+            }
+            if (size == keys.length / 2) {
+                grow();
+                return getOrInsert(key, newRun);
             }
             stamps[slot] = stamp;
             keys[slot] = key;
@@ -177,150 +177,38 @@ public final class ModelFastTrack {
     }
 
     public static final class GroupExtension {
-        private boolean canReorder;
-        private final List<Object> entries = new ArrayList<>();
+        private final boolean canReorder;
+        private final ArrayList<Object> entries;
         private int syncedFallbackCount;
         private @Nullable FastBucket lastFastBucket;
         private @Nullable RenderType lastFastRenderType;
-        private RenderType[] idKeys = new RenderType[16];
-        private FastBucket[] idBuckets = new FastBucket[16];
-        private int[] idStamps = new int[16];
-        private int[] valueEntries = new int[16];
-        private int[] valueStamps = new int[16];
-        private int valueSize;
-        private int idMask = 15;
-        private int idSize;
-        private int idStamp = 1;
-        private final Vector3f scratchNormal = new Vector3f();
+        private final java.util.IdentityHashMap<RenderType, FastBucket> byRenderType;
+        private final java.util.HashMap<PreparedRenderType, FastBucket> byPreparedType;
 
-        GroupExtension() {}
-
-        void init(boolean canReorder, int existingFallbackCount) {
+        GroupExtension(boolean canReorder, int existingFallbackCount) {
             this.canReorder = canReorder;
-            this.entries.clear();
-            for (int i = 0; i < existingFallbackCount; ++i) {
-                entries.add(Integer.valueOf(i));
-            }
-            this.syncedFallbackCount = existingFallbackCount;
-            this.lastFastBucket = null;
-            this.lastFastRenderType = null;
-            this.valueSize = 0;
-            this.idSize = 0;
-            if (++this.idStamp == 0) {
-                Arrays.fill(valueStamps, 0);
-                Arrays.fill(idStamps, 0);
-                this.idStamp = 1;
-            }
+            entries = new ArrayList<>(Math.max(4, Math.addExact(existingFallbackCount, 1)));
+            byRenderType = canReorder ? new java.util.IdentityHashMap<>(4) : null;
+            byPreparedType = canReorder ? java.util.HashMap.newHashMap(4) : null;
+            syncFallbackDraws(existingFallbackCount);
         }
 
         public void recycle() {
-            for (int i = 0; i < entries.size(); ++i) {
-                if (entries.get(i) instanceof FastBucket bucket) {
-                    recycleFastBucket(bucket);
-                }
+            for (Object entry : entries) {
+                if (entry instanceof FastBucket bucket) recycleFastBucket(bucket);
             }
             entries.clear();
-            if (idSize > 0) {
-                Arrays.fill(idKeys, null);
-                Arrays.fill(idBuckets, null);
-                idSize = 0;
+            if (canReorder) {
+                byRenderType.clear();
+                byPreparedType.clear();
             }
-            syncedFallbackCount = 0;
             lastFastBucket = null;
             lastFastRenderType = null;
-            recycleGroupExtension(this);
-        }
-
-        private static int idHash(RenderType key) {
-            int h = System.identityHashCode(key) * 0x9E3779B9;
-            return h ^ (h >>> 16);
-        }
-
-        private @Nullable FastBucket lookupByIdentity(RenderType key) {
-            if (idSize == 0) return null;
-            int slot = idHash(key) & idMask;
-            int stamp = idStamp;
-            while (idStamps[slot] == stamp) {
-                if (idKeys[slot] == key) return idBuckets[slot];
-                slot = (slot + 1) & idMask;
-            }
-            return null;
-        }
-
-        private void putByIdentity(RenderType key, FastBucket bucket) {
-            if ((idSize + 1) * 2 > idKeys.length) {
-                growIdentityTable();
-            }
-            int slot = idHash(key) & idMask;
-            int stamp = idStamp;
-            while (idStamps[slot] == stamp) {
-                if (idKeys[slot] == key) {
-                    idBuckets[slot] = bucket;
-                    return;
-                }
-                slot = (slot + 1) & idMask;
-            }
-            idStamps[slot] = stamp;
-            idKeys[slot] = key;
-            idBuckets[slot] = bucket;
-            ++idSize;
-        }
-
-        private void growIdentityTable() {
-            int oldCap = idKeys.length;
-            int newCap = oldCap * 2;
-            int newMask = newCap - 1;
-            RenderType[] newKeys = new RenderType[newCap];
-            FastBucket[] newBuckets = new FastBucket[newCap];
-            int[] newStamps = new int[newCap];
-            int stamp = idStamp;
-            for (int i = 0; i < oldCap; ++i) {
-                if (idStamps[i] != stamp) continue;
-                RenderType k = idKeys[i];
-                int slot = idHash(k) & newMask;
-                while (newStamps[slot] == stamp) {
-                    slot = (slot + 1) & newMask;
-                }
-                newStamps[slot] = stamp;
-                newKeys[slot] = k;
-                newBuckets[slot] = idBuckets[i];
-            }
-            idKeys = newKeys;
-            idBuckets = newBuckets;
-            idStamps = newStamps;
-            idMask = newMask;
-        }
-
-        private int valueSlot(PreparedRenderType key) {
-            int mask = valueEntries.length - 1;
-            int slot = MeshRunTable.mix(key.hashCode()) & mask;
-            while (valueStamps[slot] == idStamp) {
-                FastBucket existing = (FastBucket) entries.get(valueEntries[slot]);
-                if (existing.renderType.equals(key)) break;
-                slot = (slot + 1) & mask;
-            }
-            return slot;
-        }
-
-        private void indexValue(PreparedRenderType key, int index) {
-            if ((valueSize + 1) * 2 > valueEntries.length) {
-                int[] old = valueEntries, stamps = valueStamps;
-                valueEntries = new int[old.length * 2];
-                valueStamps = new int[valueEntries.length];
-                for (int i = 0; i < old.length; i++) {
-                    if (stamps[i] != idStamp) continue;
-                    int slot = valueSlot(((FastBucket) entries.get(old[i])).renderType);
-                    valueEntries[slot] = old[i];
-                    valueStamps[slot] = idStamp;
-                }
-            }
-            int slot = valueSlot(key);
-            valueEntries[slot] = index;
-            valueStamps[slot] = idStamp;
-            ++valueSize;
         }
 
         public void syncFallbackDraws(int totalFallbackCount) {
+            int additional = totalFallbackCount - syncedFallbackCount;
+            if (additional > 1) entries.ensureCapacity(Math.addExact(entries.size(), additional));
             while (syncedFallbackCount < totalFallbackCount) {
                 entries.add(Integer.valueOf(syncedFallbackCount++));
                 if (!canReorder) {
@@ -336,24 +224,19 @@ public final class ModelFastTrack {
                 return lastFastBucket;
             }
             if (consolidate) {
-                FastBucket byId = lookupByIdentity(renderType);
-                if (byId != null) {
-                    lastFastBucket = byId;
+                var existing = byRenderType.get(renderType);
+                if (existing == null) existing = byPreparedType.get(prepared);
+                if (existing != null) {
+                    lastFastBucket = existing;
                     lastFastRenderType = renderType;
-                    return byId;
-                }
-                int slot = valueSlot(prepared);
-                if (valueStamps[slot] == idStamp) {
-                    lastFastBucket = (FastBucket) entries.get(valueEntries[slot]);
-                    lastFastRenderType = renderType;
-                    return lastFastBucket;
+                    return existing;
                 }
             }
             FastBucket bucket = ModelFastTrack.acquireFastBucket(prepared, consolidate);
             entries.add(bucket);
             if (consolidate) {
-                putByIdentity(renderType, bucket);
-                indexValue(prepared, entries.size() - 1);
+                byRenderType.put(renderType, bucket);
+                byPreparedType.put(prepared, bucket);
             }
             lastFastBucket = bucket;
             lastFastRenderType = renderType;
@@ -363,8 +246,6 @@ public final class ModelFastTrack {
         public void addShadow(ShadowFastTrack shadow) {
             entries.add(shadow);
         }
-
-        Vector3f scratchNormal() { return scratchNormal; }
 
         public void execute(StagedVertexBuffer stagedBuffer, @Nullable OitStage stage, RenderPass renderPass,
                 List<StagedVertexBuffer.Draw> draws, List<PreparedRenderType> drawRenderTypes) {
@@ -404,13 +285,38 @@ public final class ModelFastTrack {
         return targetPipeline;
     }
 
+    private static final class GroupingScratch {
+        final MeshRunTable meshes = new MeshRunTable(), pages = new MeshRunTable();
+        int[] instanceRun = new int[32];
+        int[] runPages = new int[8], pageCursors = new int[8], groupedIds = new int[8],
+            groupedCounts = new int[8], runCursors = new int[8];
+
+        int peakInstances, quietExecutions;
+
+        void begin(int instances) {
+            peakInstances=Math.max(peakInstances,instances);
+            meshes.reset();
+            pages.reset();
+            if (instanceRun.length < instances) instanceRun = new int[Math.max(instances, instanceRun.length * 2)];
+        }
+
+        void ensureRuns(int needed) {
+            if (runPages.length >= needed) return;
+            int cap = Math.max(needed, runPages.length * 2);
+            runPages = Arrays.copyOf(runPages, cap);
+            pageCursors = Arrays.copyOf(pageCursors, cap);
+            groupedIds = new int[cap];
+            groupedCounts = new int[cap];
+            runCursors = new int[cap];
+        }
+    }
+
     static final class FastBucket {
         PreparedRenderType renderType;
         boolean canReorder;
         private ModelPart[] owners = new ModelPart[32];
         private int[] pageIds = new int[32];
         private int[] meshIds = new int[32];
-        private int[] instanceRun = new int[32];
         private int[] instanceInts = new int[32 * RetainedModelManager.INSTANCE_INTS];
         private int instanceCount;
         private @Nullable CommandTape uploadedTape;
@@ -418,11 +324,7 @@ public final class ModelFastTrack {
         private int[] runMeshIds = new int[8];
         private int[] runFirstInstances = new int[8];
         private int[] runInstanceCounts = new int[8];
-        private final MeshRunTable pageTable = new MeshRunTable();
-        private int[] runPages = new int[8], pageCursors = new int[8];
-        private int[] groupedIds = new int[8], groupedCounts = new int[8];
         private int[] ownerIndices = new int[8];
-        private int[] runCursors = new int[8];
         private int runCount;
 
         FastBucket() {}
@@ -451,7 +353,6 @@ public final class ModelFastTrack {
                 owners = Arrays.copyOf(owners, next);
                 pageIds = Arrays.copyOf(pageIds, next);
                 meshIds = Arrays.copyOf(meshIds, next);
-                instanceRun = Arrays.copyOf(instanceRun, next);
                 instanceInts = Arrays.copyOf(instanceInts, next * RetainedModelManager.INSTANCE_INTS);
             }
             owners[instanceCount] = owner;
@@ -469,7 +370,6 @@ public final class ModelFastTrack {
                 owners = Arrays.copyOf(owners, next);
                 pageIds = Arrays.copyOf(pageIds, next);
                 meshIds = Arrays.copyOf(meshIds, next);
-                instanceRun = Arrays.copyOf(instanceRun, next);
                 instanceInts = Arrays.copyOf(instanceInts, next * RetainedModelManager.INSTANCE_INTS);
             }
             owners[instanceCount] = owner;
@@ -491,7 +391,7 @@ public final class ModelFastTrack {
             } else {
                 buildGroupedAndCopy(dst);
             }
-            for (int r = 0; r < runCount; ++r) tape.retainModel(owners[ownerIndices[r]]);
+            tape.retainModels(owners, ownerIndices, runCount);
             uploadedTape = tape;
             uploadedOffset = offset;
         }
@@ -535,56 +435,57 @@ public final class ModelFastTrack {
                 runCount = 1;
                 return;
             }
-            RUN_TABLE.reset();
+            var scratch = grouping;
+            scratch.begin(instanceCount);
             int runs = 0, pages = 0;
-            pageTable.reset();
             for (int i = 0; i < instanceCount; ++i) {
                 int id = meshIds[i];
-                int r = RUN_TABLE.getOrInsert(id, runs);
+                int r = scratch.meshes.getOrInsert(id, runs);
                 if (r < 0) {
                     r = runs++;
                     ensureRunCapacity(runs);
-                    int page = pageTable.getOrInsert(pageIds[i], pages);
+                    scratch.ensureRuns(runs);
+                    int page = scratch.pages.getOrInsert(pageIds[i], pages);
                     if (page < 0) {
                         page = pages++;
-                        pageCursors[page] = 0;
+                        scratch.pageCursors[page] = 0;
                     }
-                    runPages[r] = page;
-                    ++pageCursors[page];
+                    scratch.runPages[r] = page;
+                    ++scratch.pageCursors[page];
                     ownerIndices[r] = i;
                     runMeshIds[r] = id;
                     runInstanceCounts[r] = 1;
                 } else {
                     ++runInstanceCounts[r];
                 }
-                instanceRun[i] = r;
+                scratch.instanceRun[i] = r;
             }
             if (pages > 1) {
                 int start = 0;
                 for (int p = 0; p < pages; ++p) {
-                    int count = pageCursors[p];
-                    pageCursors[p] = start;
+                    int count = scratch.pageCursors[p];
+                    scratch.pageCursors[p] = start;
                     start += count;
                 }
                 for (int r = 0; r < runs; ++r) {
-                    int grouped = pageCursors[runPages[r]]++;
-                    groupedIds[grouped] = runMeshIds[r];
-                    groupedCounts[grouped] = runInstanceCounts[r];
-                    runPages[r] = grouped;
+                    int grouped = scratch.pageCursors[scratch.runPages[r]]++;
+                    scratch.groupedIds[grouped] = runMeshIds[r];
+                    scratch.groupedCounts[grouped] = runInstanceCounts[r];
+                    scratch.runPages[r] = grouped;
                 }
-                System.arraycopy(groupedIds, 0, runMeshIds, 0, runs);
-                System.arraycopy(groupedCounts, 0, runInstanceCounts, 0, runs);
-                for (int i = 0; i < instanceCount; ++i) instanceRun[i] = runPages[instanceRun[i]];
+                System.arraycopy(scratch.groupedIds, 0, runMeshIds, 0, runs);
+                System.arraycopy(scratch.groupedCounts, 0, runInstanceCounts, 0, runs);
+                for (int i = 0; i < instanceCount; ++i) scratch.instanceRun[i] = scratch.runPages[scratch.instanceRun[i]];
             }
             runCount = runs;
             int prefix = 0;
             for (int r = 0; r < runs; ++r) {
                 runFirstInstances[r] = prefix;
-                runCursors[r] = prefix;
+                scratch.runCursors[r] = prefix;
                 prefix += runInstanceCounts[r];
             }
             for (int i = 0; i < instanceCount; ++i) {
-                int dstIndex = runCursors[instanceRun[i]]++;
+                int dstIndex = scratch.runCursors[scratch.instanceRun[i]]++;
                 MemorySegment.copy(instanceInts, i * RetainedModelManager.INSTANCE_INTS,
                     dst, ValueLayout.JAVA_INT, (long) dstIndex * RetainedModelManager.INSTANCE_BYTES,
                     RetainedModelManager.INSTANCE_INTS);
@@ -598,11 +499,6 @@ public final class ModelFastTrack {
                 runFirstInstances = Arrays.copyOf(runFirstInstances, cap);
                 runInstanceCounts = Arrays.copyOf(runInstanceCounts, cap);
                 ownerIndices = Arrays.copyOf(ownerIndices, cap);
-                runPages = Arrays.copyOf(runPages, cap);
-                pageCursors = Arrays.copyOf(pageCursors, cap);
-                groupedIds = Arrays.copyOf(groupedIds, cap);
-                groupedCounts = Arrays.copyOf(groupedCounts, cap);
-                runCursors = Arrays.copyOf(runCursors, cap);
             }
         }
 
@@ -657,7 +553,7 @@ public final class ModelFastTrack {
             if (fastBucket == null) {
                 fastBucket = ext.acquireFastBucket(renderType, prepared);
             }
-            fastBucket.addInstance(owner, meshId, pageId, pose, colorArgb, overlayCoords, lightCoords, ext.scratchNormal());
+            fastBucket.addInstance(owner, meshId, pageId, pose, colorArgb, overlayCoords, lightCoords, null);
         }
 
         void recordTranslatedInstance(ModelPart owner, int meshId, int pageId, PoseStack.Pose pose, float tx, float ty, float tz,
@@ -666,7 +562,7 @@ public final class ModelFastTrack {
             if (fastBucket == null) {
                 fastBucket = ext.acquireFastBucket(renderType, prepared);
             }
-            fastBucket.addTranslatedInstance(owner, meshId, pageId, pose, tx, ty, tz, colorArgb, overlayCoords, lightCoords, ext.scratchNormal());
+            fastBucket.addTranslatedInstance(owner, meshId, pageId, pose, tx, ty, tz, colorArgb, overlayCoords, lightCoords, null);
         }
 
         private VertexConsumer fallback() {

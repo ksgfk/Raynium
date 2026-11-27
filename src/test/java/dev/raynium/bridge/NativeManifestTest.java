@@ -20,7 +20,7 @@ class NativeManifestTest {
         object.addProperty("radrayCommit", "b".repeat(40));
         object.addProperty("radrayDirty", false);
         object.addProperty("toolchain", "MSVC-test");
-        JsonArray files = new JsonArray();
+        JsonArray files = new JsonArray(1);
         for (String name : new String[]{"rayniumruntime.dll"}) {
             JsonObject entry = new JsonObject();
             entry.addProperty("path", name);

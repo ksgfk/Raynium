@@ -7,7 +7,6 @@ import dev.raynium.client.renderpearl.CommandTape;
 import dev.raynium.client.renderpearl.RayniumGpuDevice;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
-import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.IdentityHashMap;
 import net.minecraft.client.particle.SingleQuadParticle;
@@ -22,45 +21,29 @@ public final class ParticleFastTrack {
     public static final int INSTANCE_BYTES = 56;
     public static final int INSTANCE_INTS = 14;
     private static final int[] QUAD = {1}, FIRST_INSTANCE = {0};
-    private static final int MAX_POOLED_BATCHES = 64;
-    private static final ArrayDeque<CompactLayerBatch> BATCH_POOL = new ArrayDeque<>(16);
-
     public interface RawParticleAccess {
+        default boolean raynium$hasCompactSlice(SingleQuadParticle.Layer layer) { return true; }
         int raynium$appendCompactLayer(SingleQuadParticle.Layer layer, CompactLayerBatch out);
-    }
-
-    public interface PackedStorageAccess {
-        int[] raynium$packedInts();
     }
 
     private ParticleFastTrack() {}
 
     public static final class PreparedLayers {
-        public final IdentityHashMap<SingleQuadParticle.Layer, StagedVertexBuffer.Draw> draws = new IdentityHashMap<>();
-        public final IdentityHashMap<SingleQuadParticle.Layer, AbstractTexture> textures = new IdentityHashMap<>();
-        public final IdentityHashMap<SingleQuadParticle.Layer, CompactLayerBatch> compact = new IdentityHashMap<>();
+        public final IdentityHashMap<SingleQuadParticle.Layer, StagedVertexBuffer.Draw> draws;
+        public final IdentityHashMap<SingleQuadParticle.Layer, AbstractTexture> textures;
+        public final IdentityHashMap<SingleQuadParticle.Layer, CompactLayerBatch> compact;
 
-        public void clear() {
-            compact.forEach((layer, batch) -> batch.recycle());
-            compact.clear();
-            draws.clear();
-            textures.clear();
+        public PreparedLayers() {
+            draws = new IdentityHashMap<>();
+            textures = new IdentityHashMap<>();
+            compact = new IdentityHashMap<>();
         }
-    }
 
-    public static CompactLayerBatch acquireBatch(SingleQuadParticle.Layer layer) {
-        CompactLayerBatch batch = BATCH_POOL.pollFirst();
-        if (batch == null) {
-            batch = new CompactLayerBatch();
-        }
-        batch.init(layer);
-        return batch;
-    }
-
-    static void recycleBatch(CompactLayerBatch batch) {
-        batch.reset();
-        if (BATCH_POOL.size() < MAX_POOLED_BATCHES) {
-            BATCH_POOL.addFirst(batch);
+        public PreparedLayers(int fallbackLayers, int compactLayers) {
+            // Vanilla and executeGroup use hash-table iteration for draw order. Keep its layout for nonempty draw maps.
+            draws = fallbackLayers == 0 ? new IdentityHashMap<>(0) : new IdentityHashMap<>();
+            compact = compactLayers == 0 ? new IdentityHashMap<>(0) : new IdentityHashMap<>();
+            textures = new IdentityHashMap<>(fallbackLayers);
         }
     }
 
@@ -130,48 +113,23 @@ public final class ParticleFastTrack {
 
     public static final class CompactLayerBatch {
         private final int[] runCount = new int[1];
-        private SingleQuadParticle.Layer layer;
+        private final SingleQuadParticle.Layer layer;
         private AbstractTexture texture;
-        private float[][] sliceFloats = new float[4][];
-        private int[][] sliceInts = new int[4][];
-        private int[][] slicePackedInts = new int[4][];
-        private int[] sliceCounts = new int[4];
+        private float[][] sliceFloats;
+        private int[][] sliceInts;
+        private int[] sliceCounts;
         private int sliceCount;
         private int particleCount;
         private @Nullable CommandTape uploadedTape;
         private long uploadedOffset;
 
-        CompactLayerBatch() {}
+        public CompactLayerBatch(SingleQuadParticle.Layer layer) { this(layer, 4); }
 
-        public CompactLayerBatch(SingleQuadParticle.Layer layer) {
+        public CompactLayerBatch(SingleQuadParticle.Layer layer, int slices) {
             this.layer = layer;
-        }
-
-        void init(SingleQuadParticle.Layer layer) {
-            this.layer = layer;
-            this.texture = null;
-            this.sliceCount = 0;
-            this.particleCount = 0;
-            this.uploadedTape = null;
-            this.uploadedOffset = 0;
-        }
-
-        void reset() {
-            for (int i = 0; i < sliceCount; ++i) {
-                sliceFloats[i] = null;
-                sliceInts[i] = null;
-                slicePackedInts[i] = null;
-            }
-            layer = null;
-            texture = null;
-            sliceCount = 0;
-            particleCount = 0;
-            uploadedTape = null;
-            uploadedOffset = 0;
-        }
-
-        public void recycle() {
-            recycleBatch(this);
+            sliceFloats = new float[slices][];
+            sliceInts = new int[slices][];
+            sliceCounts = new int[slices];
         }
 
         public void setTexture(AbstractTexture texture) { this.texture = texture; }
@@ -179,10 +137,9 @@ public final class ParticleFastTrack {
 
         private void ensureSliceCapacity() {
             if (sliceCount == sliceCounts.length) {
-                int next = sliceCounts.length * 2;
+                int next = Math.max(1, sliceCounts.length * 2);
                 sliceFloats = Arrays.copyOf(sliceFloats, next);
                 sliceInts = Arrays.copyOf(sliceInts, next);
-                slicePackedInts = Arrays.copyOf(slicePackedInts, next);
                 sliceCounts = Arrays.copyOf(sliceCounts, next);
             }
         }
@@ -192,18 +149,6 @@ public final class ParticleFastTrack {
             ensureSliceCapacity();
             sliceFloats[sliceCount] = floatValues;
             sliceInts[sliceCount] = intValues;
-            slicePackedInts[sliceCount] = null;
-            sliceCounts[sliceCount] = count;
-            ++sliceCount;
-            particleCount += count;
-        }
-
-        public void appendPacked(int[] packedInts, int count) {
-            if (count <= 0) return;
-            ensureSliceCapacity();
-            sliceFloats[sliceCount] = null;
-            sliceInts[sliceCount] = null;
-            slicePackedInts[sliceCount] = packedInts;
             sliceCounts[sliceCount] = count;
             ++sliceCount;
             particleCount += count;
@@ -219,12 +164,7 @@ public final class ParticleFastTrack {
                 long dstByteOffset = 0L;
                 for (int s = 0; s < sliceCount; ++s) {
                     int count = sliceCounts[s];
-                    int[] packed = slicePackedInts[s];
-                    if (packed != null) {
-                        MemorySegment.copy(packed, 0, dst, ValueLayout.JAVA_INT, dstByteOffset, count * INSTANCE_INTS);
-                    } else {
-                        packParticlesToSegment(sliceFloats[s], sliceInts[s], count, dst, dstByteOffset);
-                    }
+                    packParticlesToSegment(sliceFloats[s], sliceInts[s], count, dst, dstByteOffset);
                     dstByteOffset += (long) count * INSTANCE_BYTES;
                 }
                 uploadedTape = tape;

@@ -136,8 +136,9 @@ class NativeWireframeTest {
             long sequence=1;
             for(int start=0;start<19;start+=5) {
                 var growOpaque=frame(++sequence,1,atlas.handle(),light.handle(),2,-1);
-                var meshes=new ArrayList<TerrainFixture.Mesh>();
-                for(int i=start;i<Math.min(start+5,19);i++) {
+                int end=Math.min(start+5,19);
+                var meshes=new ArrayList<TerrainFixture.Mesh>(end-start);
+                for(int i=start;i<end;i++) {
                     removed[i]=200+i;
                     meshes.add(new TerrainFixture.Mesh(removed[i],filler,1<<20,0));
                 }
@@ -147,15 +148,15 @@ class NativeWireframeTest {
             }
 
             for(int group=0;group<4;group++) {
-                var meshes=new ArrayList<TerrainFixture.Mesh>();
-                var indices=new ArrayList<TerrainFixture.Index>();
+                boolean last=group==3;
+                var meshes=new ArrayList<TerrainFixture.Mesh>(last?7:6);
+                var indices=new ArrayList<TerrainFixture.Index>(6);
                 for(int i=0;i<6;i++) {
                     int id=110+6*group+i;
                     meshes.add(new TerrainFixture.Mesh(id,filler,1<<20,2));
                     indices.add(new TerrainFixture.Index(id,fillerIndices));
                     removed[19+6*group+i]=id;
                 }
-                boolean last=group==3;
                 if(last) meshes.add(new TerrainFixture.Mesh(1,corner(false),8,0));
                 var grown=frame(++sequence,1,atlas.handle(),light.handle(),last?1:2,-1);
                 grown.meshes=meshes; grown.indices=indices;
@@ -198,13 +199,13 @@ class NativeWireframeTest {
                 var f2=frame(2,2,atlas.handle(),light.handle(),1,-1); f2.flags=0;
                 try(var source=java.lang.foreign.Arena.ofConfined(); var storage=new NativeFrameBuffer();
                     var tape=new dev.raynium.client.renderpearl.CommandTape(renderer)) {
-                    var wf=payload.originalQuadGroups;
+                    var wf=payload.uploadLayout().originalQuadGroups;
                     storage.begin(1,0,1,0,wf==null?0:NativeFrameBuffer.alignedBytes(wf.length));
                     storage.terrain(atlas.handle(),light.handle(),1);
                     var vertices=source.allocate(rawCorner.length,4);
                     vertices.copyFrom(java.lang.foreign.MemorySegment.ofBuffer(payload.directVertices()));
-                    storage.meshDirect(1L,vertices,payload.vertexCount,0,source,payload.groupQuadCounts,payload.layoutFlags,
-                        payload.minBounds,payload.maxBounds,wf);
+                    storage.meshDirect(1L,vertices,payload.vertexCount,0,source,payload.uploadLayout().groupQuadCounts,payload.layoutFlags,
+                        payload.uploadLayout().minBounds,payload.uploadLayout().maxBounds,wf);
                     storage.instance(0,0,0,0);
                     storage.visible(1L,-1,0,0,1);
                     var view=tape.addView(storage,storage.finish(f2),atlas,light);

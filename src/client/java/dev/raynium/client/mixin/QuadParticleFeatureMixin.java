@@ -7,8 +7,8 @@ import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
 import dev.raynium.client.renderpearl.RayniumGpuDevice;
 import dev.raynium.client.world.ParticleFastTrack;
 import dev.raynium.client.world.ParticleFastTrack.PreparedLayers;
+import it.unimi.dsi.fastutil.objects.Reference2IntOpenHashMap;
 import java.util.ArrayList;
-import java.util.IdentityHashMap;
 import java.util.List;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.particle.SingleQuadParticle;
@@ -30,9 +30,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(QuadParticleFeatureRenderer.class)
 abstract class QuadParticleFeatureMixin {
     @Shadow @Final private List<QuadParticleFeatureRenderer.PreparedGroup> groups;
-    @Unique private final IdentityHashMap<SingleQuadParticle.Layer, Boolean> raynium$eligible = new IdentityHashMap<>();
-    @Unique private final List<@Nullable PreparedLayers> raynium$compactGroups = new ArrayList<>();
-    @Unique private int raynium$preparedCount;
+    @Unique private @Nullable ArrayList<@Nullable PreparedLayers> raynium$compactGroups;
 
     @Inject(method = "prepareGroup", at = @At("HEAD"), cancellable = true)
     private void raynium$prepareCompactParticles(FeatureFrameContext context, List<QuadParticleFeatureRenderer.Submit> submits,
@@ -40,29 +38,37 @@ abstract class QuadParticleFeatureMixin {
         if (submits.isEmpty()) return;
         if (!(RenderSystem.getDevice() instanceof RayniumGpuDevice device)) return;
         boolean useOit = Minecraft.getInstance().gameRenderer.useImprovedTransparency();
-        var eligible = raynium$eligible;
-        eligible.clear();
+        // Vanilla has three atlases per transparency mode. A negative count vetoes the whole layer.
+        var slices = new Reference2IntOpenHashMap<SingleQuadParticle.Layer>(3);
         for (QuadParticleFeatureRenderer.Submit submit : submits) {
             QuadParticleRenderState particles = submit.particles();
             if (particles.isEmpty()) continue;
             boolean exactClass = particles.getClass() == QuadParticleRenderState.class;
             for (SingleQuadParticle.Layer layer : particles.layers()) {
                 if (layer.translucent() != submit.translucent()) continue;
-                boolean layerOk = exactClass && ParticleFastTrack.isLayerEligible(device, layer, useOit);
-                eligible.merge(layer, layerOk, (a, b) -> a && b);
+                int previous = slices.getInt(layer);
+                if (previous < 0) continue;
+                if (!exactClass || !ParticleFastTrack.isLayerEligible(device, layer, useOit)) {
+                    slices.put(layer, -1);
+                } else {
+                    var raw = (ParticleFastTrack.RawParticleAccess) (Object) particles;
+                    slices.put(layer, raw.raynium$hasCompactSlice(layer) ? previous + 1 : previous);
+                }
             }
         }
-        if (!eligible.containsValue(Boolean.TRUE)) return;
+        int compactLayers = 0;
+        for (var counts = slices.values().iterator(); counts.hasNext();) {
+            if (counts.nextInt() >= 0) ++compactLayers;
+        }
+        if (compactLayers == 0) return;
 
         StagedVertexBuffer stagedVertexBuffer = context.stagedVertexBuffer();
         int groupIndex = groups.size();
-        while (raynium$compactGroups.size() <= groupIndex) raynium$compactGroups.add(null);
-        var prepared = raynium$compactGroups.get(groupIndex);
-        if (prepared == null) {
-            prepared = new PreparedLayers();
-            raynium$compactGroups.set(groupIndex, prepared);
-        }
-        raynium$preparedCount = groupIndex + 1;
+        if (raynium$compactGroups == null) raynium$compactGroups = new ArrayList<>(groupIndex + 1);
+        else if (raynium$compactGroups.size() < groupIndex) raynium$compactGroups.ensureCapacity(groupIndex + 1);
+        while (raynium$compactGroups.size() < groupIndex) raynium$compactGroups.add(null);
+        var prepared = new PreparedLayers(slices.size() - compactLayers, compactLayers);
+        raynium$compactGroups.add(prepared);
 
         for (QuadParticleFeatureRenderer.Submit submit : submits) {
             QuadParticleRenderState particles = submit.particles();
@@ -70,8 +76,13 @@ abstract class QuadParticleFeatureMixin {
             for (SingleQuadParticle.Layer layer : particles.layers()) {
                 if (layer.translucent() != submit.translucent()) continue;
                 AbstractTexture texture = context.textureManager().getTexture(layer.textureAtlasLocation());
-                if (Boolean.TRUE.equals(eligible.get(layer))) {
-                    ParticleFastTrack.CompactLayerBatch batch = prepared.compact.computeIfAbsent(layer, ParticleFastTrack::acquireBatch);
+                int sliceCount = slices.getOrDefault(layer, -1);
+                if (sliceCount >= 0) {
+                    var batch = prepared.compact.get(layer);
+                    if (batch == null) {
+                        batch = new ParticleFastTrack.CompactLayerBatch(layer, sliceCount);
+                        prepared.compact.put(layer, batch);
+                    }
                     batch.setTexture(texture);
                     ((ParticleFastTrack.RawParticleAccess) (Object) particles).raynium$appendCompactLayer(layer, batch);
                 } else {
@@ -101,7 +112,7 @@ abstract class QuadParticleFeatureMixin {
     private void raynium$executeCompactParticles(FeatureFrameContext context, @Nullable OitStage stage,
             RenderPass renderPass, int groupIndex, List<QuadParticleFeatureRenderer.Submit> submits,
             boolean strictlyOrdered, CallbackInfo ci) {
-        if (groupIndex >= raynium$preparedCount) return;
+        if (raynium$compactGroups == null || groupIndex >= raynium$compactGroups.size()) return;
         var group = raynium$compactGroups.get(groupIndex);
         if (group == null || group.compact.isEmpty()) return;
         for (ParticleFastTrack.CompactLayerBatch batch : group.compact.values()) {
@@ -111,11 +122,6 @@ abstract class QuadParticleFeatureMixin {
 
     @Inject(method = "finishExecute", at = @At("TAIL"))
     private void raynium$clearCompactGroups(FeatureFrameContext context, CallbackInfo ci) {
-        for (int i = 0; i < raynium$preparedCount; ++i) {
-            var group = raynium$compactGroups.get(i);
-            if (group != null) group.clear();
-        }
-        raynium$preparedCount = 0;
-        raynium$eligible.clear();
+        raynium$compactGroups = null;
     }
 }

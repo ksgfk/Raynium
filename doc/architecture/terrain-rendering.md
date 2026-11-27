@@ -13,11 +13,11 @@
 `RenderSectionIndicesMixin` 将透明 uint16/uint32 索引直接归一为 uint32 并写入 `DirectUploadPool` 提供的 `DirectByteBuffer`，在对应原版上传回调确认采用后发布快照，同时把受影响的 `SectionPayload` 登记到脏索引队列。
 透明索引校验使用固定 `vertexCount`，上传后释放并归还顶点缓冲不影响后续排序更新。
 
-在非参考模式下，`SectionUploadMixin` 使用 `NoopTerrainStagingBuffer` 拦截 `SectionRenderDispatcher` 往原版 98 MiB `StagingBuffer` 的顶点与透明索引写入，`UberBufferDrainMixin` 跳过冗余的原版 UberBuffer GPU 排出，同时保留原版已编译状态机与透明排序流转。
+在非参考模式下，`SectionUploadMixin` 使用 `NoopTerrainStagingBuffer` 拦截 `SectionRenderDispatcher` 往原版 98 MiB `StagingBuffer` 的顶点与透明索引写入，`UberBufferDrainMixin` 跳过冗余的原版 UberBuffer GPU 排出，同时保留原版已编译状态机与透明排序流转。暂存表达到 4096 项后，若连续 120 次排空各至多处理 256 项，会在清理条目后收缩两张哈希表。
 `LevelTerrainHookMixin` 在 `LevelRenderer.prepareChunkRenders` 与 `prepareChunkRendersIndirect` 入口完成 Raynium 视图准备后直接返回仅携带视图句柄的占位 `ChunkSectionsToRender`，避免原版二次加锁遍历可见区块并构造未消费的绘制列表。
 `CompiledSectionMeshMixin` 维护层就绪位掩码，`RenderSectionStateMixin` 在 `setSectionMesh` 与 `reset` 时将 `SectionPayload` 与就绪位掩码直接缓存到 `RenderSection` 并将变更区块加入并发脏队列；`LevelTerrainHookMixin`（`clearVisibleSections`）与 `SectionOcclusionGraphMixin`（`addSectionsInFrustum`）推进 `VISIBLE_LIST_VERSION`。
 
-`TerrainCapture` 复用扁平数组并跨连续活跃帧保留热快照；视图、epoch 和可见列表版本匹配时，采集器按世代和槽号定位变更区块。区块替换和透明索引更新按槽号世代戳去重，每次最多就地处理 `max(256, 可见槽数 / 4)` 个通知。可见区块在空与非空之间切换、脏项超限或快照失效时，在 dispatcher 锁内采集区块状态、原点和上传起点，解锁后筛选上传候选。每个视图独立采样当前时间与淡入时长。时间推进和设置变化均可复用快照。投影包含受伤、摇晃与反胃变换；每帧由 Native 进行朝向剔除。普通透明保持原版反向 section 顺序；其他层按原版可见遍历顺序送入，由 Native 按页分桶组织。连续两帧未捕获、失效或停用时释放快照引用；关闭的 section 进入延迟回收队列。
+`TerrainCapture` 复用扁平数组并跨连续活跃帧保留热快照；视图、epoch 和可见列表版本匹配时，采集器按世代和槽号定位变更区块。区块替换和透明索引更新按槽号世代戳去重，每次最多就地处理 `max(256, 可见槽数 / 4)` 个通知。可见区块在空与非空之间切换、脏项超限或快照失效时，在 dispatcher 锁内采集区块状态、原点和上传起点，解锁后筛选上传候选。每个视图独立采样当前时间与淡入时长。时间推进和设置变化均可复用快照。投影包含受伤、摇晃与反胃变换；每帧由 Native 进行朝向剔除。普通透明保持原版反向 section 顺序；其他层按原版可见遍历顺序送入，由 Native 按页分桶组织。连续两帧未捕获、失效或停用时释放快照引用；关闭的 section 进入当前世界的延迟回收队列。退出世界、地形代际失效或停用后端时更换快照、驻留状态和空闲上传池。按旧代际编译的载荷及迟到的归还不会进入新代际的队列或空闲池。
 
 区块首次上传时间与视图时钟相对于 `TerrainCapture` 初始化时的 `Util.getMillis()` 编码。相对毫秒下限取零后加一，原版上传时间为零时保留零哨兵。相对时间达到 `0xffff_fffe` 毫秒时，视图时钟返回零，所有区块全可见。顶点着色器按无符号毫秒差计算进度，起点晚于当前时刻时进度为零，零起点或零时长表示全可见。距离相机 16 方块内免淡入，16 至 32 方块间按距离过渡。
 
@@ -31,7 +31,7 @@ Java `TerrainResidency` 保留 3 MiB 软预算，按整个 section 的三层及�
 已驻留透明排序索引更新优先，可突破软预算；只更新索引，不重新上传顶点。
 当前可见或回退 section 保持活跃，Native 算出的零面组掩码不触发 Java 回收；待移除列表使用 $O(1)$ swap-pop 清理。
 
-每个视图在录制期创建驻留变更记录，后续同批视图可以沿用槽号。未入队关闭时按逆序恢复驻留项、索引与空闲槽。提交回调请求释放已上传的顶点和索引。对外读取使用独立游标的只读视图，原生帧包持有固定长度的只读段。全部借用结束后底层内存才返回 DirectUploadPool。
+每个视图在录制期创建驻留变更记录，后续同批视图可以沿用槽号。未入队关闭时按逆序恢复驻留项、索引与空闲槽。提交回调请求释放已上传的顶点和索引。对外读取使用独立游标的只读视图，原生帧包持有固定长度的只读段。收到释放请求且最后一次借用结束后，顶点布局数组可以回收。顶点数继续用于校验后续透明索引。底层 direct buffer 仅在同一代际内回池。完整扫描按每个 section 最多三条可见记录、一条实例更新分别预留空间。
 尚未选入上传的顶点继续保留。FAILED 不承诺回滚，关闭 renderer 并向上传播，不在原 renderer 重试。
 仅交换链 resize 保留 renderer、驻留几何和纹理。
 关卡或图集几何失效沿用 MC 26.3 `LevelRenderer.invalidateCompiledGeometry`，由注入在新 `SectionCompiler` 创建前推进 epoch。

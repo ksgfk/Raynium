@@ -24,7 +24,7 @@ final class TerrainFixture extends NativeRenderer.Frame {
                 var payload=new MeshPayload(epoch,ByteBuffer.wrap(mesh.vertices),mesh.layer);
                 payloads.add(payload);
                 if(payload.vertexCount!=mesh.vertexCount) throw new IllegalArgumentException("Vertex count mismatch");
-                if(payload.originalQuadGroups!=null) bytes+=NativeFrameBuffer.alignedBytes(payload.originalQuadGroups.length);
+                if(payload.uploadLayout().originalQuadGroups!=null) bytes+=NativeFrameBuffer.alignedBytes(payload.uploadLayout().originalQuadGroups.length);
             }
             buffer.begin(Math.max(visible.size(),instances.size()),removedMeshes.length,meshes.size(),indices.size(),bytes);
             buffer.terrain(terrainAlbedoTexture,terrainLightTexture,1);

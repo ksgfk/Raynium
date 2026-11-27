@@ -202,6 +202,7 @@ public final class NativeBuffer implements GpuBuffer {
             addRange(view.offset,view.length);
         }
         if(rangeCount!=0) return false;
+        if(ranges!=null && ranges.length>1024) ranges=null;
         trackedDirty=false;
         releaseRecording();
         return true;

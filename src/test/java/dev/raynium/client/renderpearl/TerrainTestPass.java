@@ -30,7 +30,7 @@ public final class TerrainTestPass {
             tape.beginRaster(pass);
             var area=pass.renderArea();
             for(int layer=0;layer<3;++layer) tape.terrain(view,layer,area.x(),area.y(),area.width(),area.height(),new TextureViewAndSampler(block,sampler),
-                new TextureViewAndSampler(lighting,sampler),new GpuTextureView[0]);
+                new TextureViewAndSampler(lighting,sampler),null,null,null);
             tape.endRaster();
         }
     }
@@ -43,12 +43,12 @@ public final class TerrainTestPass {
             var atlasBinding=new TextureViewAndSampler(block,sampler);
             var lightBinding=new TextureViewAndSampler(lighting,sampler);
             var targets=new GpuTextureView[][]{{b},{c0,c1},{acc}};
-            var sources=new GpuTextureView[][]{{},{b},{b,c0,c1}};
             for(int i=0;i<3;i++) {
                 var pass=RenderPassDescriptor.builder(()->"terrain fade OIT").withDepthAttachment(z,OptionalDouble.of(0));
                 for(var target:targets[i]) pass.withColorAttachment(target,Optional.of(new Vector4f()));
                 tape.beginRaster(pass.build());
-                tape.terrain(view,3+i,0,0,depth.getWidth(0),depth.getHeight(0),atlasBinding,lightBinding,sources[i]);
+                tape.terrain(view,3+i,0,0,depth.getWidth(0),depth.getHeight(0),atlasBinding,lightBinding,
+                        i>=1?b:null,i==2?c0:null,i==2?c1:null);
                 tape.endRaster();
             }
         }

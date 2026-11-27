@@ -51,7 +51,7 @@ public final class RetainedModelManager {
     private static final it.unimi.dsi.fastutil.ints.IntArrayList FREE_MESH_IDS = new it.unimi.dsi.fastutil.ints.IntArrayList();
     private static int nextMeshId = 16;
     private static final ReferenceQueue<ModelPart> GC_QUEUE = new ReferenceQueue<>();
-    private static final IdentityHashMap<ModelRef, Boolean> LIVE_REFS = new IdentityHashMap<>();
+    private static IdentityHashMap<ModelRef, Boolean> LIVE_REFS = new IdentityHashMap<>();
 
     private RetainedModelManager() {}
 
@@ -122,9 +122,9 @@ public final class RetainedModelManager {
         return b0 | (b1 << 8) | (b2 << 16);
     }
 
-    private static int packNormalizedColumn(float x, float y, float z, Vector3f scratch) {
-        scratch.set(x, y, z).normalize();
-        return packNormalByte4(scratch.x, scratch.y, scratch.z);
+    private static int packNormalizedColumn(float x, float y, float z) {
+        float inverse=org.joml.Math.invsqrt(org.joml.Math.fma(x,x,org.joml.Math.fma(y,y,z*z)));
+        return packNormalByte4(x*inverse,y*inverse,z*inverse);
     }
 
     /** Packs one 80-byte ModelInstance record (20 little-endian ints) directly from Matrix4f/Matrix3f columns. */
@@ -150,9 +150,9 @@ public final class RetainedModelManager {
             dst[intOffset + 16] = packNormalByte4(n.m10(), n.m11(), n.m12());
             dst[intOffset + 17] = packNormalByte4(n.m20(), n.m21(), n.m22());
         } else {
-            dst[intOffset + 15] = packNormalizedColumn(n.m00(), n.m01(), n.m02(), scratch);
-            dst[intOffset + 16] = packNormalizedColumn(n.m10(), n.m11(), n.m12(), scratch);
-            dst[intOffset + 17] = packNormalizedColumn(n.m20(), n.m21(), n.m22(), scratch);
+            dst[intOffset + 15] = packNormalizedColumn(n.m00(), n.m01(), n.m02());
+            dst[intOffset + 16] = packNormalizedColumn(n.m10(), n.m11(), n.m12());
+            dst[intOffset + 17] = packNormalizedColumn(n.m20(), n.m21(), n.m22());
         }
         dst[intOffset + 18] = 0;
         dst[intOffset + 19] = 0;
@@ -195,6 +195,7 @@ public final class RetainedModelManager {
         dst[intOffset + 12] = ARGB.toABGR(colorArgb);
         dst[intOffset + 13] = overlayCoords;
         dst[intOffset + 14] = lightCoords;
+        if(scratch==null) scratch=new Vector3f();
         Vector3f nx = pose.transformNormal(1.0F, 0.0F, 0.0F, scratch);
         dst[intOffset + 15] = packNormalByte4(nx.x(), nx.y(), nx.z());
         Vector3f ny = pose.transformNormal(0.0F, 1.0F, 0.0F, scratch);
@@ -221,12 +222,13 @@ public final class RetainedModelManager {
     public static int resolveMeshId(RayniumGpuDevice device, ModelPart part) {
         NativeRenderer renderer = device.nativeRenderer();
         if (activeRenderer != renderer) {
-            LIVE_REFS.clear();
+            LIVE_REFS = new IdentityHashMap<>();
             drainQueueOnly();
             activeRenderer = renderer;
             ++epoch;
             nextMeshId = 16;
             FREE_MESH_IDS.clear();
+            FREE_MESH_IDS.trim();
         }
         drainGc(renderer);
         PartHandle handle = (PartHandle) (Object) part;
@@ -256,22 +258,27 @@ public final class RetainedModelManager {
     }
 
     public static void invalidateAll() {
+        ModelFastTrack.clearCachedGeometry();
         ++epoch;
         nextMeshId = 16;
         FREE_MESH_IDS.clear();
+        FREE_MESH_IDS.trim();
         NativeRenderer renderer = activeRenderer;
         if (renderer != null && !LIVE_REFS.isEmpty()) {
             for (ModelRef ref : LIVE_REFS.keySet()) {
                 renderer.removeModelMesh(ref.meshId);
             }
         }
-        LIVE_REFS.clear();
+        LIVE_REFS = new IdentityHashMap<>();
         drainQueueOnly();
     }
 
     public static void onDeviceClose(NativeRenderer renderer) {
         if (activeRenderer == renderer) {
-            LIVE_REFS.clear();
+            ModelFastTrack.clearCachedGeometry();
+            FREE_MESH_IDS.clear();
+            FREE_MESH_IDS.trim();
+            LIVE_REFS = new IdentityHashMap<>();
             drainQueueOnly();
             activeRenderer = null;
             ++epoch;

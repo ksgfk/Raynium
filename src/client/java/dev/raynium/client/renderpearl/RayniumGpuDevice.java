@@ -20,7 +20,9 @@ public final class RayniumGpuDevice implements GpuDevice,AutoCloseable {
     private final RayniumPrograms programs;
     private final FrontendCommandEncoder encoder;
     private final dev.raynium.client.terrain.RetainedTerrain terrain=new dev.raynium.client.terrain.RetainedTerrain();
-    private final IdentityHashMap<RenderPipeline,RayniumPipeline> compiledPipelines=new IdentityHashMap<>();
+    // The bundled catalog has 192 registered required/optional pipelines before custom additions.
+    private static final int EXPECTED_COMPILED_PIPELINES=192;
+    private final IdentityHashMap<RenderPipeline,RayniumPipeline> compiledPipelines=new IdentityHashMap<>(EXPECTED_COMPILED_PIPELINES);
     public CommandTape currentBatch() { return backend.encoder.tape(); }
     public NativeRenderer nativeRenderer() { return backend.renderer; }
     public boolean supportsInstanced(RenderPipeline pipeline,String mode) {
@@ -48,9 +50,16 @@ public final class RayniumGpuDevice implements GpuDevice,AutoCloseable {
     }
     public static void recordTerrain(RenderPass pass,CommandTape.TerrainView view,int stage,
             com.mojang.renderpearl.util.TextureViewAndSampler atlas,com.mojang.renderpearl.util.TextureViewAndSampler light,GpuTextureView... inputs) {
+        if(inputs.length!=(stage==4?1:stage==5?3:0)) throw new IllegalArgumentException("Invalid terrain stage inputs");
+        recordTerrainStage(pass,view,stage,atlas,light,inputs.length>0?inputs[0]:null,
+                inputs.length==3?inputs[1]:null,inputs.length==3?inputs[2]:null);
+    }
+    public static void recordTerrainStage(RenderPass pass,CommandTape.TerrainView view,int stage,
+            com.mojang.renderpearl.util.TextureViewAndSampler atlas,com.mojang.renderpearl.util.TextureViewAndSampler light,
+            GpuTextureView bounds,GpuTextureView transmittance0,GpuTextureView transmittance1) {
         var recorder=recorder(pass);
         if(recorder==null) throw new IllegalArgumentException("Invalid terrain render pass");
-        recorder.terrain(view,stage,atlas,light,inputs);
+        recorder.terrain(view,stage,atlas,light,bounds,transmittance0,transmittance1);
     }
     public RayniumGpuDevice(NativeRuntime runtime,NativeRenderer renderer,boolean debug) {
         this(runtime,renderer,debug,java.nio.file.Path.of("."));
@@ -111,7 +120,12 @@ public final class RayniumGpuDevice implements GpuDevice,AutoCloseable {
             }
         },executor);
     }
+    public void retireTerrain() {
+        dev.raynium.client.terrain.TerrainCapture.invalidate();
+        terrain.retire();
+    }
     @Override public void close() {
+        terrain.retire();
         dev.raynium.client.terrain.TerrainCapture.activate(false);
         dev.raynium.client.world.RetainedModelManager.onDeviceClose(backend.renderer);
         compiledPipelines.clear();

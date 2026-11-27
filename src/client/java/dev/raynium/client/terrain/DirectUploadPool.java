@@ -17,16 +17,21 @@ public final class DirectUploadPool {
     static final long MAX_POOLED_BYTES = 64L * 1024 * 1024;
     private static final ByteBuffer EMPTY = ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder());
     @SuppressWarnings("unchecked")
-    private static final ConcurrentLinkedQueue<ByteBuffer>[] BUCKETS = new ConcurrentLinkedQueue[MAX_SHIFT - MIN_SHIFT + 1];
-    private static final AtomicLong POOLED_BYTES = new AtomicLong();
+    private final ConcurrentLinkedQueue<ByteBuffer>[] buckets = new ConcurrentLinkedQueue[MAX_SHIFT - MIN_SHIFT + 1];
+    private final AtomicLong pooledBytes = new AtomicLong();
 
-    static {
-        for (int i = 0; i < BUCKETS.length; i++) {
-            BUCKETS[i] = new ConcurrentLinkedQueue<>();
+    private static volatile DirectUploadPool current=new DirectUploadPool(1);
+    private final long epoch;
+    private DirectUploadPool(long epoch) {
+        this.epoch=epoch;
+        for (int i = 0; i < buckets.length; i++) {
+            buckets[i] = new ConcurrentLinkedQueue<>();
         }
     }
 
-    private DirectUploadPool() {}
+    static void retire(long epoch) {
+        current=new DirectUploadPool(epoch);
+    }
 
     static int bucketIndex(int requiredBytes) {
         if (requiredBytes <= MIN_BUCKET_BYTES) return 0;
@@ -34,16 +39,17 @@ public final class DirectUploadPool {
         return ceilShift - MIN_SHIFT;
     }
 
-    public static ByteBuffer acquire(int requiredBytes) {
+    static ByteBuffer acquire(int requiredBytes,long epoch) {
+        var pool=current;
         if (requiredBytes < 0) throw new IllegalArgumentException("Negative direct upload buffer size: " + requiredBytes);
         if (requiredBytes == 0) return EMPTY;
-        if (requiredBytes > MAX_BUCKET_BYTES) {
+        if (requiredBytes > MAX_BUCKET_BYTES || epoch!=pool.epoch) {
             return ByteBuffer.allocateDirect(requiredBytes).order(ByteOrder.nativeOrder());
         }
         int bucket = bucketIndex(requiredBytes);
-        ByteBuffer pooled = BUCKETS[bucket].poll();
+        ByteBuffer pooled = pool.buckets[bucket].poll();
         if (pooled != null) {
-            POOLED_BYTES.addAndGet(-pooled.capacity());
+            pool.pooledBytes.addAndGet(-pooled.capacity());
             pooled.clear();
             pooled.limit(requiredBytes);
             return pooled;
@@ -54,31 +60,28 @@ public final class DirectUploadPool {
         return fresh;
     }
 
-    public static void release(ByteBuffer buffer) {
+    static void release(ByteBuffer buffer,long epoch) {
+        var pool=current;
+        if(epoch!=pool.epoch) return;
         if (buffer == null || !buffer.isDirect() || buffer.isReadOnly()) return;
         int cap = buffer.capacity();
         if (cap < MIN_BUCKET_BYTES || cap > MAX_BUCKET_BYTES || (cap & (cap - 1)) != 0) return;
         while (true) {
-            long current = POOLED_BYTES.get();
-            if (current + cap > MAX_POOLED_BYTES) return;
-            if (POOLED_BYTES.compareAndSet(current, current + cap)) {
+            long used = pool.pooledBytes.get();
+            if (used + cap > MAX_POOLED_BYTES) return;
+            if (pool.pooledBytes.compareAndSet(used, used + cap)) {
                 buffer.clear();
-                BUCKETS[Integer.numberOfTrailingZeros(cap) - MIN_SHIFT].offer(buffer);
+                pool.buckets[Integer.numberOfTrailingZeros(cap) - MIN_SHIFT].offer(buffer);
                 return;
             }
         }
     }
 
     static long pooledBytes() {
-        return POOLED_BYTES.get();
+        return current.pooledBytes.get();
     }
 
     static void clearForTests() {
-        for (var q : BUCKETS) {
-            ByteBuffer buf;
-            while ((buf = q.poll()) != null) {
-                POOLED_BYTES.addAndGet(-buf.capacity());
-            }
-        }
+        retire(TerrainCapture.epoch());
     }
 }

@@ -4,6 +4,17 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class CommandTapeStorageTest {
+    @Test void idleBudgetIncludesClearedReferenceArraysAndCombinedStreamBytes() {
+        try(var heap=new CommandTape.Storage(); var nativeBytes=new CommandTape.Storage()) {
+            assertTrue(heap.fitsIdlePool());
+            heap.modelReferences.ensureCapacity(8192);
+            heap.reset();
+            assertFalse(heap.fitsIdlePool());
+            nativeBytes.uploads.append(9L<<20);
+            nativeBytes.instanceUploads.append(8L<<20);
+            assertFalse(nativeBytes.fitsIdlePool());
+        }
+    }
     @Test void independentStreamsDropOversizedArenasAfter120LowBatches() {
         try(var storage=new CommandTape.Storage()) {
             var transfer=storage.uploads.append(17L<<20);

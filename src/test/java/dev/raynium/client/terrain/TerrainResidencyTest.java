@@ -281,17 +281,17 @@ class TerrainResidencyTest {
         ByteBuffer src=ByteBuffer.allocate(order.length*112).order(ByteOrder.nativeOrder());
         for(int i=0;i<order.length;i++) src.put(makeQuad(order[i],(float)i));
         src.flip();
-        var mesh=new MeshPayload(1,src,0);
+        var mesh=new MeshPayload(TerrainCapture.epoch(),src,0);
         assertEquals(order.length*4,mesh.vertexCount);
-        assertArrayEquals(new int[]{2,1,2,1,1,2,2},mesh.groupQuadCounts);
+        assertArrayEquals(new int[]{2,1,2,1,1,2,2},mesh.uploadLayout().groupQuadCounts);
         assertEquals(NativeFrameBuffer.LAYOUT_FLAG_FINITE_BOUNDS|NativeFrameBuffer.LAYOUT_FLAG_WIREFRAME_GROUPS,mesh.layoutFlags);
-        assertNotNull(mesh.originalQuadGroups);
-        assertEquals((order.length*3+7)/8,mesh.originalQuadGroups.length);
+        assertNotNull(mesh.uploadLayout().originalQuadGroups);
+        assertEquals((order.length*3+7)/8,mesh.uploadLayout().originalQuadGroups.length);
         // Verify unpacked 3-bit groups match input order exactly.
         for(int q=0;q<order.length;q++) {
             int bit=q*3,b=bit>>>3,shift=bit&7;
-            int packed=Byte.toUnsignedInt(mesh.originalQuadGroups[b]);
-            if(shift>5) packed|=Byte.toUnsignedInt(mesh.originalQuadGroups[b+1])<<8;
+            int packed=Byte.toUnsignedInt(mesh.uploadLayout().originalQuadGroups[b]);
+            if(shift>5) packed|=Byte.toUnsignedInt(mesh.uploadLayout().originalQuadGroups[b+1])<<8;
             assertEquals(order[q],(packed>>>shift)&7);
         }
         // Verify direct vertices are grouped in ascending group order 0..6 (color tag 0x12340000+group).
@@ -299,7 +299,7 @@ class TerrainResidencyTest {
         assertNotNull(direct);
         int cursor=0;
         for(int g=0;g<7;g++) {
-            for(int k=0;k<mesh.groupQuadCounts[g];k++) {
+            for(int k=0;k<mesh.uploadLayout().groupQuadCounts[g];k++) {
                 assertEquals(0x12340000+g,direct.getInt(cursor*112+12));
                 cursor++;
             }
@@ -312,13 +312,13 @@ class TerrainResidencyTest {
         try(var frame=new NativeFrameBuffer()) {
             var residency=new TerrainResidency();
             residency.reset(NativeRenderer.nextFrameId());
-            var water=new MeshPayload(1,ByteBuffer.allocate(112),2);
+            var water=new MeshPayload(TerrainCapture.epoch(),ByteBuffer.allocate(112),2);
             var values=ByteBuffer.allocate(24).order(java.nio.ByteOrder.nativeOrder());
             for(int value:new int[]{0,1,2,2,3,0}) values.putInt(value);
             values.flip();
             var first=water.indices=water.copyIndices(values,4);
-            var section=new SectionPayload(1,water);
-            var c=capture();
+            var section=new SectionPayload(TerrainCapture.epoch(),water);
+            var c=capture(); c.epoch=TerrainCapture.epoch();
             put(c,0,section,0,1,0x010000);
             residency.prepare(c,frame,16,17,true);
             residency.stageCommit().submitted().run();
@@ -349,9 +349,9 @@ class TerrainResidencyTest {
             var residency=new TerrainResidency();
             long epoch=NativeRenderer.nextFrameId();
             residency.reset(epoch);
-            var water=new MeshPayload(1,ByteBuffer.allocate(112),2);
-            var section=new SectionPayload(1,water);
-            var c=capture();
+            var water=new MeshPayload(TerrainCapture.epoch(),ByteBuffer.allocate(112),2);
+            var section=new SectionPayload(TerrainCapture.epoch(),water);
+            var c=capture(); c.epoch=TerrainCapture.epoch();
             put(c,0,section,0,1,0x010000);
             water.indices=indices(water,0,1,2,2,3,0);
             TerrainCapture.recordDirtyIndices(section);
@@ -371,11 +371,11 @@ class TerrainResidencyTest {
         TerrainCapture.activate(true);
         try(var frame=new NativeFrameBuffer()) {
             var residency=new TerrainResidency(); long epoch=NativeRenderer.nextFrameId(); residency.reset(epoch);
-            var solid=new MeshPayload(1,ByteBuffer.allocate(112),0);
-            var water=new MeshPayload(1,ByteBuffer.allocate(112),2);
+            var solid=new MeshPayload(TerrainCapture.epoch(),ByteBuffer.allocate(112),0);
+            var water=new MeshPayload(TerrainCapture.epoch(),ByteBuffer.allocate(112),2);
             var idx1=indices(water,0,1,2,2,3,0); water.indices=idx1;
-            var section=new SectionPayload(1,solid,water);
-            var c=capture(); put(c,0,section,0,1,0x010001); c.fadeStart[0]=12345;
+            var section=new SectionPayload(TerrainCapture.epoch(),solid,water);
+            var c=capture(); c.epoch=TerrainCapture.epoch(); put(c,0,section,0,1,0x010001); c.fadeStart[0]=12345;
             // Frame 1: full prepare + commit establishes cached visible & instances.
             residency.prepare(c,frame,16,17,true);
             assertEquals(0,residency.reuseFlags());
@@ -543,13 +543,13 @@ class TerrainResidencyTest {
     }
     @Test void directUploadPoolReusesPowerOfTwoBuffersAndRespectsCap() {
         DirectUploadPool.clearForTests();
-        var a=DirectUploadPool.acquire(100);
+        var a=DirectUploadPool.acquire(100,TerrainCapture.epoch());
         assertEquals(4096,a.capacity()); assertEquals(100,a.limit());
-        DirectUploadPool.release(a);
+        DirectUploadPool.release(a,TerrainCapture.epoch());
         assertEquals(4096,DirectUploadPool.pooledBytes());
-        var b=DirectUploadPool.acquire(3000);
+        var b=DirectUploadPool.acquire(3000,TerrainCapture.epoch());
         assertSame(a,b); assertEquals(3000,b.limit());
         assertEquals(0,DirectUploadPool.pooledBytes());
-        DirectUploadPool.release(b);
+        DirectUploadPool.release(b,TerrainCapture.epoch());
     }
 }

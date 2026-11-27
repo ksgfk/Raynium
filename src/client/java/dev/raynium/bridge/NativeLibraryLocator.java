@@ -2,6 +2,7 @@ package dev.raynium.bridge;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -122,11 +123,14 @@ public final class NativeLibraryLocator {
     }
 
     private byte[] readSmallFile(Path path) throws IOException {
-        try (InputStream input = Files.newInputStream(path)) {
-            byte[] bytes = input.readNBytes(1024 * 1024 + 1);
-            if (bytes.length > 1024 * 1024) throw new IOException("Native metadata exceeds 1 MiB: " + path);
-            return bytes;
+        long size = Files.size(path);
+        if (size > 1024 * 1024) throw new IOException("Native metadata exceeds 1 MiB: " + path);
+        byte[] bytes = new byte[(int) size];
+        try (var input = new DataInputStream(Files.newInputStream(path))) {
+            input.readFully(bytes);
+            if (input.read() != -1) throw new IOException("Native metadata changed while reading: " + path);
         }
+        return bytes;
     }
 
     private String sha256(Path path) throws IOException {

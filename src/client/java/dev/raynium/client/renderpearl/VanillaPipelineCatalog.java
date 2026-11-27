@@ -18,8 +18,10 @@ public final class VanillaPipelineCatalog {
         this.byPipeline=byPipeline; this.entries=List.copyOf(entries);
     }
     public static VanillaPipelineCatalog create() {
-        var names=new IdentityHashMap<RenderPipeline,List<String>>();
         var fields=RenderPipelines.class.getFields();
+        var required=RenderPipelines.requiredPipelines();
+        var optionalPipelines=RenderPipelines.optionalPipelines();
+        var names=new IdentityHashMap<RenderPipeline,List<String>>(Math.max(fields.length,required.size()+optionalPipelines.size()));
         Arrays.sort(fields,Comparator.comparing(java.lang.reflect.Field::getName));
         try {
             for(var field:fields) {
@@ -31,13 +33,13 @@ public final class VanillaPipelineCatalog {
                 }
             }
         } catch(ReflectiveOperationException failure) { throw new IllegalStateException("Cannot enumerate vanilla pipelines",failure); }
-        for(var pipeline:RenderPipelines.requiredPipelines()) add(names,pipeline,"required:"+pipeline.getLocation());
-        var optional=Collections.newSetFromMap(new IdentityHashMap<RenderPipeline,Boolean>());
-        for(var pipeline:RenderPipelines.optionalPipelines()) { optional.add(pipeline); add(names,pipeline,"optional:"+pipeline.getLocation()); }
+        for(var pipeline:required) add(names,pipeline,"required:"+pipeline.getLocation());
+        var optional=Collections.newSetFromMap(new IdentityHashMap<RenderPipeline,Boolean>(optionalPipelines.size()));
+        for(var pipeline:optionalPipelines) { optional.add(pipeline); add(names,pipeline,"optional:"+pipeline.getLocation()); }
         var ordered=new ArrayList<>(names.entrySet());
         ordered.sort(Comparator.comparing(entry->entry.getValue().getFirst()));
-        var entries=new ArrayList<Entry>();
-        var byPipeline=new IdentityHashMap<RenderPipeline,Entry>();
+        var entries=new ArrayList<Entry>(ordered.size());
+        var byPipeline=new IdentityHashMap<RenderPipeline,Entry>(ordered.size());
         for(var item:ordered) {
             var pipeline=item.getKey();
             var entry=new Entry(entries.size()+1,item.getValue(),pipeline,PipelineIdentity.of(pipeline),optional.contains(pipeline));
@@ -46,7 +48,7 @@ public final class VanillaPipelineCatalog {
         return new VanillaPipelineCatalog(byPipeline,entries);
     }
     private static void add(IdentityHashMap<RenderPipeline,List<String>> names,RenderPipeline pipeline,String name) {
-        names.computeIfAbsent(Objects.requireNonNull(pipeline),ignored->new ArrayList<>()).add(name);
+        names.computeIfAbsent(Objects.requireNonNull(pipeline),ignored->new ArrayList<>(2)).add(name);
     }
     public List<Entry> entries() { return entries; }
     public Entry require(RenderPipeline pipeline) {

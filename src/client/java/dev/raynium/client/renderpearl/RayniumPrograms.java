@@ -5,6 +5,8 @@ import com.google.gson.reflect.TypeToken;
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.pipeline.*;
 import dev.raynium.bridge.NativeTexture;
+import it.unimi.dsi.fastutil.ints.IntArrayList;
+import it.unimi.dsi.fastutil.ints.IntList;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.security.*;
@@ -66,17 +68,20 @@ final class RayniumPrograms {
     }
 
     private static List<String> defineFields(net.minecraft.client.renderer.ShaderDefines defines) {
-        var fields=new ArrayList<String>();
         var sorted=new TreeMap<String,String>();
         defines.flags().forEach(flag->sorted.put(flag,""));
         sorted.putAll(defines.values());
+        var fields=new ArrayList<String>(2*sorted.size());
         sorted.forEach((name,value)->{ fields.add(name); fields.add(value); });
         return fields;
     }
 
     static String key(String vertex,String fragment,net.minecraft.client.renderer.ShaderDefines defines) {
-        var fields=new ArrayList<>(List.of(digest(vertex),digest(fragment)));
-        fields.addAll(defineFields(defines));
+        var definitions=defineFields(defines);
+        var fields=new ArrayList<String>(2+definitions.size());
+        fields.add(digest(vertex));
+        fields.add(digest(fragment));
+        fields.addAll(definitions);
         return "p_"+digest(String.join("\0",fields));
     }
 
@@ -111,23 +116,31 @@ final class RayniumPrograms {
     static Preparation prepare(RenderPipeline pipeline,Program program,byte[] pack) {
         if(program.pushBytes()>pipeline.pushConstantSize()) throw new IllegalArgumentException("Push constant range exceeds pipeline layout");
         var declared=BindGroupLayout.flattenUniforms(pipeline.getBindGroupLayouts());
-        var routes=new ArrayList<Route>();
-        var names=new ArrayList<String>();
+        int resourceCount=program.resources().size();
+        var routes=new ArrayList<Route>(resourceCount);
+        var names=new ArrayList<String>(resourceCount);
         resolveResources(declared,program.resources(),routes,names);
-        var bindings=new ArrayList<Integer>(); var attributes=new ArrayList<Integer>();
-        var used=new HashSet<String>();
         var formats=pipeline.getVertexFormatBindings();
+        int bindingCount=0;
+        for(var format:formats) if(format!=null) ++bindingCount;
+        var bindings=new IntArrayList(3*bindingCount);
+        var attributes=new IntArrayList(4*program.inputs().size());
+        var used=HashSet.<String>newHashSet(program.inputs().size());
         for(int slot=0;slot<formats.size();++slot) {
             var format=formats.get(slot);
             if(format==null) continue;
-            Collections.addAll(bindings,slot,format.getVertexSize(),
-                pipeline.getPrimitiveTopology()==PrimitiveTopology.POINTS && slot==0?1:format.getStepRate());
+            bindings.add(slot);
+            bindings.add(format.getVertexSize());
+            bindings.add(pipeline.getPrimitiveTopology()==PrimitiveTopology.POINTS && slot==0?1:format.getStepRate());
             for(var element:format.getElements()) {
                 var input=program.inputs().get(element.name());
                 if(input==null) continue;
                 if(!used.add(element.name())) throw new IllegalArgumentException("Duplicate active vertex element "+element.name());
                 int value=vertexFormat(element.format(),input.type());
-                Collections.addAll(attributes,slot,input.location(),element.offset(),value);
+                attributes.add(slot);
+                attributes.add(input.location());
+                attributes.add(element.offset());
+                attributes.add(value);
             }
         }
         if(used.size()!=program.inputs().size()) throw new IllegalArgumentException("Missing active vertex input");
@@ -203,24 +216,25 @@ final class RayniumPrograms {
         else if("particle".equals(inst.mode())) { stride0=24; stride1=56; spec=PARTICLE_INSTANCED_ATTRS; }
         else if("shadow".equals(inst.mode())) { stride0=24; stride1=56; spec=SHADOW_INSTANCED_ATTRS; }
         else return null;
-        var routes=new ArrayList<Route>();
-        var names=new ArrayList<String>();
+        int resourceCount=inst.resources().size();
+        var routes=new ArrayList<Route>(resourceCount);
+        var names=new ArrayList<String>(resourceCount);
         resolveResources(declared,inst.resources(),routes,names);
-        var bindings=List.of(0,stride0,0,1,stride1,1);
-        var attributes=new ArrayList<Integer>();
-        var used=new HashSet<String>();
+        var bindings=IntList.of(0,stride0,0,1,stride1,1);
+        var attributes=new IntArrayList(4*inst.inputs().size());
         for(var attr:spec) {
             var input=inst.inputs().get(attr.name());
             if(input==null) continue;
-            used.add(attr.name());
-            Collections.addAll(attributes,attr.slot(),input.location(),attr.offset(),vertexFormat(attr.format(),input.type()));
+            attributes.add(attr.slot());
+            attributes.add(input.location());
+            attributes.add(attr.offset());
+            attributes.add(vertexFormat(attr.format(),input.type()));
         }
-        if(used.size()!=inst.inputs().size()) throw new IllegalArgumentException("Missing active instanced vertex input for "+inst.program());
+        if(attributes.size()/4!=inst.inputs().size()) throw new IllegalArgumentException("Missing active instanced vertex input for "+inst.program());
         return new InstancedPreparation(inst.mode(),inst.program(),encodeStateWords(pipeline,bindings,attributes),List.copyOf(routes),List.copyOf(names));
     }
 
-    private static int[] encodeStateWords(RenderPipeline pipeline,List<Integer> bindings,List<Integer> attributes) {
-        var words=new ArrayList<Integer>();
+    private static int[] encodeStateWords(RenderPipeline pipeline,IntList bindings,IntList attributes) {
         int topology=switch(pipeline.getPrimitiveTopology()) {
             case DEBUG_LINES -> 1; case DEBUG_LINE_STRIP -> 2; case TRIANGLE_STRIP -> 3; default -> 0;
         };
@@ -230,19 +244,35 @@ final class RayniumPrograms {
             case GREATER_THAN->4; case NOT_EQUAL->5; case GREATER_THAN_OR_EQUAL->6; case ALWAYS_PASS->7;
         };
         var colors=pipeline.getColorTargetStates();
-        Collections.addAll(words,topology,(pipeline.isCull()?1:0)|(pipeline.getPolygonMode()==PolygonMode.WIREFRAME?2:0),
-            compare,depth!=null && depth.writeDepth()?1:0,depth==null?0:Float.floatToIntBits(depth.depthBiasConstant()),
-            depth==null?0:Float.floatToIntBits(depth.depthBiasScaleFactor()),bindings.size()/3,attributes.size()/4,colors.size());
-        words.addAll(bindings); words.addAll(attributes);
+        int[] words=new int[9+bindings.size()+attributes.size()+9*colors.size()];
+        words[0]=topology;
+        words[1]=(pipeline.isCull()?1:0)|(pipeline.getPolygonMode()==PolygonMode.WIREFRAME?2:0);
+        words[2]=compare;
+        words[3]=depth!=null && depth.writeDepth()?1:0;
+        words[4]=depth==null?0:Float.floatToIntBits(depth.depthBiasConstant());
+        words[5]=depth==null?0:Float.floatToIntBits(depth.depthBiasScaleFactor());
+        words[6]=bindings.size()/3;
+        words[7]=attributes.size()/4;
+        words[8]=colors.size();
+        int offset=9;
+        bindings.getElements(0,words,offset,bindings.size());
+        offset+=bindings.size();
+        attributes.getElements(0,words,offset,attributes.size());
+        offset+=attributes.size();
         for(var color:colors) {
             if(color==null) throw new IllegalArgumentException("Unbound color target slot");
             var blend=color.blendFunction().orElse(null);
-            Collections.addAll(words,NativeTexture.Format.from(color.format()).ordinal(),color.writeMask(),blend==null?0:1);
-            if(blend==null) words.addAll(Collections.nCopies(6,0));
-            else for(var equation:List.of(blend.color(),blend.alpha()))
-                Collections.addAll(words,blendFactor(equation.sourceFactor()),blendFactor(equation.destFactor()),equation.op().ordinal());
+            words[offset++]=NativeTexture.Format.from(color.format()).ordinal();
+            words[offset++]=color.writeMask();
+            words[offset++]=blend==null?0:1;
+            if(blend==null) offset+=6;
+            else for(var equation:List.of(blend.color(),blend.alpha())) {
+                words[offset++]=blendFactor(equation.sourceFactor());
+                words[offset++]=blendFactor(equation.destFactor());
+                words[offset++]=equation.op().ordinal();
+            }
         }
-        return words.stream().mapToInt(i->i).toArray();
+        return words;
     }
 
     private static int blendFactor(BlendFactor f) {

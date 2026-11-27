@@ -36,6 +36,7 @@
     "RayniumBackendMixin",
     "TerrainProjectionMixin",
     "LevelTerrainHookMixin",
+    "LevelExtractorMixin",
     "TerrainAnchorMixin",
     "SectionUploadMixin",
     "UberBufferDrainMixin",
@@ -48,7 +49,6 @@
     "ModelFeatureRendererMixin",
     "ShadowFeatureRendererMixin",
     "QuadParticleRenderStateMixin",
-    "QuadParticleStorageMixin",
     "QuadParticleFeatureMixin"
   ],
   "injectors": {

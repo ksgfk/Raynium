@@ -29,15 +29,14 @@ abstract class TerrainAnchorMixin implements RetainedTerrain.ViewOwner {
         for(var layer:layers) {
             var pipeline=indirect?multi:override;
             VisualValidation.pipeline(pipeline==null?layer.pipeline(indirect):pipeline);
-            if(raynium$oitStage==null) RayniumGpuDevice.recordTerrain(pass,raynium$view,layer.ordinal(),atlasBinding,lightBinding);
+            if(raynium$oitStage==null) RayniumGpuDevice.recordTerrainStage(pass,raynium$view,layer.ordinal(),atlasBinding,lightBinding,null,null,null);
             else {
                 var params=raynium$oitParams;
-                GpuTextureView[] reads=switch(raynium$oitStage) {
-                    case DEPTH_BOUNDS -> new GpuTextureView[0];
-                    case TRANSMITTANCE -> new GpuTextureView[]{params.depthBoundsTargetView};
-                    case ACCUMULATE -> new GpuTextureView[]{params.depthBoundsTargetView,params.transmittanceTargetViews[0],params.transmittanceTargetViews[1]};
-                };
-                RayniumGpuDevice.recordTerrain(pass,raynium$view,3+raynium$oitStage.ordinal(),atlasBinding,lightBinding,reads);
+                boolean bounds=raynium$oitStage!=OitStage.DEPTH_BOUNDS;
+                boolean accumulate=raynium$oitStage==OitStage.ACCUMULATE;
+                RayniumGpuDevice.recordTerrainStage(pass,raynium$view,3+raynium$oitStage.ordinal(),atlasBinding,lightBinding,
+                        bounds?params.depthBoundsTargetView:null,accumulate?params.transmittanceTargetViews[0]:null,
+                        accumulate?params.transmittanceTargetViews[1]:null);
             }
         }
     }

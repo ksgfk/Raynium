@@ -16,7 +16,7 @@ import net.minecraft.world.phys.Vec3;
 public final class VisualValidation {
     private static VisualValidation active;
     private final Path directory;
-    private final JsonArray scenes,results=new JsonArray();
+    private final JsonArray scenes,results;
     private final long started=System.nanoTime();
     private long stepStarted=started;
     private int index,frames;
@@ -35,7 +35,8 @@ public final class VisualValidation {
         directory=config.toAbsolutePath().getParent();
         var root=JsonParser.parseString(Files.readString(config)).getAsJsonObject(); scenes=root.getAsJsonArray("scenes");
         if(scenes==null || scenes.isEmpty()) throw new IllegalArgumentException("Visual validation needs scenes");
-        var names=new java.util.HashSet<String>();
+        results=new JsonArray(scenes.size());
+        var names=java.util.HashSet.<String>newHashSet(scenes.size());
         for(var entry:scenes) {
             var item=entry.getAsJsonObject(); var name=item.get("name").getAsString();
             if(root.has("defaults")) for(var setting:root.getAsJsonObject("defaults").entrySet())
@@ -78,7 +79,7 @@ public final class VisualValidation {
         if(controlsScene()) active.pictureInPictureTypes.add(state.getClass().getSimpleName());
     }
     private JsonArray selectedPipelines() {
-        var result=new JsonArray();
+        var result=new JsonArray(selectedPipelines.size());
         for(var entry:catalog.entries()) if(selectedPipelines.contains(entry.pipeline())) {
             var item=new JsonObject(); item.addProperty("id",entry.id()); item.add("names",new Gson().toJsonTree(entry.names())); result.add(item);
         }
@@ -316,11 +317,13 @@ public final class VisualValidation {
             Files.createDirectories(exports);
             dumpable.dumpContents(id,exports);
             if(texture instanceof net.minecraft.client.renderer.texture.TextureAtlas) {
-                for(int mip=0;mip<texture.getTexture().getMipLevels();mip++) captureFiles.add(exports.resolve(id.toDebugFileName()+"_"+mip+".png"));
+                int mipLevels=texture.getTexture().getMipLevels();
+                captureFiles.ensureCapacity(Math.addExact(captureFiles.size(),mipLevels));
+                for(int mip=0;mip<mipLevels;mip++) captureFiles.add(exports.resolve(id.toDebugFileName()+"_"+mip+".png"));
             } else if(texture instanceof net.minecraft.client.renderer.texture.DynamicTexture) captureFiles.add(exports.resolve(id.toDebugFileName()+".png"));
             else throw new IllegalArgumentException("Unknown texture export file naming: "+texture.getClass());
         }
-        var files=new JsonArray(); for(var file:captureFiles) files.add(directory.relativize(file).toString().replace('\\','/'));
+        var files=new JsonArray(captureFiles.size()); for(var file:captureFiles) files.add(directory.relativize(file).toString().replace('\\','/'));
         result.add("exports",files);
     }
     private void capture(Minecraft client) {

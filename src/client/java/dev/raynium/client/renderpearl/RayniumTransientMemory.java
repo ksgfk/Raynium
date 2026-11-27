@@ -93,6 +93,7 @@ final class RayniumTransientMemory implements TransientMemory,AutoCloseable {
     }
     void seal(CommandTape tape) {
         cpu.rotate().run();
+        tape.reserveRecyclers(gpu.size());
         for(var allocator:gpu.values()) tape.recycleAfterBatch(allocator.rotate());
     }
     @Override public void close() {

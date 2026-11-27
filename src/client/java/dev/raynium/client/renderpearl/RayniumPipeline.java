@@ -61,7 +61,7 @@ final class RayniumPipeline implements BackendRenderPipeline {
     static FrontendRenderPipeline register(NativeRenderer owner,RenderPipeline pipeline,RayniumPrograms.Preparation prepared,
             java.util.function.BiConsumer<RenderPipeline,RayniumPipeline> onRegister,
             java.util.function.BiConsumer<RenderPipeline,RayniumPipeline> onRelease) {
-        var indices=new Object2IntOpenHashMap<String>();
+        var indices=new Object2IntOpenHashMap<String>(prepared.uniforms().size());
         indices.defaultReturnValue(-1);
         for(var name:prepared.uniforms()) indices.put(name,indices.size());
         var ref=new RayniumPipeline[1];

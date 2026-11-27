@@ -13,14 +13,16 @@ abstract class QuadParticleRenderStateMixin implements ParticleFastTrack.RawPart
     @Shadow @Final private Map<SingleQuadParticle.Layer, QuadParticleRenderState.Storage> particles;
 
     @Override
+    public boolean raynium$hasCompactSlice(SingleQuadParticle.Layer layer) {
+        var storage = particles.get(layer);
+        return storage != null && storage.currentParticleIndex > 0;
+    }
+
+    @Override
     public int raynium$appendCompactLayer(SingleQuadParticle.Layer layer, ParticleFastTrack.CompactLayerBatch out) {
         QuadParticleRenderState.Storage storage = this.particles.get(layer);
         if (storage == null || storage.currentParticleIndex <= 0) return 0;
-        if ((Object) storage instanceof ParticleFastTrack.PackedStorageAccess packed) {
-            out.appendPacked(packed.raynium$packedInts(), storage.currentParticleIndex);
-        } else {
-            out.append(storage.floatValues, storage.intValues, storage.currentParticleIndex);
-        }
+        out.append(storage.floatValues, storage.intValues, storage.currentParticleIndex);
         return storage.currentParticleIndex;
     }
 }

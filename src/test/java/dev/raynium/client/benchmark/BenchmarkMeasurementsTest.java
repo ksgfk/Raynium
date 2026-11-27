@@ -4,6 +4,17 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class BenchmarkMeasurementsTest {
+    @Test void reportsAcrossChunkBoundaries(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        var m=new BenchmarkMeasurements(4097);
+        var timings=new long[19];
+        for(int i=0;i<4097;++i) { m.frame(i,i,0,0,timings); m.gpu(i); }
+        assertThrows(IllegalStateException.class,()->m.gpu(0));
+        assertThrows(IllegalStateException.class,()->m.frame(0,0,0,0,timings));
+        var stats=m.finish(directory);
+        assertEquals(4097,stats.getAsJsonObject("gpuFrameNs").get("samples").getAsInt());
+        assertTrue(java.nio.file.Files.readAllLines(directory.resolve("frames.csv")).getLast().startsWith("4096,4096,"));
+    }
+
     @Test void externalWaitHasItsOwnNanosecondColumn(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
         var measurements=new BenchmarkMeasurements(1);
         long[] nativeTimes=new long[19];

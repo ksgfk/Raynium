@@ -32,6 +32,8 @@ final class RayniumRenderPassBackend implements RenderPassBackend {
     void close() {
         Arrays.fill(uniforms,0,uniformCount,null);
         for(int mask=vertexMask;mask!=0;mask&=mask-1) vertices[Integer.numberOfTrailingZeros(mask)]=null;
+        if(uniforms.length>128) uniforms=new Object[INITIAL_UNIFORMS];
+        if(push.length>1024) push=new byte[0];
         uniformCount=vertexMask=pushLength=0;
         pipeline=null; indexBuffer=null; indexType=null; tape=null;
     }
@@ -80,8 +82,9 @@ final class RayniumRenderPassBackend implements RenderPassBackend {
         return tape;
     }
 
-    void terrain(CommandTape.TerrainView view,int stage,TextureViewAndSampler atlas,TextureViewAndSampler light,GpuTextureView[] inputs) {
-        tape().terrain(view,stage,scissorX,scissorY,scissorW,scissorH,atlas,light,inputs);
+    void terrain(CommandTape.TerrainView view,int stage,TextureViewAndSampler atlas,TextureViewAndSampler light,
+                 GpuTextureView bounds,GpuTextureView transmittance0,GpuTextureView transmittance1) {
+        tape().terrain(view,stage,scissorX,scissorY,scissorW,scissorH,atlas,light,bounds,transmittance0,transmittance1);
     }
 
     private static void binding(MemorySegment record,long at,long handle,int kind,int slot,int format,long offset,long size) {

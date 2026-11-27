@@ -10,7 +10,7 @@ public final class BenchmarkRoute {
     private final List<Point> points;
 
     public BenchmarkRoute(JsonArray source) {
-        var parsed = new ArrayList<Point>();
+        var parsed = new ArrayList<Point>(source.size());
         for (var value : source) {
             JsonObject p = value.getAsJsonObject();
             var point = new Point(number(p, "seconds"), number(p, "x"), number(p, "y"), number(p, "z"),

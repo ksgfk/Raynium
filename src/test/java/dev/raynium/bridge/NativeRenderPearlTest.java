@@ -389,7 +389,7 @@ class NativeRenderPearlTest {
                     p.setUniform("DynamicTransforms",cb); p.setUniform("Projection",cb);
                     p.enableScissor(1,1,2,2); p.draw(3,1,0,0); p.writeTimestamp(pool,0);
                 }
-                var calls=new ArrayList<Integer>();
+                var calls=new ArrayList<Integer>(2);
                 encoder.copyTextureToBuffer(texture,read,0,()->calls.add(1),0);
                 try(var fence=encoder.createFence()) { encoder.submit(); assertTrue(fence.awaitCompletion(-1)); }
                 assertEquals(List.of(1),calls);

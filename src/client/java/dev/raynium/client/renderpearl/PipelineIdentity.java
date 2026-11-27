@@ -20,8 +20,9 @@ public record PipelineIdentity(Map<ShaderType,Identifier> shaders,Map<String,Str
         colors=Collections.unmodifiableList(new ArrayList<>(colors));
     }
     public static PipelineIdentity of(RenderPipeline pipeline) {
-        var vertices=new ArrayList<VertexBinding>();
-        for(var format:pipeline.getVertexFormatBindings())
+        var formats=pipeline.getVertexFormatBindings();
+        var vertices=new ArrayList<VertexBinding>(formats.size());
+        for(var format:formats)
             vertices.add(format==null?null:new VertexBinding(format.getVertexSize(),format.getStepRate(),format.getElements()));
         var uniforms=new ArrayList<>(BindGroupLayout.flattenUniforms(pipeline.getBindGroupLayouts()));
         uniforms.sort(Comparator.comparing(BindGroupLayout.UniformDescription::name));

@@ -10,6 +10,7 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Random;
 import net.minecraft.client.model.geom.ModelPart;
+import net.minecraft.client.particle.SingleQuadParticle;
 import net.minecraft.core.Direction;
 import net.minecraft.util.ARGB;
 import org.joml.Matrix4f;
@@ -46,7 +47,7 @@ class WorldFastTrackTest {
             assertTrue(u >= 0.0F && u <= 1.0F && vCoord >= 0.0F && vCoord <= 1.0F);
             assertEquals(0, nw);
             int axisSum = Math.abs(nx) + Math.abs(ny) + Math.abs(nz);
-            assertEquals(127, axisSum, "Each vertex normal must be strictly one signed unit axis (±127)");
+            assertEquals(127, axisSum, "Each vertex normal must be strictly one signed unit axis (卤127)");
         }
 
         // Empty list returns null.
@@ -157,6 +158,16 @@ class WorldFastTrackTest {
     }
 
     @Test
+    void compactParticleBatchAcceptsMoreNonemptySlicesThanInitiallyCounted() {
+        var batch = new ParticleFastTrack.CompactLayerBatch(SingleQuadParticle.Layer.OPAQUE, 0);
+        batch.append(new float[0], new int[0], 0);
+        assertEquals(0, batch.particleCount());
+        batch.append(new float[12], new int[2], 1);
+        batch.append(new float[24], new int[4], 2);
+        assertEquals(3, batch.particleCount());
+    }
+
+    @Test
     void compactParticlePackingAndQuaternionFormulaMatchVanilla() {
         float[] floats = new float[]{
             1.5F, -2.25F, 3.75F,     // x, y, z
@@ -223,6 +234,17 @@ class WorldFastTrackTest {
                 assertEquals(dst[i], seg.get(ValueLayout.JAVA_INT, i * 4L), "Off-heap particle int mismatch at " + i);
             }
         }
+    }
+
+    @Test
+    void oversizedModelBucketDoesNotReturnToIdlePool() {
+        var bucket=ModelFastTrack.acquireFastBucket(null,true);
+        var pose=new PoseStack().last();
+        var scratch=new Vector3f();
+        for(int i=0;i<257;i++) bucket.addInstance(null,1,0,pose,0,0,0,scratch);
+        ModelFastTrack.recycleFastBucket(bucket);
+        var next=ModelFastTrack.acquireFastBucket(null,true);
+        try { assertNotSame(bucket,next); } finally { ModelFastTrack.recycleFastBucket(next); }
     }
 
     @Test

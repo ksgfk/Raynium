@@ -20,7 +20,7 @@ class BatchSubmissionTest {
     }
 
     @Test void olderFenceWaitsForOriginalSequenceEvenAfterNextSubmission() {
-        var calls = new ArrayList<Long>();
+        var calls = new ArrayList<Long>(4);
         BatchSubmission.Waiter wait = (seq, timeout) -> { calls.add(seq); calls.add(timeout); return true; };
         var first = new BatchSubmission(wait);
         var next = new BatchSubmission(wait);
