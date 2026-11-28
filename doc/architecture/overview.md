@@ -4,18 +4,18 @@
 
 # Raynium 架构地图
 
-MC 26.3 继续负责窗口生命周期、世界更新、渲染顺序和资源管理。Raynium 向 RenderPearl 提供 Windows D3D12 或 Vulkan 后端，在原版地形绘制点按几何页提交驻留区块，并在主世界提交路径为刚体模型、四边形粒子与实体圆形阴影提供实例化绘制。
+MC 26.3 负责窗口生命周期、世界更新、渲染顺序和资源管理。Raynium 向 RenderPearl 提供 Windows D3D12 或 Vulkan 后端，在原版地形绘制点按几何页提交驻留区块。默认资源支持主世界刚体模型和四边形粒子的实例化绘制。
 
 | 从哪里开始 | 数据流与职责 |
 | --- | --- |
-| `RayniumConfig`、`RayniumBackendMixin`、`RayniumGpuBackend` | 从 `<gameDir>/config/raynium.json` 及 `-Draynium.*` 内存覆盖读取配置；原版选择后端时创建 SDL 窗口、独立 RHI 设备和 renderer。参考启动入口不加载 `raynium` 核心，直接沿用原版 Vulkan。 |
+| `RayniumConfig`、`RayniumBackendMixin`、`RayniumGpuBackend` | 核心 Mixin 替换候选后端。Raynium 在加载后端时读取配置并初始化环境，随后创建设备和 renderer。原版参考入口仅加载测试模组并优先选择 Vulkan。 |
 | `RayniumGpuDevice`、`RayniumPrograms`、`BuiltinShaderPack` | 从实际设备取得能力，后台准备着色器及内置伴生实例化变体，在设备线程注册每条管线的固定状态。 |
 | `FrontendCommandEncoder`、`FrontendRenderPass` | 原版校验和整理绑定。后端将即时绘制、纹理操作、时间戳、地形、常驻世界快轨及上屏顺序写入同一批次。 |
 | `RetainedTerrain`、`TerrainFeature` | 拦截原版地形暂存写入与二次准备，每次地形准备产生独立视图，在原版当前光栅 Pass 按页直接或间接绘制驻留区块几何。 |
-| `RetainedModelManager`、`ModelFastTrack`、`ParticleFastTrack`、`ShadowFastTrack`、`world_features` | 仅在主世界 `featureFrame` 作用域内将合格刚体 `ModelPart`（24 B 局部网格 + 80 B 实例）、粒子和阴影片（各 56 B/实例）合批送入 `CommandTape`；不满足条件或着色器被覆盖时保序回退原版即时路径。 |
+| `RetainedModelManager`、`ModelFastTrack`、`ParticleFastTrack`、`ShadowFastTrack`、`world_features` | 在主世界准备绘制组时筛选可实例化的模型和粒子，执行组时录入当前命令带。实体阴影也有实例编码与准入检查，默认包缺少对应变体，游戏使用原版阴影组。[Shader pack](shader-pack.md) |
 | `RayniumTelemetry`、`ClientFrameEvent`、`TerrainFrameEvent` | 位于 `dev.raynium.diagnostics` 的底层观测设施，承载 JFR 帧事件和零分配遥测回调，供核心层无耦合上报给可选测试驱动。 |
 | `RenderChannel`、`TapeCompiler`、`ModularFramePipeline` | 双槽批次通过单生产者单消费者通道提交，在帧槽内编译命令并按序构建 RadRay RDG，管理帧槽、资源在途寿命、Fence、读回及呈现。 |
-| `HarnessClient`、`VisualValidation`、`BenchmarkSession`（`src/harness`） | 独立开发/测试模组 `raynium-harness`（不打入发布 JAR），通过 `RayniumHarnessBridge` 可选对接核心并驱动原版或 Raynium 后端输出截图差异与性能数据。 |
+| `HarnessClient`、`VisualValidation`、`BenchmarkSession`（`src/harness`） | 独立开发/测试模组通过 `RayniumHarnessBridge` 可选对接核心，在原版或 Raynium 后端采集截图和性能数据。Python 驱动比较各次运行的截图。 |
 
 ## 文档索引
 

@@ -2,7 +2,7 @@
 
 基于 Fabric 的 Minecraft 客户端模组，包含 Java FFM/C ABI 桥接与使用 RadRay RHI 的 native 设备会话。
 
-Windows 后端将原版 RenderPearl 命令录入同一个批次，通过 FFM 交给 RadRay 在 D3D12 或 Vulkan 上执行。区块地形通过分页直接或间接绘制 在原版光栅 Pass 内联执行，主世界刚体模型、四边形粒子与实体圆形阴影提供常驻/紧凑实例化快轨（不支持或着色器被覆盖时自动回退即时路径），其余实体、GUI、光照和后处理沿用游戏的管线及附件。
+Windows 后端将原版 RenderPearl 命令按批录制，通过 FFM 交给 RadRay 在 D3D12 或 Vulkan 上执行。区块地形在原版光栅 Pass 内按页直接或间接绘制。默认着色器包支持主世界刚体模型和四边形粒子的实例化绘制。实体圆形阴影沿用原版即时绘制，GUI、光照和后处理继续使用游戏的管线与附件。
 已实现的适配、资源包支持、截图与生命周期边界见[架构地图](doc/architecture/overview.md)和[Minecraft 接入](doc/architecture/minecraft-integration.md)。
 
 ## 开发入口

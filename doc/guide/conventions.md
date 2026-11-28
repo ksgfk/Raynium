@@ -16,26 +16,26 @@
 | `src/harness`（`raynium-harness`） | 独立开发/测试驱动模组，承载 `Benchmark*`、`VisualValidation*`、`ValidationGalleryScreen`、`VanillaPipelineCatalog` 与 `PipelineIdentity`；仅由 `runClientReference`、自动化脚本和测试类路径挂载，不进入任何发布 JAR。 |
 | `dev.raynium.diagnostics` | 零上层依赖的观测基础包，提供 JFR 事件（`ClientFrameEvent`、`TerrainFrameEvent`）与无分配遥测回调入口 `RayniumTelemetry`；不依赖 `bridge`、`client`、`harness` 或 Minecraft/RenderPearl。 |
 | `dev.raynium.bridge` | FFM 绑定与 native 资源封装层；不反向依赖 `dev.raynium.client` 或 `net.minecraft.*`，通过 `NativeBuffer.StagingWriter`、`NativeFrameBuffer.PinnedPayload`、`NativeRenderer.SubmissionMode` 与 `RayniumTelemetry` 解耦。 |
-| `dev.raynium.harness.RayniumHarnessBridge` | Harness 访问核心模组状态与 `RayniumTelemetry` 的唯一软桥接入口，公开签名与字段不直接引用核心模组类型；具体适配收口在包私有 `RayniumCoreBridge`，仅在 `raynium` 模组已加载时实例化。 |
+| `dev.raynium.harness.RayniumHarnessBridge` | Harness 访问核心状态和遥测的可选入口。公开签名使用 Harness 或 JDK 类型。检测到核心模组后，通过包私有类 `RayniumCoreBridge` 的静态方法访问设备并注册监听器。 |
 
 核心与测试驱动各自维护独立的 Access Widener（`src/client/resources/raynium.accesswidener` 与 `src/harness/resources/raynium-harness.accesswidener`）；Loom 在构建期幂等合并到 `build/loom/combined.accesswidener` 供编译使用，打包 `jar` 只收录核心 AW。
 
 ## 配置、属性与本机环境
 
-- **用户与运行时配置**：主配置文件为 `<gameDir>/config/raynium.json`（由纯 Gson `RayniumConfig` 严格解析，首次启动缺失时自动写出默认 JSON；未知键、重复键、错误类型、非法枚举、尾随内容或格式损坏直接快速失败）。
-  - JSON 字段：`backend`（`d3d12` / `vulkan`，默认 `d3d12`）、`rhiValidation`（默认 `false`）、`terrainSubmission`（`auto` / `direct` / `indirect`，默认 `auto`）、`shaderToolsDir`（可选字符串）。
-- **JVM 内存覆盖属性**（只作用于本次进程，不回写 JSON）：
+- `RayniumConfig` 使用 Gson 严格解析 `<gameDir>/config/raynium.json`。加载 Raynium 后端时，文件缺失会写出默认配置。遇到未知键、重复键、错误类型、非法枚举、尾随内容或格式损坏会报错。
+  - JSON 只接受三个字段。字符串 `backend` 可取 `d3d12`（默认）或 `vulkan`，布尔值 `rhiValidation` 默认 `false`，字符串 `terrainSubmission` 可取 `auto`（默认）、`direct` 或 `indirect`。缺省字段使用默认值。
+- 下列 JVM 属性只作用于本次游戏进程。前三项覆盖 JSON 中对应的配置值。
   - `-Draynium.rhi.backend=d3d12|vulkan`
   - `-Draynium.rhi.validation=true|false`
   - `-Draynium.terrain.submission=auto|direct|indirect`
-  - `-Draynium.shader.tools-dir=<目录>`
-  - `-Draynium.native.dir=<目录>`（显式 native 开发目录）
+  - `-Draynium.shader.tools-dir=<目录>` 单独指定资源包着色器编译工具，仅从 JVM 属性读取。相对路径按游戏 JVM 的工作目录解析。
+  - `-Draynium.native.dir=<目录>` 由 `NativeLibraryLocator` 单独读取，可指向 stage 根目录或带清单的快照目录。
 - **测试与 Harness 内部属性**：
   - `-Draynium.test.surface-layer=<path>`
   - `-Draynium.benchmark.config=<path>`
   - `-Draynium.validation.config=<path>`
-- **构造注入原则**：核心运行时类（`RayniumGpuBackend`、`NativeEnvironment`、`NativeRuntime`、`RayniumGpuDevice`、`RayniumPrograms`、`ShaderProgramCache`）不隐式读取 `System.getProperty`，统一由 `RayniumConfig` 或测试代码通过构造函数显式传入参数。
-- **本机环境配置**：仓库根忽略 `/local.properties`，模板见 `local.properties.example`，存放 `proxy`、`python`、`parallel`、`radraySourceDir` 与 `gameRunDir`；`settings.gradle` 与 `tools/fetch_radray.py` 均按本机文件读取代理，仓库跟踪文件中不硬编码本机代理地址。
+- 无参构造的 `RayniumGpuBackend` 在 `loadLibrary()` 读取 `RayniumConfig`，将后端与校验标志传给 `NativeEnvironment`，将地形模式传给 `createRenderer`。工具目录经 `RayniumGpuDevice` 和 `RayniumPrograms` 传入 `ShaderProgramCache`。
+- 本机配置存放在 Git 忽略的 `local.properties` 中，模板为 `local.properties.example`。构建工具、本机源码和目录的配置优先级见[开发环境](dev-environment.md)。
 - **Gradle 构建变体属性**：Native 构建只保留单一变体开关 `-Praynium.build.profiler=true`（默认 `false`）；Debug/Release 由对称任务名区分。
 
 ## Java 包结构、导入与 Mixin 规范

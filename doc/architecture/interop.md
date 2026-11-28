@@ -4,12 +4,12 @@
 
 # 互操作与加载
 
-Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 27，共有 29 个导出入口，提供窗口交换链输出、常驻模型网格注册及按请求的异步像素读回。
+Java 25 用 FFM 的 `SymbolLookup.libraryLookup` 加载 `rayniumruntime.dll`，再通过 downcall 调用导出函数。当前 ABI 为 27，共有 29 个导出入口，提供窗口交换链输出、常驻模型网格注册及异步像素读回。
 设备、帧槽与完成序号见 [Native runtime](native-runtime.md)，操作入口见[构建与测试](../guide/build-test.md)。
 
 ## 当前 C ABI
 
-`rn_get_abi_version` 在解析其余导出前校验版本。`rn_query_abi` 核对 build ID、指针宽度和编译配置。入口签名以 `bridge.h` 为准，FFM 按固定宽度和 8 字节对齐构建命令记录。设备与资源句柄只在所属 renderer 和所属线程使用。运行时 downcall 按具体签名使用 `invokeExact`。renderer 复用提交、等待、截图查询信息槽和缓冲创建的描述符及输出槽，先取出返回值，再发布完成回调。地形视图和映射脏区间的暂存按需扩缩。
+Java 在解析其余导出前调用 `rn_get_abi_version` 核对版本。随后通过 `rn_query_abi` 取得构建身份和布局，将 build ID、指针宽度、编译配置等与清单及 JVM 比对。入口签名以 `bridge.h` 为准，FFM 按固定宽度和 8 字节对齐构建命令记录。设备与资源句柄只在所属 renderer 和所属线程使用。运行时 downcall 按具体签名使用 `invokeExact`。renderer 复用提交、等待、截图查询信息槽和缓冲创建的描述符及输出槽，先取出返回值，再发布完成回调。地形视图和映射脏区间的暂存按需扩缩。
 `rn_upsert_model_mesh` 在调用期间复制 24 B/顶点的四边形网格，向 `out_page_id` 写入所在顶点页号。Java 分配从 16 开始的用户句柄，使用 `rn_remove_model_mesh` 退役网格。1 和 2 分别标识内建粒子和阴影单位四边形，3 至 15 保留。
 
 ## 提交布局
@@ -32,7 +32,9 @@ Java 25 通过普通 FFM downcall 加载 `rayniumruntime.dll`，当前 ABI 为 2
 
 ## Java 包装与所有权
 
-创建纹理、缓冲、查询池与管线时取得所属 renderer 的不透明指针。Java 将地址写入 64 位字段。调用方须持有命令和视图引用的资源直至批次消费，无论输入字节采用复制还是借用。命令带存储、受控地形视图和外部视图的空闲队列各保留至多两项。每项堆外容量上限为 16 MiB，引用数组另有槽数上限。超限项在借用结束后关闭。Java `CommandTape` 为每个录制批次分配单调递增的 `tapeId`，通过资源对象上的 `lastRetainedTapeId` 戳记以 $O(1)$ 去重保活引用，并按各命令定长协议显式写入全部字段（重置命令流时不整段清零），允许先录制、再关闭、最后提交。超过 16 MiB 的命令、传输和实例流在连续 120 次重置前使用量低于容量四分之一时释放，地形帧存储按每次预留量执行相同的回收策略。native 保存帧槽使用中的对象。Java 在入队时将正序号绑定到 Fence。命令带的视图、资源保活和撤销列表随 `Storage` 复用。入队时与池化的 `InFlightBatch` 交换回调列表，消费水位到达后即可回收存储与资源引用。提交水位触发提交回调，完成水位触发读回回调和瞬态资源回收。设备线程直接读取复用的进度缓冲，提交返回值在回调重入期间独占一份快照。公开返回的 `SubmitResult` 保留该次提交的不可变值。未入队批次逆序撤销地形驻留变更。
+创建纹理、缓冲、查询池与管线时取得所属 renderer 的不透明资源指针。Java 将地址写入 64 位字段。无论输入字节采用复制还是借用，调用方都须持有命令和视图引用的资源直至批次消费。`CommandTape` 通过每批的 `tapeId` 和资源戳记去重保活引用，允许先录制、再关闭 Java 资源、最后提交。命令带存储、受控地形视图和外部视图的空闲队列各保留至多两项，每项堆外容量上限为 16 MiB，引用另有槽数上限。录制时逐字段写入协议记录。大于 16 MiB 的流连续 120 次重置时用量低于容量四分之一会释放底层存储，地形帧存储按每次预留量执行相应回收。
+
+批次入队时，Java 将正序号绑定到 Fence，并为该批创建 `InFlightBatch` 接管提交、完成和回收回调列表。`Storage` 获得新的空回调列表。消费水位到达后释放录制存储及资源保活引用，提交水位触发提交回调，完成水位触发读回回调和瞬态资源回收。在途 GPU 对象由 native 持有。可复用的 `PendingSubmit` 在回调重入期间独占提交结果，公开的 `SubmitResult` 保存不可变快照。未入队的批次逆序撤销地形驻留变更。
 
 `rn_wait_submit` 返回真实完成值，支持轮询、限时和无限等待。可读映射与回调按已完成的序号对外发布。提交、等待、查询同步与排空在返回前将已发布的读回字节复制到前端映射。非设备丢失的终态保留最后完整完成批次的查询、截图与只读映射，设备丢失态保留最后完整完成批次的查询与已复制到前端的只读映射（颜色截图随设备丢失失效），关闭仍可释放句柄。`rn_flush_renderer` 排空呈现并返回最近呈现结果。直接关闭健康的 Java renderer 时，它先排空尚未观察到完成的在途批次，在映射仍可读时派发完成回调。
 
@@ -53,7 +55,7 @@ Native 运行库、工具和测试直接使用锁定 RadRay 的 `radray/types.h`
 
 stage 使用 `dumpbin /exports` 核对构建脚本列出的 ABI 入口，再用 `/dependents` 拒绝动态 CRT 和未分类的私有 DLL，收集上游许可证，并先验证完整快照再发布 `current.json`。
 schema 1 manifest 包含平台、ABI/布局、构建配置、CRT、工具链、build ID、RadRay commit/dirty、DLL/许可证大小与 SHA-256、系统依赖分类。
-ABI 27 的身份 flags 中 bit 1（static CRT）和 bit 2（mimalloc）均为 1。loader 只接受 Debug/MTd 或 Release/MT 的单 DLL 清单，拒绝错配和 MD 的 schema 2 payload。
+ABI 27 的身份 flags 中 bit 0 表示 RadRay 工作树有改动，bit 1（static CRT）和 bit 2（mimalloc）均为 1。loader 接受 schema 1 的 Debug/MTd 或 Release/MT 单 DLL 清单。
 build ID 来自 native/RadRay（含 `modules/runtime/`）源码及配置/工具链指纹；DLL SHA-256 标识实际二进制，manifest SHA-256 标识内容快照，三者用途不同。
 哈希用于一致性检查，不等于来源认证。
 
@@ -77,11 +79,11 @@ loader 的选择顺序为：显式开发目录 `-Draynium.native.dir=...`，否�
 两条来源共用后续流程：
 
 1. 读取 manifest，确认 JVM 架构、ABI 和配置。
-2. 将实际 payload 发布到游戏目录下 `.raynium/natives/windows-x86_64/<content-hash>/`。
-3. 检查已有完整副本，或写入独立 staging 目录，校验后再发布；多进程使用文件锁协调解包。
+2. 对清单原始字节计算 SHA-256，以此确定游戏目录下的 `.raynium/natives/windows-x86_64/<manifest-sha256>/` 和对应文件锁。
+3. 持锁校验已有副本。首次加载时，将 DLL 和清单写入临时目录，核对 DLL 大小、DLL 与清单的摘要后发布。许可证保存在 stage 或 JAR 内。
 4. 后端加载阶段检查游戏 JVM native access 权限，将规范化的绝对路径转换为 Windows 扩展路径（含 UNC），使用 `SymbolLookup.libraryLookup(String, Arena)` 加载 bridge；保留长路径前缀，避免 Path 重解析后触发 Windows 路径长度限制。
 5. 先调用版本入口核对 ABI 27，再用 `rn_query_abi` 检查布局与构建身份。
-6. 游戏后端执行 loadLibrary 时创建环境。createDevice 创建 runtime 与 renderer，createSurface 将交换链关联到 SDL 窗口。
+6. 游戏后端在 `loadLibrary` 中创建环境，`createDevice` 创建 runtime 与 renderer。`createSurface` 从 SDL 窗口取得 HWND，首次配置表面时才创建交换链。
 
 所有内容路径落在 loader 自己的根目录内，只接受固定 DLL 文件名并验证大小和哈希。已有损坏缓存直接报错，不覆盖、不删除；暂未实现旧缓存自动清理。
 

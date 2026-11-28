@@ -14,7 +14,7 @@
 
 ## 初始化
 
-`Minecraft` 构造过程中从 `PreferredGraphicsApi.getBackendsToTry()` 取得后端候选，创建窗口和设备，安装到 `RenderSystem`，然后通过设备创建窗口 surface。
+`Minecraft` 构造时从 `PreferredGraphicsApi.getBackendsToTry()` 取得后端候选，依次尝试加载后端库并创建设备。成功后先调用 `RenderSystem.initRenderer(device)`，再创建 SDL 窗口，并通过设备创建窗口 surface。
 
 | 类 / 方法 | 职责 |
 | --- | --- |
@@ -42,15 +42,16 @@ Minecraft.renderFrame
         区块重建与上传等维护
     手持物、画面效果等
     GuiRenderer.render
-  最终画面输出到 surface
+  已获取窗口图像时将主颜色目标 blit 到 surface
+  启用 Tracy 图像采集时上传上一张就绪图像并请求本帧缩略图
   CommandEncoder.submit
-  GpuSurface.present
+  已获取窗口图像时调用 GpuSurface.present
   帧结束处理
 ```
 
 | 类与方法 | 职责 |
 | --- | --- |
-| `Minecraft.renderFrame` | 按 extract、render、submit、present 顺序调度一帧 |
+| `Minecraft.renderFrame` | 按顺序提取、渲染并提交命令，取得窗口图像后执行呈现 |
 | `GameRenderer.extract` | 准备帧状态 |
 | `GameRenderer.render` | 组织世界、手持物、画面效果和 GUI |
 | `GameRenderer.renderLevel` | 世界渲染调用边界 |
@@ -84,7 +85,7 @@ Minecraft.renderFrame
 
 关键入口是 `SectionCompiler.compile` 和 `SectionRenderDispatcher.uploadTerrainBuffersToGpu`。
 
-`SectionCompiler.compile` 产生 `Results` 与各层 `MeshData`。`SectionRenderDispatcher.CompileTask.doTask` 消费结果、构造 `CompiledSectionMesh`、进入 UberBuffer 并关闭 MeshData。`DefaultVertexFormat.BLOCK` 包含 Position、Color、UV0、UV2，没有 Normal 属性。
+`SectionCompiler.compile` 产生 `Results` 与各层 `MeshData`。`SectionRenderDispatcher.RenderSection.CompileTask.doTask` 消费结果、构造 `CompiledSectionMesh`，并将非空层送入 UberBuffer 后关闭 `MeshData`。`DefaultVertexFormat.BLOCK` 的顶点属性为 Position、Color、UV0、UV2。
 
 ## 动态对象通路
 

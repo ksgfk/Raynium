@@ -2,7 +2,7 @@
 # Copy this file to local.properties (git-ignored) and adjust values as needed.
 
 # Optional HTTP(S) proxy URL used by Gradle and tools/fetch_radray.py.
-# Leave unset or blank to connect directly.
+# If blank, Gradle keeps its JVM proxy settings and fetch_radray.py checks proxy environment variables.
 # proxy=http://127.0.0.1:10808
 
 # Python executable used by Gradle native/shader tasks.

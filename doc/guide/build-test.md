@@ -5,7 +5,7 @@
 # 构建与测试
 
 以下命令在 Raynium 根目录执行。Java/IDEA 与 `local.properties` 设置见[开发环境](dev-environment.md)，配置命名与分层约束见[编码与工程规范](conventions.md)。
-普通 `build` 只构建 Java 并执行纯 Java 与 Python 工具测试；native 必须通过显式任务准备。
+普通 `build` 编译 Java、校验并复制已提交的着色器包、执行常规 JUnit 与 Python 工具测试，生成 Java 模组 JAR。native DLL 通过单独的任务构建。
 payload、ABI、缓存和关闭顺序见[互操作与加载](../architecture/interop.md)。
 
 开发、验证与采样的按日期记录见[历史索引](../history/README.md#开发验证与采样记录)。
@@ -18,7 +18,7 @@ payload、ABI、缓存和关闭顺序见[互操作与加载](../architecture/int
 ```
 
 开发游戏目录默认为 `run/`，日志位于其 `logs/latest.log`，可在 `local.properties` 中通过 `gameRunDir` 调整。
-客户端必须有 native payload；普通 `runClient` 仅在已通过 `-Draynium.native.dir=<目录>` 或内置资源提供 payload 时可启动，否则明确失败。
+Raynium 客户端需要 native payload。普通 `runClient` 不依赖 stage 任务，可使用 `'-Draynium.native.dir=<已有 stage 或快照目录>'` 指定已准备的 DLL；未指定时，加载器查找模组自带的 payload。需要一并构建 DLL 时运行 `runClientNative`。
 
 原版参考入口独立于 native 构建与加载，仅挂载 `raynium-harness`（`src/harness`），类路径不包含核心 `raynium` 模组：
 
@@ -29,12 +29,12 @@ payload、ABI、缓存和关闭顺序见[互操作与加载](../architecture/int
 该入口使用原版渲染并以 `--graphicsBackend VULKAN` 选择后端；检查日志中的 `Using graphics backend`，原版回退不算 Vulkan 对照。
 存档、资源包及 options 由游戏目录提供；需要临时进入测试存档或开启原版 Tracy 图像采集时，使用标准 `--args="..."`（如 `--args="--quickPlaySingleplayer validation --tracy"`）。
 
-`tools/benchmark.py` 与 `tools/validate_visual.py` 通过 Gradle 导出 `build/native/launch-spec.json`（任务 `writeLaunchSpec`），随后在独立会话目录写出 `<game>/config/raynium.json` 并由 Python 直接启动 `KnotClient` JVM：参考模式仅挂载 `raynium-harness`，Raynium 模式同时挂载 `raynium` 与 `raynium-harness` 并注入 `-Draynium.native.dir=<stage>`。
+`tools/benchmark.py` 与 `tools/validate_visual.py` 通过 Gradle 任务 `writeLaunchSpec` 导出 `build/native/launch-spec.json`，由 Python 在独立会话中直接启动 `KnotClient` JVM。参考模式只挂载 `raynium-harness`。Raynium 模式另挂载核心，写入会话的 `<game>/config/raynium.json`，并传入 `-Draynium.native.dir=<stage>`。
 
 视觉驱动通过 `-Draynium.validation.config=<JSON 路径>` 显式开启，不能与 `-Draynium.benchmark.config` 同时使用。参考场景配置见 [vanilla-scenes.json](../../tools/validation/vanilla-scenes.json)，包含平台布置、实体、物品、普通透明/OIT、GUI、重载、线框与雨天。配置中的命令会修改测试存档，须使用专用测试存档。
-两种启动入口均使用 `VisualValidation`（`src/harness`）：服务端命令完成后设置相机，等待指定帧数、时长和区块编译，再经原版截图入口保存 PNG。可指定 `gameTime`、`animationMillis`、`partialTick`、`rain`/`thunder`、`vignetteBrightness`、`wireframe`、`reload`、`postEffect` 和 `screen`，并支持顶层 `defaults`。视觉模式固定 GUI 鼠标位置及光照闪烁；动画时钟作用于附魔、sprite、世界边界、实体 `tickCount` 及末地水晶，`gameTime` 固定世界年龄与末地闪光状态。维度有默认世界时钟时，服务端将它暂停在同一刻，截图时核对客户端读数并写入 `worldClockTicks`；切换场景或结束验证时恢复该时钟先前的运行状态。产物在配置目录，包括各场景 PNG、设置和 `visual-result.json`；每场景五分钟超时，结束后正常关闭游戏。测试驱动完成不代表图像差异已获接受。
+`VisualValidation` 位于 `src/harness`。参考模式和 Raynium 模式的视觉 runner 都挂载该模组并传入场景配置。服务端命令完成后，驱动设置相机，等待指定帧数、时长和区块编译，再经原版截图入口保存 PNG。可指定 `gameTime`、`animationMillis`、`partialTick`、`rain`/`thunder`、`vignetteBrightness`、`wireframe`、`reload`、`postEffect` 和 `screen`，并支持顶层 `defaults`。视觉模式固定 GUI 鼠标位置及光照闪烁；动画时钟作用于附魔、sprite、世界边界、实体 `tickCount` 及末地水晶，`gameTime` 固定世界年龄与末地闪光状态。维度有默认世界时钟时，服务端将它暂停在同一刻，截图时核对客户端读数并写入 `worldClockTicks`；切换场景或结束验证时恢复该时钟先前的运行状态。产物写入配置目录，包括各场景 PNG、设置和 `visual-result.json`。驱动在场景开始以及命令完成、进入稳定等待时分别重置五分钟超时，验证结束后关闭游戏。测试驱动完成不代表图像差异已获接受。
 设置 `animationMillis` 的场景在命令和资源重载完成后显式调用一次原版纹理 tick，使冻结世界也应用目标 sprite 帧与插值时刻；正常游戏与性能路线不启用此行为。
-[validate_visual.py](../../tools/validate_visual.py) 在模式循环前仅调用一次 Gradle 完成构建并写出 `launch-spec.json`，默认复制存档并依次运行 `reference`/`d3d12`/`vulkan`，输出原图和放大差分图，并按 64 像素区域统计差异；差分步骤依赖 Pillow 和 NumPy，可用 `--compare-only` 重建差分。在 Windows 上指定 `--in-place-world` 时，各会话独立保存世界和玩家元数据，通过目录联接读取原存档的区块、实体和 POI 文件，并由脚本直接附加 `-DMC_DEBUG_ENABLED=true -DMC_DEBUG_DONT_SAVE_WORLD=true` 锁住所选原存档；指定 `--tracy-images` 时直接附加 `--tracy`。[vanilla-effects.json](../../tools/validation/vanilla-effects.json) 包含特殊材质、内置后处理、屏幕覆盖与维度切换。
+[validate_visual.py](../../tools/validate_visual.py) 在模式循环前仅调用一次 Gradle 完成构建并写出 `launch-spec.json`，默认复制存档并依次运行 `reference`/`d3d12`/`vulkan`，输出原图和放大差分图，并按 64 像素区域统计差异；差分步骤依赖 Pillow 和 NumPy，可用 `--compare-only` 重建差分。在 Windows 上指定 `--in-place-world` 时，各会话独立保存世界和玩家元数据，通过目录联接读取原存档的区块、实体和 POI 文件。脚本在会话期间持有原存档的 `session.lock`，并给游戏传入 `-DMC_DEBUG_ENABLED=true -DMC_DEBUG_DONT_SAVE_WORLD=true` 以禁用世界保存。`--tracy-images` 会向游戏传入 `--tracy`。[vanilla-effects.json](../../tools/validation/vanilla-effects.json) 包含特殊材质、内置后处理、屏幕覆盖与维度切换。
 `particles` 显式列出原版 `ParticleOptions` codec 数据、位置、速度及数量；配合 `particleSeed`/`particleTicks`，在场景稳定后通过原版粒子工厂和 tick 生成固定状态，并停用该场景的自动粒子添加与推进。种子覆盖粒子实例、引擎以及 `SpellParticle` 的静态随机源。未指定 `particles` 时保留原版粒子行为。`blockAnimations` 按方块位置设置附魔台 `time`/`flip`/`open`/`rotation` 或折跃门 `age`/`cooldown`，原版渲染器继续提取这些固定输入。`panorama` 和 `textureExports` 调用原版全景截图及纹理导出入口，等待 PNG 写完后推进场景；差分工具同时比较这些导出图像。结果中的 `selectedVanillaPipelines` 记录场景选择过的目录管线，供覆盖核对，不代表每个像素或管线变体已获验收。
 
 [vanilla-interactions.json](../../tools/validation/vanilla-interactions.json) 固定物品使用、图腾激活、调试线、地图和方块裂纹输入。`useItemTicks`/`useItemHand` 设置原版当前物品的使用时刻与手；`activationTicks` 固定图腾激活的 0–39 tick；`debugEntries` 指定原版调试项，`breakingBlock` 指定位置和阶段。`mapPattern` 创建并锁定原版地图保存数据、固定颜色并通过原版更新包交给客户端；`screen=title` 打开标题全景。`clearNotifications` 仅在显式配置的视觉场景中清除异步聊天和 toast，避免它们的实际到达时间干扰世界像素比较。
@@ -54,7 +54,7 @@ payload、ABI、缓存和关闭顺序见[互操作与加载](../architecture/int
 
 ## 显式准备依赖
 
-需要 Windows x64、Java 25、Python 3.10+、Git、CMake、Ninja 和 Visual Studio C++ x64 工具链。Java/Gradle 同步不下载 RadRay；native configure、build、stage 和游戏启动不恢复第三方包。
+需要 Windows x64、Java 25、Python 3.10+、Git、CMake 3.25 或以上、Ninja 和 Visual Studio C++ x64 工具链。Java/Gradle 同步不下载 RadRay；native configure、build、stage 和游戏启动不恢复第三方包。
 
 在 Raynium 根目录执行：
 
@@ -62,7 +62,7 @@ payload、ABI、缓存和关闭顺序见[互操作与加载](../architecture/int
 python tools/fetch_radray.py restore
 ```
 
-版本由 `native/radray.lock.json` 锁定，仓库为 `https://github.com/ksgfk/RadRay.git`，检出到忽略的 `external/RadRay/`。代理按 `--proxy` > `local.properties` 中的 `proxy` > 环境变量 `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` 解析，均未配置时直接无代理访问，没有 submodule；工作树修改、错误 origin、非受管目录会使脚本停止。已有正确提交时不联网。`python tools/fetch_radray.py status` 只读；更新锁后显式 restore，不执行强制 checkout/reset/clean。
+版本由 `native/radray.lock.json` 锁定，仓库为 `https://github.com/ksgfk/RadRay.git`，检出到忽略的 `external/RadRay/`。代理按 `--proxy` > `local.properties` 中的 `proxy` > 环境变量 `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`（含小写名称）解析。三处均为空时，Git 沿用自身的网络配置。脚本直接管理该检出目录，遇到工作树修改、错误 origin 或非受管目录会停止。已有正确提交时不联网。`python tools/fetch_radray.py status` 只读；更新锁后显式 restore，不执行强制 checkout/reset/clean。
 
 在 x64 Developer PowerShell 中显式准备依赖（如需代理先在当前终端设置对应环境变量）：
 
@@ -85,17 +85,19 @@ Release 如只准备当前 core/render/runtime 所需集合及测试库，可向
 `--only fmt,magic_enum,eigen,sigslot,stdexec,spdlog,xxHash,yyjson,pugixml,mimalloc,Vulkan-Headers,volk,VulkanMemoryAllocator,DirectX-Headers,D3D12MemoryAllocator,googletest`。
 stage 所需许可证来自这些第三方源码目录，需保留源码。
 
-重编内置着色器时，先导出当前 MC 的管线，在仓库构建目录生成 HLSL 和反射目录，再生成双后端包。将示例中的 shader 路径换成对应客户端资源目录。
+重编内置着色器需要 Release 依赖、RadRay DXC，以及 PATH 上的 `glslangValidator` 和 `spirv-cross`。先导出当前 MC 管线，再生成 HLSL、反射目录和双后端包。以下示例假定已将 MC 26.3 客户端 JAR 的 `assets/minecraft/shaders` 和同级的 `post_effect` 解包到 `build/vanilla/assets/minecraft/`。
 
 ```powershell
 .\gradlew.bat exportVanillaPipelines
 python external/RadRay/tools/fetch_sdks.py restore --only radray_dxc
-python tools/convert_vanilla_shaders.py --catalog build/vanilla/pipelines.json --shaders <assets/minecraft/shaders> --glslang glslangValidator --spirv-cross spirv-cross --output build/vanilla/immediate
+python tools/convert_vanilla_shaders.py --catalog build/vanilla/pipelines.json --shaders build/vanilla/assets/minecraft/shaders --glslang glslangValidator --spirv-cross spirv-cross --output build/vanilla/immediate
 python tools/compile_shader_pack.py
 python tools/shader_pack.py src/client/resources/assets/raynium/shaderpacks/default.rnsp
 ```
 
-默认生成内置 `.rnsp` 和两份运行时 JSON。仓库随附生成结果。普通构建通过 `verifyShaderPack` 验证必需双后端程序，`check` 运行容器与自动化脚本测试。用 `python tools/compile_shader_pack.py --install-tools build/shader-sdk` 另行准备资源包着色器编译工具，在 `<gameDir>/config/raynium.json` 设置 `shaderToolsDir` 或给游戏 JVM 传 `-Draynium.shader.tools-dir=<工具目录>`。该工具目录需要 Python 可执行文件在 PATH 上。资产来源与失败处理见[Shader pack](../architecture/shader-pack.md)。
+默认生成内置 `.rnsp`、`default.json` 和 `terrain-programs.json`。普通构建直接消费仓库内的这三份资源。`verifyShaderPack` 检查二进制容器和地形、上屏程序的双后端条目。`check` 还运行 Python 测试，核对目录元数据与伴生程序，其中阴影断言要求 4 个变体。[Shader pack](../architecture/shader-pack.md)
+
+完成上述转换后，可在打包命令追加 `--install-tools build/shader-sdk`，同时安装资源包编译工具。给游戏 JVM 传 `-Draynium.shader.tools-dir=<工具目录的绝对路径>`，并确保游戏进程能从 PATH 找到 `python`。
 
 MSVC 升级后，清理对应配置的 `build/native/` CMake 输出及旧 stage，再用依赖脚本的 `--clean` 重编相应静态库。
 删除前解析并核对目标在构建输出目录内；不删除源码、下载 SDK 或游戏数据。
@@ -118,13 +120,13 @@ CMake 子进程使用隐藏控制台，使本地化 MSVC `/showIncludes` 与 Nin
 
 可在 IDEA 中建立调用 `:runClientNative` 的 Gradle 运行配置，或从 Gradle 面板运行同名任务。Loom 为 `client` 与 `clientNative` 声明了 IDE 运行配置；生成配置时执行 `ideaSyncTask`。IDE 中若选择绕过 Gradle 直接启动 JVM 的配置，需先执行 `nativeStageDebug`。
 
-运行时配置持久化在 `<gameDir>/config/raynium.json`（首次启动缺失时自动写出默认值），也支持通过 `-Draynium.*` 做当次进程内存覆盖（Gradle 通过 `providers.systemPropertiesPrefixedBy('raynium.')` 自动透传给运行任务，不回写 JSON）；游戏启动参数通过 `--args="..."` 传递：
+后端首次加载时会创建缺失的 `<gameDir>/config/raynium.json`。Gradle 将 `raynium.` 前缀的 JVM 属性透传给游戏，配置的取值与最终读取位置见[编码与工程规范](conventions.md#配置属性与本机环境)。在 PowerShell 中用引号包住整个带点号的 Gradle 属性参数。游戏参数使用 `--args`。
 
 ```powershell
-.\gradlew.bat runClientNative -Draynium.rhi.backend=vulkan
-.\gradlew.bat runClientNative -Draynium.rhi.backend=vulkan -Draynium.rhi.validation=true
+.\gradlew.bat runClientNative '-Draynium.rhi.backend=vulkan'
+.\gradlew.bat runClientNative '-Draynium.rhi.backend=vulkan' '-Draynium.rhi.validation=true'
 .\gradlew.bat runClientNative --args="--quickPlaySingleplayer acceptance"
-.\gradlew.bat runClientNativeRelease -Draynium.terrain.submission=indirect
+.\gradlew.bat runClientNativeRelease '-Draynium.terrain.submission=indirect'
 ```
 
 `backend` 默认 `d3d12`，支持 `d3d12|vulkan`；正式启动器可在 `config/raynium.json` 配置或传 `-Draynium.rhi.backend=vulkan`，不自动切换后端。
@@ -132,30 +134,32 @@ CMake 子进程使用隐藏控制台，使本地化 MSVC `/showIncludes` 与 Nin
 Raynium 后端通过游戏的 RenderPearl 入口创建窗口与设备；原版参考客户端沿用 Vulkan。[Minecraft 接入](../architecture/minecraft-integration.md)
 
 Debug 默认启用 RadRay RHI 检查。`rhiValidation`（`-Draynium.rhi.validation=true`）显式启用 native 驱动诊断，默认 `false`；性能对比应记录配置且固定视点、RT 尺寸和场景。
-图形后端加载时通过 `rn_init_env` 准备环境，D3D12 在此创建 factory 并启用调试层，早于窗口创建；`createDevice` 复用环境创建 runtime。也可通过 `.\gradlew.bat nativeTestDebug -Draynium.rhi.validation=true` 验证。
-启动日志中的 `Raynium native manifest=` 与 `Raynium native library loaded:` 记录内容缓存和 ABI/build ID、RadRay 身份、dirty、配置、CRT 与工具链。
+图形后端加载时通过 `rn_init_env` 准备环境。D3D12 在此创建 factory，并在请求驱动诊断时启用调试层。也可通过 `.\gradlew.bat nativeTestDebug '-Draynium.rhi.validation=true'` 验证。
+启动日志中的 `Raynium native loaded from` 报告来源和实际 DLL 路径，`Native ABI=` 开头的一行记录 ABI、build ID、RadRay 身份、dirty、配置、CRT 与工具链。
 Debug CRT 为 MTd，Release 为 MT；静态分配器随 bridge 加载与卸载。当前要求 ABI 27，导出清单见 `tools/native.py`。
 `Raynium runtime created` 表示设备与队列完成。GUI 和世界的实际显示须通过窗口观察；F2 使用原版文件写入保存 native 主颜色目标，全景入口通过独立尺寸离屏帧输出，纹理导出使用按子资源请求读回。
 
 ## 自动跑图与性能采样
 
-`tools/benchmark.py` 读取 JSON 配置，构建阶段单次调用 Gradle 准备 `harnessClasses`（Raynium 渲染器另加 `clientClasses`、`nativeStageRelease`）与 `writeLaunchSpec`，随后在隔离会话目录写出 `<game>/config/raynium.json` 并直接启动 `KnotClient` JVM。通过每场游戏目录里的 Windows 目录联接直接打开配置的存档，由 Minecraft 持有会话锁。选项、日志与采样文件按场隔离，游戏保存和场景命令会写回原存档。运行结束后脚本移除联接。Raynium 运行使用 Release/MT。默认关闭 validation、Tracy 与 JFR，使用双后端接管或原版 Vulkan 参考；`renderer=vanilla` 要求 `backend=vulkan` 且仅挂载 `raynium-harness`。等待配置的 `playerMode`（默认 `spectator`）及实际帧后预热，按路线插值移动，完成后正常关闭游戏。
+`tools/benchmark.py` 先准备每场独立的游戏目录、选项及会话配置，再单次调用 Gradle 执行 `harnessClasses` 和 `writeLaunchSpec`。Raynium 场次在准备时写入核心配置，构建时另执行 `classes`、`clientClasses` 和 `nativeStageRelease`，使用 Release/MT。脚本随后直接启动游戏 JVM，通过 Windows 目录联接打开原存档，由 Minecraft 持有会话锁。游戏保存和场景命令会写回原存档，结束后脚本移除联接。`renderer=vanilla` 要求 `backend=vulkan`。各场均关闭驱动校验，Tracy 和 JFR 的脚本默认值均为关闭。游戏等待指定的 `playerMode`（默认 `spectator`）及实际帧后预热，再沿路线移动。
+
+先按本机实际存档与选项文件调整示例配置。`benchmark.example.json` 显式开启了 JFR，下列主采样命令覆盖该设置。
 
 ```powershell
 python tools/benchmark.py --config tools/benchmark.example.json --check
-python tools/benchmark.py --config tools/benchmark.example.json
+python tools/benchmark.py --config tools/benchmark.example.json --no-profiler --no-jfr
 python tools/benchmark.py --config tools/benchmark.example.json --profiler --tracy-capture C:/tools/tracy-capture.exe --jfr
 ```
 
 配置相对路径以配置文件目录为基准；`world` 指向含 `level.dat` 的源存档。`profilerEnabled` 或 `--profiler` 开启独立诊断运行（构建阶段传递 `-Praynium.build.profiler=true`），才要求匹配版本的 `tracyCapture` 并等待采集器连接。`jfrEnabled` 或 `--jfr` 开启 JVM profile JFR（由 Python 直接附加 `-XX:StartFlightRecording=...`）；任一诊断开关开启时 summary 标记为 diagnostic。`--no-profiler --no-jfr` 可覆盖配置中的诊断开关，适用于主采样。
-默认视距 32、模拟距离 8、窗口 1280×720、预热 20 秒；`optionsFile` 的视距、窗口尺寸及垂直同步由配置覆盖。`terrainSubmission` 默认 `auto`。`route` 包含秒数、位置和朝向；`commands`、`screen` 和 `oit` 描述测试场景。`playerMode` 默认为 `spectator`，也可选择 `creative` 或 `survival`；GUI 人物预览可使用 `survival`，避免旁观角色的隐藏模型语义。
+默认视距 32、模拟距离 8、窗口 1280×720、预热 20 秒。脚本用场次配置覆盖 `optionsFile` 中的视距、模拟距离和窗口尺寸，并固定关闭垂直同步，将 `maxFps` 设为 260。`terrainSubmission` 默认 `auto`。`route` 包含秒数、位置和朝向；`commands`、`screen` 和 `oit` 描述测试场景。`playerMode` 默认为 `spectator`，也可选择 `creative` 或 `survival`；GUI 人物预览可使用 `survival`，避免旁观角色的隐藏模型语义。
 
-`tools/validation/create_benchmark_scenes.py --world <存档> --options <选项文件> --output <构建目录>` 生成实体密集、粒子与透明密集、GUI/画中画的三种 renderer 配置。请使用测试专用存档，重复布景会清理平台上的方块以及已加载且带有 `raynium_bench` 标签的实体。正式输入使用 1920×1080、32 区块、60 秒预热和 240 秒路线。`--smoke` 将预热与路线缩短到 2/8 秒，仅用于检查驱动和场景，不能作为性能验收结果。
+`tools/validation/create_benchmark_scenes.py --world <存档> --options <选项文件> --output <构建目录>` 为实体密集、粒子与透明密集、GUI/画中画三个场景各生成原版 Vulkan、Raynium Vulkan、Raynium D3D12 三份配置，共九份。请使用测试专用存档，重复布景会清理平台上的方块以及已加载且带有 `raynium_bench` 标签的实体。正式输入使用 1920×1080、32 区块、60 秒预热和 240 秒路线。`--smoke` 将预热与路线缩短到 2/8 秒，仅用于检查驱动和场景，不能作为性能验收结果。
 
 产物位于 `outputDir` 的独立时间目录，包含配置、构建/游戏日志、`client-result.json`、`summary.json`、`frames.csv` 与 `gpu.csv`；native 运行另保存 payload 清单，诊断按开关保存 `session.tracy`/`session.jfr`。脚本检查路线完成和资源关闭；诊断额外检查采集器退出和文件保存。
 `frames.csv` 的 native 指标按本世界帧的实际批次汇总，包括上传字节、驻留几何记录与绘制、即时绘制和绑定数。即时绘制含 GUI 和后处理；独立的旧 GUI 计数列保留为零。原版缺少的 native 指标为 -1。`javaPrepareNs` 计量提交前封存瞬态内存的时间，`nativeCallNs` 计量 Java 进入命令带提交到该方法返回的时间。`nativeSyncWaitNs` 汇总同一测量帧内显式等待和轮询 `rn_wait_submit` 的墙钟时间，单位为纳秒。原版帧记为 -1。`renderWallNs` 涵盖整帧渲染。几何池容量和 Windows 进程显存分别采样。
 客户端按实际样本分配每列最多 4096 行的数组块，在路线配置的采样容量内记录测量区间，结束后写文件及计算最近秩 p50/p95/p99。`clientFrameInterval` 包括两次帧入口之间的客户端工作，`renderWall` 是 `renderFrame` 的 CPU 侧墙钟时间；它包含等待，不等于线程忙碌时间。Windows 线程 CPU 计数粒度较粗，只报告总量并保留原始列。native 另返回槽等待、资源准备、RDG RunFrame 和呈现时间；RDG RunFrame 包含建图、准备、录制及提交，不与参考 renderer 的不同职责阶段直接等同。
-GPU 样本均在完成后读取：native 按批测量并在上屏边界汇总，参考使用原版 `TimerQuery` 并保留实际样本数量，不重复其滑动平均值。进程内存由 Windows 进程计数器轮询，summary 保存峰值工作集、提交量和采样私有内存；GPU Process Memory 计数器按客户端 PID 汇总适配器的专用、共享和提交量采样峰值，同时保存有效样本数；不可用时记录原因，不用零代替。它们是操作系统进程计数，与 native 几何池预留/已分配容量分别报告。客户端保存区间分配量及 GC 次数/时间。普通游戏帧不开启这些测量。
+Raynium 按提交序号将批次计时归入录制该批的 Java 帧，所有批次都返回有效计时后才记入该帧的 GPU 样本。原版参考使用 `TimerQuery` 的已完成结果，并保留实际样本数量。进程内存由 Windows 进程计数器轮询，summary 保存峰值工作集、提交量和采样私有内存；GPU Process Memory 计数器按客户端 PID 汇总适配器的专用、共享和提交量采样峰值，同时保存有效样本数；不可用时记录原因，不用零代替。它们是操作系统进程计数，与 native 几何池预留/已分配容量分别报告。客户端保存区间分配量及 GC 次数/时间。普通游戏帧不开启这些测量。
 
 ### 真实跑图环境预设
 
@@ -165,7 +169,7 @@ GPU 样本均在完成后读取：native 按批测量并在上屏边界汇总，
 
 ## Tracy 与整段客户端采样
 
-通过 `--args="--tracy"` 显式传入原版 `--tracy`，启用 Java Tracy 及图像采集；原版 `--tracyNoImages` 仍关闭图像请求。接管模式用 native 缩略图读回，保留原版帧延迟，最多一个在途图像。`validate_visual.py --tracy-images` 可运行同一路径。该选项用于图像诊断，不用于关闭 profiler 的主性能采样。
+通过 `--args="--tracy"` 传入原版 `--tracy`，启用 Java Tracy 及图像采集。`--tracyNoImages` 可关闭图像请求。`TracyFrameCapture` 将画面缩小到离屏纹理，用 `copyTextureToBuffer` 读回，复制完成后映射缓冲并向 Tracy 提交像素和帧延迟。参考后端和 Raynium 共用这段游戏代码，最多保留一个在途图像。`validate_visual.py --tracy-images` 可运行同一路径。该选项用于图像诊断，不用于关闭 profiler 的主性能采样。
 
 `-Praynium.build.profiler=true` 是唯一保留的 Native 构建变体开关，启用 native Tracy 标记（默认 `false`）；对应 `tools/native.py configure --profiler` 和 CMake `RAYNIUM_ENABLE_PROFILER`。开关计入构建身份，清单记录 `profilerEnabled`，开启时 stage 包含 Tracy 许可证。
 先用 `python external/RadRay/tools/fetch_third_party.py restore --only tracy` 准备源码，再运行
@@ -183,12 +187,12 @@ Tracy 源码或配方升级后，准备命令加 `--clean` 清理并重建所选
 ```powershell
 tracy-capture.exe -a 127.0.0.1 -o C:/captures/session.tracy
 # 另一个终端：
-.\gradlew.bat runClientNativeRelease -Praynium.build.profiler=true -Draynium.rhi.validation=false
+.\gradlew.bat runClientNativeRelease '-Praynium.build.profiler=true' '-Draynium.rhi.validation=false'
 ```
 
 所有 benchmark 客户端关闭 Java 断言（`-da`）和 LWJGL 的参数与函数指针检查。启动器在子进程环境中禁用 Vulkan 附加层，采样结束后核对客户端记录的 Java Tracy、JFR、LWJGL 和断言状态，以及日志中的实际后端。Raynium 须报告 RHI 和驱动校验均已关闭。
 Release 默认关闭 RadRay RHI wrapper 检查；`rhiValidation=false` 关闭 native 驱动诊断。
-ABI 参数检查及资源寿命保护始终执行。benchmark 将每个测量批次按提交序号归入录制它的 Java 帧，全部批次都返回有效计时时才记入该帧的 GPU 样本。
+ABI 参数检查及资源寿命保护始终执行。
 该数值覆盖 native 命令的 timestamp 区间，在回收槽时发布，不是 MC 全帧 GPU 耗时，也不是发布时那一帧的即时耗时。
 
 `Raynium.Frame.AcquireNext` 标出取得交换链图像的调用，`Raynium.Frame.Present` 覆盖提交呈现与结果检查。测量批次的统计工作记为 `Raynium.Benchmark.BatchMetrics`，可通过首末标记定位正式路线。
@@ -219,7 +223,7 @@ JFR 包含 JVM 执行采样、GC 等事件；`dev.raynium.TerrainFrame` 按实�
 
 该任务依赖普通 Loom `jar`（只打包 `src/main` 与 `src/client`，不含 `src/harness`）与独立的 `nativeStageRelease` 链。MC 26.3 当前使用未混淆的 `net.fabricmc.fabric-loom`，其 Java 产物就是本工程 `jar`；没有调用不存在的 `remapJar`。分发产物为 `build/libs/raynium-<version>-windows-x86_64.jar`，普通 Java JAR 保留。
 
-打包与校验（`tools/native.py` 的 `package` / `verify`）拒绝脏 RadRay、非锁定提交、非 Release payload、开启 profiler 的快照（`profilerEnabled != false`）、重复/保留路径和已签名输入 JAR；检查 `fabric.mod.json`、payload 哈希与许可证后才发布最终文件。
+打包时，`tools/native.py package` 要求 stage 清单中的 RadRay 版本匹配锁文件，拒绝输入 JAR 的签名、重复条目和预留的 native 路径。它先写临时 JAR，再运行与 `verify` 相同的成品校验，成功后才发布。成品校验检查模组 ID、着色器包、重复条目、清单中的干净 Release/MT 和关闭 profiler 标志，以及所列 DLL 与许可证的长度和哈希。锁文件比对在打包阶段执行。
 包内容、许可证位置和调试文件边界见[构建身份与 payload](../architecture/interop.md#构建身份与-payload)。
 
 单独检查已经生成的包，不触发构建；与 `packageNativeMod` 联合执行时，校验排在打包之后：
@@ -228,19 +232,19 @@ JFR 包含 JVM 执行采样、GC 等事件；`dev.raynium.TerrainFrame` 按实�
 .\gradlew.bat verifyNativePackage
 ```
 
-将最终的 `-windows-x86_64.jar` 放入客户端 mods 目录，并给启动器的游戏 JVM 设置 native access 参数。无开发目录参数时，loader 自动解包并加载内置 DLL。Raynium 自身分发许可证仍未选择；当前收集的是 RadRay 与 native 依赖许可证。
+将最终的 `-windows-x86_64.jar` 放入客户端 mods 目录，并给启动器的游戏 JVM 设置 `--enable-native-access=ALL-UNNAMED`。无开发目录参数时，loader 自动解包并加载内置 DLL。Raynium 自身分发许可证仍未选择；当前收集的是 RadRay 与 native 依赖许可证。
 Raynium 自身无需动态 VC++ CRT 或额外 mimalloc DLL；系统与显卡驱动依赖仍由运行环境提供。
 
 ## Java 与 RHI 测试
 
-测试统一放在 `src/test/java/`，使用 `gradle.properties` 固定版本的 JUnit Jupiter 与 JUnit Platform launcher。Loom 为 `test` 源码集提供 `client` 与 `harness` 输出及依赖。测试入口是标准 Gradle `Test` 任务。
+Java 测试位于 `src/test/java/`，通过 Gradle `Test` 任务使用 JUnit Jupiter 和 JUnit Platform launcher，版本由 `gradle.properties` 固定。测试类路径包含 `client` 与 `harness`。Python 工具测试位于 `tools/tests/`，可单独运行 `python -m unittest discover -s tools/tests`。C++ 测试位于 `native/tests/`。
 
 在 Raynium 根目录运行：
 
 ```powershell
 .\gradlew.bat test
 .\gradlew.bat nativeTestDebug
-.\gradlew.bat nativeTestDebug -Draynium.rhi.validation=true
+.\gradlew.bat nativeTestDebug '-Draynium.rhi.validation=true'
 .\gradlew.bat nativeTestRelease
 .\gradlew.bat nativeTestDebug --tests "*.NativeRuntimeTest"
 ```
@@ -253,7 +257,7 @@ Raynium 自身无需动态 VC++ CRT 或额外 mimalloc DLL；系统与显卡驱�
 | `NativeAbiTest`、`NativeRuntimeTest`、`NativeShaderPackTest` | ABI 拒绝路径、设备与线程所有权、双后端包和退出顺序。 |
 | `NativeCommandTapeTest` | 离屏与上屏提交隔离、顺序复制、映射刷新、瞬态切片的缓存原子对齐、深度行距、时间戳、首次部分访问与保活。 |
 | `NativeRenderPearlTest` | 从游戏前端编译管线并绘制，验证线程交接、Push Constant、实际颜色和材质，以及超过复用池上限的上传缓冲在提交后立即关闭时的像素结果。 |
-| `NativeWorldFeaturesTest` | 双后端检查用户网格注册、同页实例绘制、粒子与阴影四边形、传输与实例流的独立偏移，以及共享实例切片的像素结果。 |
+| `NativeWorldFeaturesTest` | 双后端用例包含用户网格注册、同页实例绘制、传输与实例流偏移及像素断言。综合绘制用例在像素检查前要求实体、粒子和阴影均有实例化变体。默认包可提供的变体见 [Shader pack](../architecture/shader-pack.md)。 |
 | `NativeTextureTest`、`NativeCaptureTest`、`NativeSwapchainTest` | 子资源、捕获格式及缓冲容量、尺寸变更与窗口状态。 |
 | `NativeWireframeTest` | direct/indirect 实际像素、面掩码、双槽退役及跨页几何。 |
 | `NativeTerrainFadeTest` | 在 D3D12 和 Vulkan 上读回三层地形颜色及 OIT 各阶段附件，比较淡入中点、完成、关闭、近处豁免与时钟边界的像素。 |
@@ -271,7 +275,7 @@ cmake --build build/native/windows-x64-msvc-mtd/Debug --target test_raynium_terr
 ctest --test-dir build/native/windows-x64-msvc-mtd/Debug --output-on-failure
 ```
 
-该目标覆盖网格分组、预分析布局、显式面掩码、线框索引与跨面候选缓存，使用 CPU 设备替身检查内建网格、用户句柄复用、稳态缓冲晋升和 Direct/Indirect 对同一参数表的提交。缓冲注册表用例覆盖持久上传导入及映射刷新失败。
+该目标覆盖网格分组、预分析布局、显式面掩码、线框索引与跨面候选缓存，使用 CPU 设备替身检查内建网格、用户句柄复用、稳态缓冲晋升和 Direct/Indirect 对同一参数表的提交。缓冲池用例检查持久上传导入和映射刷新失败。`SurfaceSubmissionDeathTest` 检查健康设备的队列提交失败时会终止进程。
 
 通用 runtime 测试位于 RadRay 的 `modules/runtime/tests/`，由 `test_radray_runtime` / GTest 注册，
 直接链接 `RadRay::runtime`，不包含 MC bridge。在已准备依赖并完成 configure 的 RadRay checkout 执行：

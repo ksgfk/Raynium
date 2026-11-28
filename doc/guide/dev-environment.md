@@ -15,7 +15,7 @@
 | Fabric Loom | 1.19.4 |
 | Gradle Wrapper | 9.9.2 |
 
-版本集中在 `gradle.properties`；Gradle 版本和分发包 SHA-256 在 `gradle/wrapper/gradle-wrapper.properties`。使用仓库内的 Wrapper，无须全局安装 Gradle。
+MC 和 Fabric 组件版本见 `gradle.properties`，Java toolchain 和编译目标见 `build.gradle`，Gradle 版本及分发包 SHA-256 见 `gradle/wrapper/gradle-wrapper.properties`。使用仓库内的 Wrapper 即可。
 
 安装本机 JDK 25，并为 Gradle JVM 与项目 SDK 选择它。IDEA 的 JDK 路径与运行配置是本机状态，不在公共文档写死。
 
@@ -23,11 +23,13 @@
 
 仓库不提交本机代理、Python 路径或游戏目录配置。按需将根目录 [local.properties.example](../../local.properties.example) 复制为被 Git 忽略的 `local.properties`：
 
-- `proxy`：可选 HTTP(S) 代理 URL（如 `http://127.0.0.1:10808`），由 `settings.gradle` 在 Gradle 启动前（当 JVM 未显式传入 `-Dhttp.proxyHost` 时）与 `tools/fetch_radray.py` 读取；留空则直连。
+- `proxy` 可填带主机与端口的 HTTP(S) 代理 URL。`settings.gradle` 在插件解析阶段读取它，在 JVM 尚未设置 `http.proxyHost` 时为 HTTP 和 HTTPS 写入主机与端口。留空时沿用 Gradle/JVM 原有设置。`fetch_radray.py` 另有命令行和环境变量回退顺序，见[构建与测试](build-test.md#显式准备依赖)。
 - `python`：Python 可执行文件路径，默认 `python`。
 - `parallel`：CMake/Ninja 并行度，默认 `8`。
 - `radraySourceDir`：可选本地 RadRay 源码覆盖路径；留空时使用锁定检出 `external/RadRay`。
 - `gameRunDir`：开发客户端游戏目录，默认 `run`。
+
+对于 `python`、`parallel`、`radraySourceDir` 和 `gameRunDir`，Gradle 优先读取同名的非空项目属性（例如 `-Pparallel=4`），其次读取本机文件，最后使用默认值。
 
 根目录 [.clang-format](../../.clang-format) 同时覆盖 C++ 与 Java 格式化规则，使用方式见[编码与工程规范](conventions.md#代码格式化)。
 

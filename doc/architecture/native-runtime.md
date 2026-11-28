@@ -1,18 +1,28 @@
 > - 适用: 修改 renderer、命令解码、帧槽、呈现与读回
 > - 权威: 本文维护 Raynium 对 RadRay runtime 的消费与所有权边界
-> - 锚点: `native/src/render_channel.cpp`, `native/src/renderer_frontend.cpp`, `native/src/batch_envelope.cpp`, `native/src/renderer.cpp`, `native/src/command_tape.cpp`, `native/src/modular_frame_pipeline.cpp`, `native/src/immediate_pass.cpp`, `native/src/terrain_feature.cpp`, `native/src/static_geometry_registry.cpp`, `native/src/world_features.cpp`, `native/radray.lock.json`
+> - 锚点: `native/src/bridge.cpp`, `native/src/render_channel.cpp`, `native/src/renderer_frontend.cpp`, `native/src/batch_envelope.cpp`, `native/src/renderer.cpp`, `native/src/surface_submission.cpp`, `native/src/exception.cpp`, `native/src/command_tape.cpp`, `native/src/modular_frame_pipeline.cpp`, `native/src/immediate_pass.cpp`, `native/src/terrain_feature.cpp`, `native/src/static_geometry_registry.cpp`, `native/src/world_features.cpp`, `native/radray.lock.json`
 
 # Native runtime
 
 ## 设备与所有权
 
-每个 runtime 拥有一个 RHI 设备和 Direct 队列。前端线程管理不透明资源句柄，直接创建纹理、缓冲、管线和逻辑时间戳槽。初始上传与待移除网格随下一个批次交给 Raynium Render 线程。该线程创建和销毁 Environment、设备与交换链。几何页分配、窗口操作与排空在 worker 上同步执行。前端在等待期间派发 Win32 同步窗口消息。启用 Tracy 时，前端在线程创建前启动 profiler，worker 进入环境创建后登记名称 `Raynium Render`。前端等待 worker 退出后关闭 profiler，随后可卸载 DLL。当前依赖版本见锁文件。[互操作与加载](interop.md)
+每个已加载的 bridge 同时只允许一个 Environment，归调用 `rn_init_env` 的前端线程所有。每个环境最多创建一个活动 runtime，每个 runtime 最多创建一个活动 renderer，每个 renderer 同时只接纳一个交换链。runtime 拥有 RHI 设备和 Direct 队列。前端直接创建纹理、缓冲、管线和逻辑时间戳槽。设备资源的待上传数据随下一批提交，待移除的模型网格由下一批或下一次模型网格注册处理。
+
+`Raynium Render` 工作线程创建和销毁 Environment、设备及交换链，处理几何页分配、交换链操作与排空。前端在等待期间派发 Win32 同步窗口消息。启用 Tracy 时，前端在线程创建前启动 profiler，等待线程退出后关闭 profiler，随后可卸载 DLL。当前依赖版本见锁文件。[互操作与加载](interop.md)
 
 ## 帧槽、上传与交换链
 
-`rn_submit_frame` 接收命令、传输和实例字节、映射脏区间及地形视图。前端在提交入口仅做 $O(1)$ 顶层描述符与数组边界检查、映射脏区间处理及截图/查询登记，不预扫命令流与视图元素；随后将批次写入交替使用的两个带 PMR 的 `BatchEnvelope`（非借用路径按 8 字节对齐复制命令与上传字节），通过 `RenderChannel` 的原子指针入队并分配序号。worker 取走指针即释放队列容量，并仅在存在前端等待者时触发 `progress` 事件。冷路径通过独立的同步屏障在已入队的批次之后执行。worker 在 `BeginFrame` 之后由 `TapeCompiler` 与 `TerrainResidency` 单遍校验并编译命令流、视图以及截图、映射读回和时间戳资源；任一阶段在提交前失败时通过 `CancelUnsubmitted` 归还未提交的截图暂存缓冲，成功后才申请交换链图像。`ModularFramePipeline` 向同一个 RDG 注册初始上传、光栅与拷贝、查询解析及可选上屏。获取成功的帧通过 `ImportBackBuffer` 一次导入；上屏绘制复用该句柄，Vulkan 在颜色附件输出阶段等待 acquire。SubmitFrame 向图生成的提交计划追加本槽完成 fence，仅在队列成功提交后发布序号。离屏批次同样提交并取得序号。交换链需要重建时允许离屏工作完成。worker 在 RunFrame 完成并清除输入指针后发布消费和提交水位，再进行呈现。表面丢失或重建失败时保留 RHI 交换链，跳过该表面的获取和呈现。下一次有效 resize 在同一对象上调用 Recreate，成功后恢复呈现。
+`rn_submit_frame` 接收命令、传输和实例字节、映射脏区间及地形视图。前端等到通道有空位才复用两个 `BatchEnvelope` 中的一个。`Freeze` 检查批次和每个视图的数组边界，复制视图头与登记数组。借用模式保留负载指针，复制模式还遍历网格和索引更新并复制其负载。前端处理脏区间、登记截图和查询，为批次分配序号后放入 `RenderChannel` 的单槽队列。工作线程取走指针即腾出队列容量，只有存在前端等待者时才触发进度事件。同步屏障在已入队的批次之后执行。
 
-两个帧槽轮换。槽回收前等待实际完成值，已提交资源由槽或注册表的在途引用持有。前端直接查询硬件 Fence，完成水位以已提交序号及首个待发布读回批次的前一序号为上界。阻塞等待先等目标批提交，再以最多 2 ms 的时间片等待硬件并派发同步窗口消息。查询或映射读回发布后才解除该批的水位上限。worker 仅在有待采集的查询或映射读回时定时唤醒。关闭等待按有限时间片复查设备丢失状态。健康设备内部提交违约触发 fail-fast，丢失态由适配层传播。
+工作线程在 `BeginFrame` 后准备地形视图，由 `TapeCompiler` 顺序解码命令，校验截图、映射读回和时间戳。编译成功后才向可呈现的交换链获取图像。提交前失败会取消该批登记的截图。`ModularFramePipeline` 向同一个 RDG 注册初始上传、光栅与拷贝、查询解析及可选上屏。获取成功的帧通过 `ImportBackBuffer` 一次导入，上屏绘制复用该句柄。Vulkan 在颜色附件输出阶段等待 acquire。队列提交包含本槽的完成 Fence，离屏批次同样取得提交序号。工作线程在 `RunFrame` 成功并清除输入指针后发布消费和提交水位，再进行呈现。表面丢失时可继续提交离屏工作，下一次有效 resize 在同一交换链上调用 `Recreate`。
+
+两个帧槽轮换。槽回收前等待实际完成值，已提交资源由槽或注册表的在途引用持有。前端直接查询硬件 Fence，完成水位以已提交序号及首个待发布读回批次的前一序号为上界。阻塞等待先等目标批提交，再以最多 2 ms 的时间片等待硬件并派发同步窗口消息。查询或映射读回发布后才解除该批的水位上限。工作线程仅在有待采集的查询或映射读回时定时唤醒。关闭等待按有限时间片复查设备丢失状态。
+
+## 失败处理
+
+- C ABI 的状态入口返回 `RN_STATUS_OK` 或 `RN_STATUS_FAILED`。参数、所有者或线程不合要求时可直接拒绝调用。诊断详情由 native 日志提供。
+- 提交前端发现无效帧负载，或工作线程在执行批次时发现无效命令或视图，会将 renderer 置于终态。已入队的批次可能在后续等待或排空时才报告错误。设备丢失另置 `RN_SUBMIT_FLAG_DEVICE_LOST`。Java 释放获取状态和在途引用，仍可按所有权顺序关闭资源。
+- 窗口暂不可用、交换链需要重建及表面丢失有各自的呈现结果。设备健康时可重新配置表面。若健康设备的 `RunFrame` 提交失败、交换链报告获取成功却没有帧，或 C++ 异常逃逸到 ABI 包装或工作线程边界，native 记录错误并终止进程。
 
 ## 即时绘制与地形
 
